@@ -1,0 +1,23 @@
+[package]
+name = "r2-rocker-tg"
+version = "0.1.0"
+edition = "2021"
+description = "Trust-group keygen / verify / inspect utility for the r2-rocker project"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[[bin]]
+name = "r2-rocker-tg"
+path = "src/main.rs"
+
+[dependencies]
+clap          = { version = "4.5", features = ["derive"] }
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+rand          = "0.8"
+ciborium      = "0.2"
+sha2          = "0.10"
+anyhow        = "1.0"
+
+[profile.release]
+strip = true
+lto   = true

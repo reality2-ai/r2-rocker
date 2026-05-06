@@ -1,0 +1,31 @@
+[package]
+name        = "r2-rocker-firmware"
+version     = "0.1.0"
+edition     = "2021"
+description = "r2-rocker sensor firmware (ESP32-S3-DevKitC-1)"
+license     = "MIT OR Apache-2.0"
+publish     = false
+
+[[bin]]
+name    = "r2-rocker-firmware"
+path    = "src/main.rs"
+harness = false
+
+[profile.release]
+opt-level     = "s"
+lto           = "fat"
+codegen-units = 1
+debug         = false
+strip         = true
+
+[profile.dev]
+opt-level = "z"
+debug     = true
+
+[dependencies]
+log          = "0.4"
+anyhow       = "1"
+esp-idf-svc  = { version = "0.51", default-features = false, features = ["binstart", "std"] }
+
+[build-dependencies]
+embuild = { version = "0.32", features = ["espidf"] }

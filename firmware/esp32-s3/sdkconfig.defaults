@@ -1,0 +1,40 @@
+# sdkconfig.defaults — applied on top of ESP-IDF defaults at build time.
+# Tuned for the ESP32-S3-DevKitC-1-N8R8 reference hardware
+# (per HARDWARE-WIRING.md §1).
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# Generous main-task stack for higher-level Rust code (logging,
+# allocations, future BLE/WiFi/SPI work).
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16000
+
+# DevKitC-1-N8R8: 8 MB flash. Change to 32MB for N32R16V variant.
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+
+# Octal PSRAM, present on N8R8 and N32R16V variants.
+# Comment out if you have a no-PSRAM module.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# Watchdog defaults are 5 s on the main task — fine for the smoke test.
+# Phase 1+ will tighten this with explicit kicks per SPEC-R2-ROCKER-SENSOR §2.3.
+
+# ─── Console routing ──────────────────────────────────────────────────────
+# Send `log::info!` output to the ESP32-S3's native USB-Serial-JTAG so the
+# same USB-OTG cable used for flashing also carries the UART monitor. The
+# DevKitC-1 has two USB ports — UART (CP2102) and native USB-OTG; this
+# setting makes the firmware print to whichever one is connected.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# ─── OTA / partition table ────────────────────────────────────────────────
+# Phase 0.5 uses ESP-IDF's default single-app partition table. The
+# OTA-ready two-slot layout is defined in `partitions.csv` and will be
+# wired in via [package.metadata.esp-idf-sys] extra_components when
+# OTA is implemented in Phase 9 — that's the supported path with
+# esp-idf-sys; setting `CONFIG_PARTITION_TABLE_CUSTOM_FILENAME` alone
+# does not survive the auto-generated build directory.
+#
+# CONFIG_PARTITION_TABLE_CUSTOM=y
+# CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+# CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
