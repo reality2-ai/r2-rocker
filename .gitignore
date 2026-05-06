@@ -57,10 +57,9 @@ dependencies.lock
 **/.embuild/
 
 # ──── External / vendor reference material ────────────────────────────
-# Analog Devices reference project — cloned into docs/ for offline reading,
-# not part of r2-rocker's source. Re-clone from upstream if needed:
-#   git clone https://github.com/analogdevicesinc/EVAL-ADICUP360.git
-docs/EVAL-ADICUP360/
+# Vendored snapshot directories under docs/ retain only their files,
+# not their original .git history. PROVENANCE.md inside each documents
+# the upstream URL.
 
 # ──── Editor / OS cruft ───────────────────────────────────────────────
 .vscode/
