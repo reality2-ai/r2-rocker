@@ -115,6 +115,9 @@
   .bs-line.red { color: #f87171; }
 
   /* ── Main layout ── */
+  /* `display: grid/block` here would beat the implicit display:none from
+     the [hidden] attribute used by setView() to switch tabs — restore it. */
+  [hidden] { display: none !important; }
   .main {
     display: grid;
     grid-template-columns: 1fr 280px;
@@ -481,7 +484,7 @@
 <div class="bootstrap-panel" id="bootstrap-panel">
   <div class="bootstrap-log-card">
     <div class="bootstrap-log-header">
-      <h2>Bootstrap Log</h2>
+      <h2>Connection Log</h2>
       <button class="bootstrap-close" onclick="closeBootstrapPanel()">&times;</button>
     </div>
     <div class="bootstrap-log-entries" id="bootstrap-log"></div>
@@ -618,9 +621,17 @@ function updateSensorList() {
   const el = document.getElementById('sensorList');
   document.getElementById('sensorCount').textContent = sensors.size;
   if (sensors.size === 0) { el.textContent = 'None'; return; }
+  // Sidebar status dot reuses the same tg-* colour/animation map as the
+  // Devices-view virtual LED, so the dot here mirrors the physical RGB
+  // LED on the sensor as a quick visual reference. Until Phase 5L lands
+  // a real fsmState (`r2.sensor.status`), ledClassFor() returns "" and
+  // the dot stays the inert grey placeholder.
   el.innerHTML = [...sensors.values()].map(s => {
     const label = s.deviceName ? `${s.deviceName} <span style="color:#475569;">(${s.key})</span>` : s.key;
-    return `<div style="padding:4px 0; border-bottom:1px solid #1e293b; color:#94a3b8;">\u25CF ${label}</div>`;
+    const led = ledClassFor(s);
+    return `<div style="display:flex; align-items:center; gap:8px; padding:4px 0; border-bottom:1px solid #1e293b; color:#94a3b8;">`
+         + `<span class="virt-led ${led}" style="width:10px; height:10px;"></span>`
+         + `<span>${label}</span></div>`;
   }).join('');
 }
 
@@ -646,7 +657,15 @@ function addSensorLog(sensor, text) {
 function startBootstrap() {
   const btn = document.getElementById('btn-connect');
   btn.disabled = true;
-  btn.textContent = 'Scanning...';
+  btn.textContent = 'Scanning…';
+
+  // Safety net — the controller's bootstrap loop runs continuously and
+  // only emits `Done` when every known sensor is simultaneously Active.
+  // If any sensor never reports presence the button would otherwise be
+  // stuck on "Scanning…" forever. Reset after 60 s no matter what; the
+  // log panel keeps showing live progress in the background.
+  if (window.__connectButtonTimeout) clearTimeout(window.__connectButtonTimeout);
+  window.__connectButtonTimeout = setTimeout(resetConnectButton, 60_000);
 
   const panel = document.getElementById('bootstrap-panel');
   panel.classList.add('visible');
@@ -655,19 +674,16 @@ function startBootstrap() {
   fetch('/api/bootstrap', { method: 'POST' })
     .then(r => {
       if (r.status === 409) {
-        addBootstrapLine('Bootstrap already in progress', 'amber');
-        btn.disabled = false;
-        btn.textContent = '\uD83D\uDD0D Connect Sensors';
+        addBootstrapLine('Already connecting…', 'amber');
+        resetConnectButton();
       } else if (!r.ok) {
         r.text().then(t => addBootstrapLine('Error: ' + t, 'red'));
-        btn.disabled = false;
-        btn.textContent = '\uD83D\uDD0D Connect Sensors';
+        resetConnectButton();
       }
     })
     .catch(e => {
       addBootstrapLine('Fetch error: ' + e.message, 'red');
-      btn.disabled = false;
-      btn.textContent = '\uD83D\uDD0D Connect Sensors';
+      resetConnectButton();
     });
 }
 
@@ -683,7 +699,7 @@ function handleBootstrapEvent(msg) {
   if (evt === null || 'Reset' in msg.event) {
     document.getElementById('bootstrap-log').innerHTML = '';
     document.getElementById('bootstrap-panel').classList.add('visible');
-    addBootstrapLine('↺ Restarting bootstrap…', 'amber');
+    addBootstrapLine('↺ Restarting…', 'amber');
     // Destroy all sensor cards and chart instances
     sensors.forEach(s => { try { s.chart.destroy(); } catch(e) {} });
     sensors.clear();
@@ -703,20 +719,31 @@ function handleBootstrapEvent(msg) {
       break;
     case 'SensorConnected':
       addBootstrapLine('\u2713 ' + evt.data.name + ' connected (' + evt.data.ip + ')', 'green');
+      // Per-sensor success \u2014 reset the button now rather than waiting
+      // for `Done`, which only fires when *all* known sensors are
+      // simultaneously Active (a state the loop may never reach if any
+      // sensor drops out, and never re-fires after the first time).
+      resetConnectButton();
       break;
-    case 'Done': {
-      addBootstrapLine('Bootstrap complete \u2014 ' + evt.data.count + ' sensor(s) connected', 'green');
-      const btn = document.getElementById('btn-connect');
-      btn.disabled = false;
-      btn.textContent = '\uD83D\uDD0D Connect Sensors';
+    case 'Done':
+      addBootstrapLine(evt.data.count + ' sensor(s) connected', 'green');
+      resetConnectButton();
       break;
-    }
     case 'Error':
       addBootstrapLine('ERROR: ' + evt.data, 'red');
-      const btn2 = document.getElementById('btn-connect');
-      btn2.disabled = false;
-      btn2.textContent = '\uD83D\uDD0D Connect Sensors';
+      resetConnectButton();
       break;
+  }
+}
+
+function resetConnectButton() {
+  const btn = document.getElementById('btn-connect');
+  if (!btn) return;
+  btn.disabled = false;
+  btn.textContent = '\uD83D\uDD0D Connect Sensors';
+  if (window.__connectButtonTimeout) {
+    clearTimeout(window.__connectButtonTimeout);
+    window.__connectButtonTimeout = null;
   }
 }
 
@@ -1030,12 +1057,13 @@ function handleEvent(msg) {
       return;
     case 'r2.sensor.status':
       if (sensor && msg.payload) {
-        // Capture FSM state for the virtual LED (lights up once Phase 5L
-        // sends real state values).
+        // Capture FSM state for the virtual LED + sidebar status dot
+        // (both light up once Phase 5L sends real state values).
         if (msg.payload.state != null) sensor.fsmState = msg.payload.state;
         sensor.lastSeen = Date.now();
         sensor.online = true;
         renderDevicesIfVisible();
+        updateSensorList(); // keep sidebar dot's colour in sync with fsmState
       }
       addLog(msg);
       return;
@@ -1290,7 +1318,6 @@ function renderDevices() {
     return `
       <div class="device-card ${status}" data-key="${escapeAttr(s.key)}">
         <div class="device-header">
-          <div class="online-dot"></div>
           <div class="virt-led ${led}" title="virtual LED${s.fsmState == null ? ' — awaiting Phase 5L FSM state' : ''}"></div>
           <div style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeText(name)}</div>
         </div>
