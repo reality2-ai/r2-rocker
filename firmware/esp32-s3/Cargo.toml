@@ -23,10 +23,15 @@ opt-level = "z"
 debug     = true
 
 [dependencies]
-log          = "0.4"
-anyhow       = "1"
-libm         = "0.2"
-esp-idf-svc  = { version = "0.51", default-features = false, features = ["binstart", "std"] }
+log           = "0.4"
+anyhow        = "1"
+libm          = "0.2"
+esp-idf-svc   = { version = "0.51", default-features = false, features = ["binstart", "std"] }
+# Per-device Ed25519 identity. Generated on first boot, persisted to NVS,
+# used to sign r2.sensor.announce so the dashboard can verify the sender
+# really holds device_pk (Phase 5a). Pin to the same version r2-core uses
+# for cross-component compat.
+ed25519-dalek = { version = "=2.1.1", default-features = false }
 
 [build-dependencies]
 embuild = { version = "0.32", features = ["espidf"] }

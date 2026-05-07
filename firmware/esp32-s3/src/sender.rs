@@ -15,8 +15,10 @@ use esp_idf_svc::sys::{esp_mac_type_t_ESP_MAC_WIFI_STA, esp_random, esp_read_mac
 use log::{info, warn};
 use std::io::Write;
 use std::net::{SocketAddr, TcpStream};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::identity::Identity;
 use crate::sim::{AccelSim, BatterySim};
 use crate::wire::{
     frame_for_tcp, CborWriter, EVT_SENSOR_ACCELERATION, EVT_SENSOR_ANNOUNCE,
@@ -46,28 +48,19 @@ pub struct Sender {
     pub hostname: String,
     accel: AccelSim,
     battery: BatterySim,
-    /// Stable per-boot pseudo-device-pk (32 bytes from esp_random — NOT
-    /// a real Ed25519 key; that arrives in Phase 5).
-    device_pk: [u8; 32],
+    /// Per-device Ed25519 identity, NVS-persisted (Phase 5a).
+    identity: Arc<Identity>,
     boot_instant: Instant,
 }
 
 impl Sender {
-    pub fn new(gateway: SocketAddr, hostname: String) -> Self {
-        let mut device_pk = [0u8; 32];
-        // SAFETY: esp_fill_random / esp_random are always callable.
-        unsafe {
-            for chunk in device_pk.chunks_exact_mut(4) {
-                let r = esp_random();
-                chunk.copy_from_slice(&r.to_le_bytes());
-            }
-        }
+    pub fn new(gateway: SocketAddr, hostname: String, identity: Arc<Identity>) -> Self {
         Self {
             gateway,
             hostname,
             accel: AccelSim::rocker_default(),
             battery: BatterySim::lipo_default(),
-            device_pk,
+            identity,
             boot_instant: Instant::now(),
         }
     }
@@ -144,30 +137,56 @@ impl Sender {
 
     fn send_announce(&self, stream: &mut TcpStream) -> Result<()> {
         // CBOR map per SPEC-R2-ROCKER-WIRE §3.1.
-        let mut payload = [0u8; 256];
+        // The signature at key 6 covers the canonical CBOR of keys 0..5.
+        // We build the body twice for byte-identical encoding: once for
+        // signing, once again as the prefix of the full payload that
+        // adds key 6 (the signature).
         let mut nonce = [0u8; 16];
         unsafe {
             for chunk in nonce.chunks_exact_mut(4) {
                 chunk.copy_from_slice(&esp_random().to_le_bytes());
             }
         }
-        let sig = [0u8; 64]; // placeholder — real Ed25519 in Phase 5
+        let device_pk = self.identity.device_pk();
+        let ts_ms = self.ts_ms() as u64;
+        let last_seq: u64 = 0; // Phase 3 will pull from NVS/SD ring tail.
 
+        let write_keys_0_to_5 = |w: &mut CborWriter, n_keys: usize| {
+            w.map(n_keys);
+            w.key(0); w.bytes(&device_pk);
+            w.key(1); w.text(&self.hostname);
+            w.key(2); w.text(FW_VER);
+            w.key(3); w.u(last_seq);
+            w.key(4); w.u(ts_ms);
+            w.key(5); w.bytes(&nonce);
+        };
+
+        // 1. Encode body (keys 0..5 only, map header = 6 entries).
+        let mut body_buf = [0u8; 256];
+        let mut bw = CborWriter::new(&mut body_buf);
+        write_keys_0_to_5(&mut bw, 6);
+        let body_len = bw.pos();
+        let body = &body_buf[..body_len];
+
+        // 2. Sign body bytes with device key.
+        let sig = self.identity.sign(body);
+
+        // 3. Encode full payload (keys 0..6, map header = 7 entries).
+        let mut payload = [0u8; 320];
         let mut w = CborWriter::new(&mut payload);
-        w.map(7);
-        w.key(0); w.bytes(&self.device_pk);
-        w.key(1); w.text(&self.hostname);
-        w.key(2); w.text(FW_VER);
-        w.key(3); w.u(0); // last_seq — Phase 3 will pull from NVS/SD
-        w.key(4); w.u(self.ts_ms() as u64);
-        w.key(5); w.bytes(&nonce);
+        write_keys_0_to_5(&mut w, 7);
         w.key(6); w.bytes(&sig);
         let used = w.pos();
 
         let mut frame = [0u8; 384];
         let n = frame_for_tcp(&mut frame, self.random_msg_id(), EVT_SENSOR_ANNOUNCE, &payload[..used]);
         stream.write_all(&frame[..n])?;
-        info!("sender: sent ANNOUNCE ({} bytes payload)", used);
+        info!(
+            "sender: sent ANNOUNCE ({} bytes payload, signed; device_pk first 8 bytes = {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}…)",
+            used,
+            device_pk[0], device_pk[1], device_pk[2], device_pk[3],
+            device_pk[4], device_pk[5], device_pk[6], device_pk[7],
+        );
         Ok(())
     }
 

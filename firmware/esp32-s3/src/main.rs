@@ -6,12 +6,13 @@
 //! up yet), but the wire shape is real — pointable at a dashboard for
 //! end-to-end testing.
 
+mod identity;
 mod sim;
 mod wire;
 mod wifi;
 mod sender;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::log::EspLogger;
@@ -41,6 +42,18 @@ fn main() -> Result<()> {
     let sysloop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
 
+    // Mint or load this device's Ed25519 identity from NVS.
+    let identity = std::sync::Arc::new(
+        identity::Identity::load_or_generate(nvs.clone())
+            .context("identity init")?,
+    );
+    info!(
+        "tg_pub_key (verify target):  {:02x}{:02x}{:02x}{:02x}…{:02x}{:02x}",
+        identity::TG_PUB_KEY[0], identity::TG_PUB_KEY[1],
+        identity::TG_PUB_KEY[2], identity::TG_PUB_KEY[3],
+        identity::TG_PUB_KEY[30], identity::TG_PUB_KEY[31],
+    );
+
     let _wifi = wifi::connect(
         peripherals.modem,
         sysloop,
@@ -63,7 +76,7 @@ fn main() -> Result<()> {
     let hostname = sender::default_hostname();
     info!("hostname: {}  →  gateway: {}", hostname, gateway);
 
-    let mut s = sender::Sender::new(gateway, hostname);
+    let mut s = sender::Sender::new(gateway, hostname, identity);
     s.run();
 }
 
