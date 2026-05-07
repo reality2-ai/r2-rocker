@@ -23,6 +23,7 @@ pub const TG_PUB_KEY: [u8; 32] = *include_bytes!("../../../trust_keys/tg_pub.bin
 
 const NVS_NS: &str = "r2-rocker";
 const NVS_KEY_DEVICE_PRIV: &str = "device_priv";
+const NVS_KEY_RBID: &str = "rbid";
 
 pub struct Identity {
     signing: SigningKey,
@@ -79,6 +80,40 @@ impl Identity {
         let sig: Signature = self.signing.sign(msg);
         sig.to_bytes()
     }
+}
+
+/// Load-or-generate a stable 8-byte RBID for R2-BEACON, persisted to NVS.
+///
+/// Required so that the dashboard's bootstrap loop, which keys its
+/// "wait for UDP presence" step on the RBID it observed during BLE
+/// scanning, can match the *post-reboot* presence packet we broadcast
+/// once WiFi comes up. Without persistence the post-reboot RBID is
+/// regenerated and the wait times out at 60 s, leaving the loop stuck
+/// at "Waiting for UDP presence" even though the sensor is fine.
+///
+/// Privacy trade-off (acceptable for the rocker rig): a fixed RBID is
+/// linkable across BLE adverts and across reboots — i.e. an observer
+/// can tell two adverts come from the same device. For a stationary
+/// sensor on a private hotspot in a non-hostile RF environment this is
+/// fine; for roaming or adversarial deployments, swap to
+/// `RbidStrategy::Hmac` (R2-BEACON §6.1) once a TG session key exists.
+pub fn load_or_generate_rbid(nvs: EspDefaultNvsPartition) -> Result<[u8; 8]> {
+    let mut store = EspNvs::<NvsDefault>::new(nvs, NVS_NS, true)
+        .context("EspNvs::new for rbid")?;
+    let mut buf = [0u8; 8];
+    if let Ok(Some(slice)) = store.get_blob(NVS_KEY_RBID, &mut buf) {
+        if slice.len() == 8 {
+            let mut out = [0u8; 8];
+            out.copy_from_slice(slice);
+            info!("rbid: loaded from NVS = {}", hex(&out));
+            return Ok(out);
+        }
+    }
+    let mut rbid = [0u8; 8];
+    unsafe { esp_fill_random(rbid.as_mut_ptr() as *mut _, rbid.len()); }
+    store.set_blob(NVS_KEY_RBID, &rbid).context("set_blob rbid")?;
+    info!("rbid: minted new = {}", hex(&rbid));
+    Ok(rbid)
 }
 
 fn hex(bytes: &[u8]) -> String {

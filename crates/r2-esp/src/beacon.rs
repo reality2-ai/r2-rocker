@@ -65,6 +65,15 @@ pub enum RbidStrategy {
         session_key: [u8; 16],
         epoch_secs: u64,
     },
+    /// Fixed 8 bytes used for every advert.
+    ///
+    /// Defeats the privacy goal of RBID rotation, but the BLE advert is
+    /// no longer linkable across reboots — required when a peer (e.g.
+    /// r2-rocker's bootstrap loop) needs to match the *same* RBID to a
+    /// post-reboot UDP presence packet. Suitable for stationary devices
+    /// in a private RF environment; do not use for roaming or hostile-
+    /// RF scenarios where unlinkability matters.
+    Fixed([u8; 8]),
 }
 
 /// Beacon configuration handed to [`start`]. All fields are required.
@@ -376,6 +385,7 @@ fn make_rbid(strategy: &RbidStrategy) -> [u8; 8] {
             session_key,
             epoch_secs,
         } => beacon::compute_rbid(session_key, *epoch_secs),
+        RbidStrategy::Fixed(rbid) => *rbid,
     }
 }
 

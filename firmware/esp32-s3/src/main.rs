@@ -33,6 +33,10 @@ const SENSOR_CLASS: &str = "nz.ac.auckland.rocker.sensor";
 
 const GATEWAY_IP:   &str = env!("R2_GATEWAY_IP");
 const GATEWAY_PORT: u16  = 21042;
+/// UDP presence port — matches `r2-bootstrap`'s `PRESENCE_PORT`. Sent
+/// once WiFi is up so the dashboard's bootstrap loop can confirm the
+/// post-reboot sensor is alive on the offered SSID.
+const PRESENCE_PORT: u16 = 21044;
 
 fn main() -> Result<()> {
     link_patches();
@@ -51,6 +55,13 @@ fn main() -> Result<()> {
         identity::Identity::load_or_generate(nvs.clone())
             .context("identity init")?,
     );
+    // Stable per-device RBID for R2-BEACON (NVS-persisted; minted on
+    // first boot). Stable-across-reboots is the load-bearing property —
+    // the dashboard's bootstrap loop matches the *post-reboot* UDP
+    // presence packet against the *pre-reboot* RBID it observed during
+    // BLE scan, so a regenerated RBID would silently break the loop.
+    let rbid = identity::load_or_generate_rbid(nvs.clone())
+        .context("rbid init")?;
     info!(
         "tg_pub_key (verify target):  {:02x}{:02x}{:02x}{:02x}…{:02x}{:02x}",
         identity::TG_PUB_KEY[0], identity::TG_PUB_KEY[1],
@@ -85,7 +96,8 @@ fn main() -> Result<()> {
     // have no WiFi (signals to the dashboard that we need an offer); once
     // creds are in NVS and WiFi is up, future re-provisioning is still
     // possible by simply sending another `#wifi_offer` over L2CAP.
-    let beacon_cfg = beacon::BeaconConfig::for_class(SENSOR_CLASS, !wifi_up);
+    let mut beacon_cfg = beacon::BeaconConfig::for_class(SENSOR_CLASS, !wifi_up);
+    beacon_cfg.rbid_strategy = beacon::RbidStrategy::Fixed(rbid);
     match beacon::start(beacon_cfg, |peer| {
         info!(
             "[BEACON-RX] peer rbid={:02x}{:02x}{:02x}{:02x}…  class=0x{:08x}  prov={}  rssi={} dBm",
@@ -105,6 +117,24 @@ fn main() -> Result<()> {
         // OTA gate: per SPEC-R2-ROCKER-SENSOR §12.2 a robust gate would
         // also wait for first dashboard ACK; WiFi-up is enough for now.
         mark_app_valid();
+
+        // UDP presence — closes the dashboard's bootstrap loop. Spawn a
+        // short-lived task that sends ~5 packets at 1 s intervals. UDP
+        // is unreliable; one of the burst should reach the dashboard.
+        let local_ip = wifi_sta::get_ip().unwrap_or_default();
+        let class_hash = r2_core::fnv::r2_hash(SENSOR_CLASS).unwrap_or(0);
+        if !local_ip.is_empty() {
+            let rbid_for_thread = rbid;
+            let ip_for_thread = local_ip.clone();
+            std::thread::Builder::new()
+                .stack_size(4096)
+                .name("presence".into())
+                .spawn(move || {
+                    broadcast_presence_burst(rbid_for_thread, &ip_for_thread,
+                                             class_hash, GATEWAY_PORT, 5);
+                })
+                .context("spawn presence thread")?;
+        }
 
         let gateway_ip: IpAddr = GATEWAY_IP
             .parse::<Ipv4Addr>()
@@ -181,6 +211,49 @@ fn main() -> Result<()> {
             }
         }
         FreeRtos::delay_ms(500);
+    }
+}
+
+/// Send `count` UDP presence packets to `255.255.255.255:PRESENCE_PORT`
+/// at 1 s intervals. Format per `r2-bootstrap::parse_presence_packet`:
+/// CBOR `{0: rbid (bytes 8), 1: ip (text), 2: class_hash (u32), 3: port (u16)}`.
+fn broadcast_presence_burst(
+    rbid: [u8; 8],
+    ip: &str,
+    class_hash: u32,
+    sensor_port: u16,
+    count: u32,
+) {
+    use r2_core::cbor::{encode, CborValue};
+    use std::net::UdpSocket;
+
+    let payload = encode(&CborValue::Map(vec![
+        (CborValue::UInt(0), CborValue::Bytes(rbid.to_vec())),
+        (CborValue::UInt(1), CborValue::Text(ip.to_string())),
+        (CborValue::UInt(2), CborValue::UInt(class_hash as u64)),
+        (CborValue::UInt(3), CborValue::UInt(sensor_port as u64)),
+    ]));
+
+    let socket = match UdpSocket::bind("0.0.0.0:0") {
+        Ok(s) => s,
+        Err(e) => { warn!("[presence] bind failed: {e}"); return; }
+    };
+    if let Err(e) = socket.set_broadcast(true) {
+        warn!("[presence] set_broadcast failed: {e}");
+        return;
+    }
+    let dest = format!("255.255.255.255:{}", PRESENCE_PORT);
+    info!("[presence] burst — {} packets to {} (rbid={:02x}{:02x}{:02x}{:02x}…, ip={})",
+          count, dest, rbid[0], rbid[1], rbid[2], rbid[3], ip);
+
+    for i in 0..count {
+        match socket.send_to(&payload, &dest) {
+            Ok(n)  => info!("[presence] sent {}/{} ({} bytes)", i + 1, count, n),
+            Err(e) => warn!("[presence] send {} failed: {e}", i + 1),
+        }
+        if i + 1 < count {
+            esp_idf_svc::hal::delay::FreeRtos::delay_ms(1000);
+        }
     }
 }
 
