@@ -276,13 +276,151 @@
     .sensors-area.dual { grid-template-columns: 1fr; }
     .chart-container { height: 220px; }
   }
+
+  /* ── Phase 8a: Devices view ─────────────────────────────────────────── */
+  .view-toggle {
+    display: inline-flex;
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    overflow: hidden;
+    margin-right: 12px;
+  }
+  .view-toggle button {
+    background: transparent;
+    border: 0;
+    color: #94a3b8;
+    padding: 7px 14px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .view-toggle button.active {
+    background: #4a9eff;
+    color: #fff;
+    font-weight: 600;
+  }
+
+  .devices-main {
+    max-width: 1600px;
+    margin: 0 auto;
+    padding: 12px 24px 0;
+  }
+  .devices-area {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 12px;
+  }
+
+  .device-card {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 10px;
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .device-card .device-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-weight: 600;
+    color: #f1f5f9;
+  }
+  .device-card .online-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: #22c55e;
+    box-shadow: 0 0 6px #22c55e;
+    flex-shrink: 0;
+  }
+  .device-card.stale .online-dot { background: #facc15; box-shadow: 0 0 6px #facc15; }
+  .device-card.offline .online-dot { background: #475569; box-shadow: none; }
+
+  .device-card .device-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 13px;
+    color: #94a3b8;
+    font-family: 'SF Mono', Menlo, monospace;
+  }
+  .device-card .device-row .label { color: #64748b; }
+  .device-card .device-row .value { color: #e2e8f0; }
+
+  .battery-bar {
+    height: 6px; background: #0f172a; border-radius: 3px; overflow: hidden;
+    margin-top: 4px;
+  }
+  .battery-bar > div {
+    height: 100%;
+    background: linear-gradient(90deg, #22c55e, #84cc16);
+    transition: width 0.4s ease;
+  }
+  .battery-bar > div.low { background: linear-gradient(90deg, #f97316, #facc15); }
+  .battery-bar > div.crit { background: #ef4444; }
+
+  /* Virtual LED — solid until Phase 5L sends FSM state, then animated */
+  .virt-led {
+    width: 14px; height: 14px; border-radius: 50%;
+    border: 1px solid #475569;
+    background: #334155;
+    flex-shrink: 0;
+  }
+  .virt-led.tg-boot       { background: #f8fafc; box-shadow: 0 0 8px #f8fafc; animation: led-flash 1s 1; }
+  .virt-led.tg-advertising { background: #3b82f6; box-shadow: 0 0 8px #3b82f6; animation: led-pulse 1.0s ease-in-out infinite; }
+  .virt-led.tg-ble        { background: #06b6d4; box-shadow: 0 0 8px #06b6d4; animation: led-pulse 0.4s ease-in-out infinite; }
+  .virt-led.tg-streaming  { background: #22c55e; box-shadow: 0 0 8px #22c55e; animation: led-heartbeat 1.0s ease-in-out infinite; }
+  .virt-led.tg-catchup    { background: #facc15; box-shadow: 0 0 8px #facc15; animation: led-heartbeat 1.0s ease-in-out infinite; }
+  .virt-led.tg-cal        { background: #a855f7; box-shadow: 0 0 8px #a855f7; }
+  .virt-led.tg-low        { background: #f97316; box-shadow: 0 0 8px #f97316; animation: led-pulse 1.5s ease-in-out infinite; }
+  .virt-led.tg-ota        { background: #ec4899; box-shadow: 0 0 8px #ec4899; animation: led-strobe 0.18s steps(2) infinite; }
+  .virt-led.tg-error      { background: #ef4444; box-shadow: 0 0 8px #ef4444; animation: led-pulse 0.25s ease-in-out infinite; }
+
+  @keyframes led-pulse     { 0%,100% { opacity: 1; } 50% { opacity: 0.25; } }
+  @keyframes led-heartbeat { 0%, 30%, 100% { opacity: 1; } 15%, 45% { opacity: 0.3; } }
+  @keyframes led-strobe    { 0% { opacity: 1; } 50% { opacity: 0; } }
+  @keyframes led-flash     { 0% { opacity: 0; } 30%, 70% { opacity: 1; } 100% { opacity: 0; } }
+
+  .device-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: auto;
+  }
+  .btn-update {
+    flex: 1;
+    background: #475569;
+    color: #f1f5f9;
+    border: 0;
+    border-radius: 6px;
+    padding: 7px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .btn-update:hover { background: #64748b; }
+  .btn-update:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .devices-summary {
+    display: flex;
+    gap: 18px;
+    color: #94a3b8;
+    font-size: 13px;
+    margin-bottom: 10px;
+    padding: 10px 14px;
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 8px;
+  }
+  .devices-summary strong { color: #e2e8f0; }
 </style>
 </head>
 <body>
 
 <div class="header">
-  <h1><span>R2</span> Rocker Rig — Live Dashboard</h1>
+  <h1><span>R2</span> Rocker Rig — Dashboard</h1>
   <div class="header-controls">
+    <div class="view-toggle" id="viewToggle">
+      <button id="viewLive"    class="active" onclick="setView('live')">Live</button>
+      <button id="viewDevices"               onclick="setView('devices')">Devices</button>
+    </div>
     <button class="btn-connect" id="btn-connect" onclick="startBootstrap()">&#x1F50D; Connect Sensors</button>
     <div class="connection-status">
       <div class="status-dot" id="wsDot"></div>
@@ -293,7 +431,23 @@
   </div>
 </div>
 
-<div class="main">
+<!-- ── Devices view (Phase 8a) ─────────────────────────────────────── -->
+<div class="devices-main" id="devicesMain" hidden>
+  <div class="devices-summary" id="devicesSummary">
+    <span><strong id="dsTotal">0</strong> known</span>
+    <span><strong id="dsOnline" style="color:#22c55e;">0</strong> online</span>
+    <span><strong id="dsStale" style="color:#facc15;">0</strong> stale</span>
+    <span><strong id="dsOffline" style="color:#64748b;">0</strong> offline</span>
+    <span><strong id="dsNeedsUpdate" style="color:#ec4899;">0</strong> needs update</span>
+  </div>
+  <div class="devices-area" id="devicesArea">
+    <div class="card" id="devicesPlaceholder" style="color:#475569; text-align:center; padding:40px;">
+      No sensors known yet — wait for an announce or click <em>Connect Sensors</em>.
+    </div>
+  </div>
+</div>
+
+<div class="main" id="liveMain">
   <!-- Sensor charts (populated dynamically) -->
   <div class="sensors-area" id="sensorsArea">
     <div class="card" id="sensorPlaceholder" style="color:#475569; text-align:center; padding:60px;">
@@ -413,6 +567,14 @@ function getOrCreateSensor(addr) {
   const sensor = {
     key,
     deviceName: null,
+    // Phase 8a (Devices view) state — populated by handlers in handleEvent.
+    fwVer: null,
+    devicePk: null,
+    bootTsMs: null,
+    battery: null,    // { voltage_mv, percent, charging, ts }
+    fsmState: null,   // populated once Phase 5L firmware emits status events
+    lastSeen: Date.now(),
+    online: true,
     chart,
     calibrationSamples: [],
     calibrationOffset: { x: 0, y: 0, z: 0 },
@@ -627,6 +789,15 @@ function handleEvent(msg) {
       if (sensor) {
         if (msg.device_name) setDeviceName(sensor, msg.device_name);
         addSensorLog(sensor, 'connected');
+        // Capture announce metadata for the Devices view (Phase 8a).
+        if (msg.payload) {
+          if (msg.payload.fw_ver)    sensor.fwVer    = msg.payload.fw_ver;
+          if (msg.payload.device_pk) sensor.devicePk = msg.payload.device_pk;
+          if (msg.payload.boot_ts_ms != null) sensor.bootTsMs = msg.payload.boot_ts_ms;
+        }
+        sensor.online = true;
+        sensor.lastSeen = Date.now();
+        renderDevicesIfVisible();
         // Do NOT call applyState here. The sensor.connected event fires for
         // three different cases that need different treatment:
         //   1. First connect: sensor is idle → handled by run_state broadcast
@@ -640,6 +811,38 @@ function handleEvent(msg) {
       }
       addLog(msg);
       return;
+    case 'r2.sensor.battery':
+    case 'battery_status':
+      if (sensor && msg.payload) {
+        sensor.battery = {
+          voltage_mv: msg.payload.voltage_mv ?? null,
+          percent:    msg.payload.percent    ?? null,
+          charging:   msg.payload.charging   ?? false,
+          ts:         Date.now(),
+        };
+        sensor.lastSeen = Date.now();
+        sensor.online = true;
+        renderDevicesIfVisible();
+      }
+      addLog(msg);
+      return;
+    case 'r2.sensor.status':
+      if (sensor && msg.payload) {
+        // Capture FSM state for the virtual LED (lights up once Phase 5L
+        // sends real state values).
+        if (msg.payload.state != null) sensor.fsmState = msg.payload.state;
+        sensor.lastSeen = Date.now();
+        sensor.online = true;
+        renderDevicesIfVisible();
+      }
+      addLog(msg);
+      return;
+  }
+  // Any event we didn't return early from updates lastSeen too — useful
+  // for the Devices view's online/stale/offline classification.
+  if (sensor) {
+    sensor.lastSeen = Date.now();
+    sensor.online = true;
   }
   addLog(msg);
 }
@@ -793,6 +996,158 @@ function addLog(msg) {
   el.insertBefore(entry, el.firstChild);
   while (el.children.length > 100) el.removeChild(el.lastChild);
 }
+
+// ── Phase 8a — Devices view ────────────────────────────────────────────
+//
+// "Live" shows charts; "Devices" shows fleet status (one card per peer
+// with battery / fw_ver / last-seen / virtual LED / Update-Firmware
+// stub). Both views consume the same `sensors` Map; the per-event
+// handlers above update battery / fwVer / lastSeen on each sensor
+// object and call renderDevicesIfVisible().
+
+let currentView = 'live';
+const STALE_MS    = 10_000;   // last_seen older than 10 s = stale
+const OFFLINE_MS  = 30_000;   // last_seen older than 30 s = offline
+
+function setView(name) {
+  currentView = name;
+  document.getElementById('liveMain').hidden    = (name !== 'live');
+  document.getElementById('devicesMain').hidden = (name !== 'devices');
+  document.getElementById('viewLive').classList.toggle('active',    name === 'live');
+  document.getElementById('viewDevices').classList.toggle('active', name === 'devices');
+  if (name === 'devices') renderDevices();
+}
+
+function renderDevicesIfVisible() {
+  if (currentView === 'devices') renderDevices();
+}
+
+function fmtAge(ms) {
+  if (ms < 1500)   return 'just now';
+  if (ms < 60_000) return `${Math.round(ms/1000)} s ago`;
+  if (ms < 3600_000) return `${Math.round(ms/60_000)} min ago`;
+  return `${Math.round(ms/3600_000)} h ago`;
+}
+
+function classifyOnline(s) {
+  const age = Date.now() - (s.lastSeen ?? 0);
+  if (!s.online || age > OFFLINE_MS) return 'offline';
+  if (age > STALE_MS) return 'stale';
+  return 'online';
+}
+
+// Map firmware FSM-state numbers (Phase 5L will define these) to the
+// CSS class that drives the virtual-LED colour + animation. Until
+// firmware sends real state values, fsmState is null and the LED
+// stays the inert grey placeholder.
+function ledClassFor(s) {
+  if (s.fsmState == null) return '';
+  switch (s.fsmState) {
+    case 0:  return 'tg-boot';         // BOOT
+    case 1:  return 'tg-advertising';  // ADVERTISING
+    case 2:  return 'tg-ble';          // BLE_CONNECTED
+    case 3:  return 'tg-ble';          // WIFI_CONNECTING
+    case 4:  return 'tg-streaming';    // STREAMING
+    case 5:  return 'tg-catchup';      // STREAMING_CATCHUP
+    case 6:  return 'tg-cal';          // CALIBRATING
+    case 7:  return 'tg-low';          // LOW_BATTERY
+    case 8:  return 'tg-ota';          // OTA
+    case 9:  return 'tg-error';        // ERROR
+    default: return '';
+  }
+}
+
+function renderDevices() {
+  const area = document.getElementById('devicesArea');
+  const peers = [...sensors.values()];
+  if (peers.length === 0) {
+    area.innerHTML = '<div class="card" id="devicesPlaceholder" style="color:#475569;text-align:center;padding:40px;">No sensors known yet — wait for an announce or click <em>Connect Sensors</em>.</div>';
+    updateDevicesSummary(peers);
+    return;
+  }
+
+  // Stable sort by hostname/key so cards don't jump around.
+  peers.sort((a, b) => (a.deviceName ?? a.key).localeCompare(b.deviceName ?? b.key));
+
+  area.innerHTML = peers.map(s => {
+    const status   = classifyOnline(s);
+    const name     = s.deviceName ?? s.key;
+    const ip       = s.key;
+    const fwShort  = s.fwVer ? s.fwVer.replace(/\s+sim$/, '') : '—';
+    const battMv   = s.battery?.voltage_mv ?? null;
+    const battPct  = s.battery?.percent ?? null;
+    const battCharging = s.battery?.charging ?? false;
+    const battClass = battPct == null ? ''
+                     : battPct < 10 ? 'crit'
+                     : battPct < 25 ? 'low' : '';
+    const lastSeen = s.lastSeen ? fmtAge(Date.now() - s.lastSeen) : '—';
+    const led      = ledClassFor(s);
+
+    return `
+      <div class="device-card ${status}" data-key="${escapeAttr(s.key)}">
+        <div class="device-header">
+          <div class="online-dot"></div>
+          <div class="virt-led ${led}" title="virtual LED${s.fsmState == null ? ' — awaiting Phase 5L FSM state' : ''}"></div>
+          <div style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeText(name)}</div>
+        </div>
+        <div class="device-row"><span class="label">addr</span><span class="value">${escapeText(ip)}</span></div>
+        <div class="device-row"><span class="label">firmware</span><span class="value" title="${escapeAttr(s.fwVer ?? '—')}">${escapeText(fwShort)}</span></div>
+        <div class="device-row"><span class="label">last seen</span><span class="value">${lastSeen}</span></div>
+        <div class="device-row">
+          <span class="label">battery</span>
+          <span class="value">${battMv != null ? (battMv + ' mV') : '—'}${battPct != null ? ` (${battPct}%)` : ''}${battCharging ? ' ⚡' : ''}</span>
+        </div>
+        ${battPct != null ? `<div class="battery-bar"><div class="${battClass}" style="width:${Math.max(2, Math.min(100, battPct))}%;"></div></div>` : ''}
+        <div class="device-actions">
+          <button class="btn-update" onclick="requestFirmwareUpdate('${escapeAttr(s.key)}')">⬆ Update Firmware</button>
+        </div>
+      </div>`;
+  }).join('');
+
+  updateDevicesSummary(peers);
+}
+
+function updateDevicesSummary(peers) {
+  const counts = { online: 0, stale: 0, offline: 0, needsUpdate: 0 };
+  for (const s of peers) {
+    counts[classifyOnline(s)]++;
+    // Update flagging is a stub until Phase 9 ships a real "current
+    // version" for the dashboard to compare against.
+    if (s._needsUpdate) counts.needsUpdate++;
+  }
+  document.getElementById('dsTotal').textContent       = peers.length;
+  document.getElementById('dsOnline').textContent      = counts.online;
+  document.getElementById('dsStale').textContent       = counts.stale;
+  document.getElementById('dsOffline').textContent     = counts.offline;
+  document.getElementById('dsNeedsUpdate').textContent = counts.needsUpdate;
+}
+
+function requestFirmwareUpdate(addr) {
+  // Phase 9 will turn this into a real `r2.dash.fw.update` push (server
+  // pushes binary URL + sha256 + tg_sig, sensor fetches + verifies +
+  // swaps partition). For now: visual feedback only.
+  console.log('[stub] firmware update requested for', addr);
+  const btn = document.querySelector(`.device-card[data-key="${addr}"] .btn-update`);
+  if (btn) {
+    btn.textContent = '✓ queued (stub)';
+    btn.disabled = true;
+    setTimeout(() => {
+      btn.textContent = '⬆ Update Firmware';
+      btn.disabled = false;
+    }, 2500);
+  }
+}
+
+function escapeText(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function escapeAttr(s) { return escapeText(s).replace(/"/g, '&quot;'); }
+
+// Keep online/stale/offline classification fresh even when no events
+// arrive for a while — re-render once a second when Devices is visible.
+setInterval(() => {
+  if (currentView === 'devices') renderDevices();
+}, 1000);
 </script>
 </body>
 </html>
