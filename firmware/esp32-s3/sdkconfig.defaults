@@ -28,13 +28,17 @@ CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 
 # ─── OTA / partition table ────────────────────────────────────────────────
-# Phase 0.5 uses ESP-IDF's default single-app partition table. The
-# OTA-ready two-slot layout is defined in `partitions.csv` and will be
-# wired in via [package.metadata.esp-idf-sys] extra_components when
-# OTA is implemented in Phase 9 — that's the supported path with
-# esp-idf-sys; setting `CONFIG_PARTITION_TABLE_CUSTOM_FILENAME` alone
-# does not survive the auto-generated build directory.
+# Custom two-OTA-slot layout — see partitions.csv in this directory.
+# build.rs physically copies partitions.csv into esp-idf-sys's CMake
+# build dir each cycle so this relative path resolves there. (ESP-IDF
+# resolves the filename relative to its auto-generated project_dir,
+# which is esp-idf-sys's OUT dir, not our crate root.) Same workaround
+# as r2-core/platforms/esp32-s3.
 #
-# CONFIG_PARTITION_TABLE_CUSTOM=y
-# CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
-# CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+# First build of a fresh checkout will use the ESP-IDF default table
+# because the OUT dir doesn't exist yet when build.rs first runs. Run
+# `tools/setup-firmware.sh` before the first cargo invocation, or
+# rebuild once. Second build onwards picks up the custom layout.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y

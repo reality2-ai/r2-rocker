@@ -14,18 +14,20 @@ Nothing else. It does not read the ADXL355, talk to the dashboard,
 write to SD, or sample the battery — those land in Phases 1–5 once the
 hardware is soldered and the protocol stack is in place.
 
-The **intended partition layout is documented in `partitions.csv`** —
-two 3 MB OTA slots + 1.875 MB `storage` data partition, no factory
-slot. Phase 0.5 uses ESP-IDF's default single-app table for now; the
-custom layout is wired in when OTA is implemented in Phase 9. The
-supported path with `esp-idf-sys` is via
-`[package.metadata.esp-idf-sys.extra_components]` in `Cargo.toml`,
-not a simple sdkconfig path setting (the file path doesn't survive
-into the auto-generated build directory).
+The **OTA-ready partition table** (`partitions.csv`) is wired in from
+Phase 0.5 onward — two 3 MB OTA slots + 1.875 MB `storage` partition,
+no factory slot. The bootloader's auto-rollback feature is enabled
+(`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`) so OTA-installed images that
+fail first-boot validation revert automatically.
 
-This deferral does mean a one-time re-flash of the partition table
-when OTA lands. That's an acceptable cost — a partition-table swap
-takes seconds.
+How it's wired: ESP-IDF's CMake resolves
+`CONFIG_PARTITION_TABLE_CUSTOM_FILENAME` relative to esp-idf-sys's
+auto-generated build directory, not our crate root. `build.rs` copies
+`partitions.csv` into that directory each cycle so the relative path
+resolves there. (Same trick as `r2-core/platforms/esp32-s3`.) On a
+**fresh checkout** the FIRST build still uses the default table — run
+`tools/setup-firmware.sh` once before the first `cargo build` to
+pre-stage the file, OR just rebuild a second time.
 
 ## Toolchain prerequisites
 

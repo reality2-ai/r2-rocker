@@ -67,6 +67,7 @@ Status: ✅ done · 🔄 in progress · ⏳ pending · ⏸ blocked
 | 0h | System spec | ✅ | `specifications/SPEC-R2-ROCKER-SYSTEM.md` v0.1 |
 | 0i | TG generation tool | ✅ | `tools/r2-rocker-tg/` v0.1 — keygen, verify, inspect; round-trip tested |
 | 0j | Pre-soldering firmware | ✅ | `firmware/esp32-s3/` v0.1.0 — UART heartbeat over native USB-Serial-JTAG; flashed and running (MAC `1c:db:d4:41:28:3c`) |
+| 0k | Two-slot OTA partition table | ✅ | `partitions.csv` baked in via build.rs OUT-dir copy trick (matching r2-core/platforms/esp32-s3); chip flashed with `ota_0` / `ota_1` / `otadata` / FAT storage layout. `tools/setup-firmware.sh` pre-stages on a fresh checkout. |
 | 1 | Hardware solder + smoke test | ⏳ | Phase-1 wires per `HARDWARE-WIRING.md` §2 |
 | 2 | ADXL355 SPI driver | ⏳ | `firmware/esp32-s3/src/adxl355.rs` + UART-only `main.rs` |
 | 3 | Battery readout | ⏳ | `firmware/esp32-s3/src/battery.rs` (ADC1 + divider) |
@@ -167,3 +168,4 @@ r2-rocker/
 | 2026-05-07 | 0.4 | Session 02: phase 0i complete (`r2-rocker-tg` keygen utility built, tested, round-trip verified). All Phase-0 work done. Awaiting hardware solder before Phase 1. |
 | 2026-05-07 | 0.5 | Session 02: phase 0j added — `firmware/esp32-s3/` skeleton with UART heartbeat firmware and OTA-ready two-slot partition table; ready to flash on the bare DevKitC-1 before soldering. |
 | 2026-05-07 | 0.6 | Session 02: phase 0j complete — firmware flashed and running on MAC `1c:db:d4:41:28:3c`. End-to-end toolchain → build → flash → boot → UART proven. Custom partition table deferred to Phase 9 (esp-idf-sys metadata path); test board's reported MAC noted in PLAN. |
+| 2026-05-07 | 0.7 | Session 02: phase 0k complete — custom two-OTA-slot partition table now baked into firmware and flashed on chip. Cribbed the OUT-dir-copy build.rs trick from r2-core/platforms/esp32-s3. `tools/setup-firmware.sh` added for fresh-clone bootstrap. OTA infrastructure ready ahead of Phase 9 implementation. |

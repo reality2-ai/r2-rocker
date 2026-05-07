@@ -56,6 +56,10 @@ dependencies.lock
 .embuild/
 **/.embuild/
 
+# Build-time-generated sdkconfig fragments (host-specific absolute paths).
+**/sdkconfig.partitions.generated
+**/sdkconfig.*.generated
+
 # ──── External / vendor reference material ────────────────────────────
 # Vendored snapshot directories under docs/ retain only their files,
 # not their original .git history. PROVENANCE.md inside each documents
