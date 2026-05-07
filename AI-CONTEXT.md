@@ -149,6 +149,7 @@ The dashboard grows three views (operator picks via a tab/toggle):
 | **Live charts** | Real-time x/y/z per sensor — what we have today | (delivered in 0L) |
 | **Devices** | Fleet-status overview: per-sensor online state, battery, fw_ver, last-seen, FSM state, **virtual LED** mirroring the hardware RGB LED (colour + animation per `HARDWARE-WIRING.md` §5), and an **"Update Firmware"** button per card (stub → real OTA in Phase 9) | 8a |
 | **Joints** | Diagnostic view: pairwise differential lateral motion, stress indicator per joint, long-term trend chart | 8c |
+| **Sessions** | Named measurement sessions: define / start / stop, capture participating sensors + calibration snapshot + per-joint traces + operator notes; replay + export. Storage in browser IndexedDB (browser-hive owns it); shared across TG-member browsers via relay; archived long-term by cloud consumer (5e). | 8d |
 
 The virtual-LED is a one-line addition once Phase 5L is in: firmware
 already tracks FSM state internally for the physical LED; just include
