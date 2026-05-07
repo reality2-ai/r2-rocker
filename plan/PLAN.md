@@ -68,19 +68,24 @@ Status: ✅ done · 🔄 in progress · ⏳ pending · ⏸ blocked
 | 0i | TG generation tool | ✅ | `tools/r2-rocker-tg/` v0.1 — keygen, verify, inspect; round-trip tested |
 | 0j | Pre-soldering firmware | ✅ | `firmware/esp32-s3/` v0.1.0 — UART heartbeat over native USB-Serial-JTAG; flashed and running (MAC `1c:db:d4:41:28:3c`) |
 | 0k | Two-slot OTA partition table | ✅ | `partitions.csv` baked in via build.rs OUT-dir copy trick (matching r2-core/platforms/esp32-s3); chip flashed with `ota_0` / `ota_1` / `otadata` / FAT storage layout. `tools/setup-firmware.sh` pre-stages on a fresh checkout. |
-| 0L | Simulated-data sender | ✅ | Firmware connects to WiFi via `wifi_config.toml`, opens TCP to `gateway_ip:21042`, emits R2-WIRE frames (announce, acceleration @ 100 Hz, battery every 30 s) with synthetic ADXL355-shaped data. Compiles, awaits end-to-end test. |
-| 0m | Dashboard scaffold (port + adapt) | 🔄 | Cargo workspace at root; vendored `r2-fnv`, `r2-cbor`, `r2-wire`, `r2-core`, `r2-bootstrap`, `r2-dashboard` from r2-core. Adapted CBOR decoder for our integer-keyed schemas (`r2.sensor.acceleration` etc.), added /api/version + version banner. UI HTML still per-M10 schema; Phase 0n adapts it. |
+| 0L | Simulated-data sender | ✅ | Firmware connects to WiFi via `wifi_config.toml`, opens TCP to `gateway_ip:21042`, emits R2-WIRE frames (announce, acceleration @ 100 Hz, battery every 30 s) with synthetic ADXL355-shaped data. End-to-end verified on hardware. |
+| 0m | Dashboard scaffold (port + adapt) | ✅ | Cargo workspace at root; vendored `r2-fnv`, `r2-cbor`, `r2-wire`, `r2-core`, `r2-bootstrap`, `r2-dashboard` from r2-core. Adapted CBOR decoder for our integer-keyed schemas. Server-side raw-LSB→g scaling. /api/version. **R2-WIRE compact frame parser fixed** (was off-by-one for the 7-byte M10 layout vs our 12-byte spec). 10 Hz live decimation per spec §5.2. |
 | 0n | Versioning convention | ✅ | Both firmware and dashboard build.rs stamps `R2_GIT_SHA` (with `-dirty` suffix on uncommitted) + `R2_BUILD_TIMESTAMP`. `fw_ver` in announce frames is `<semver>+<sha>`; dashboard exposes same via /api/version. Drives OTA decision logic. |
-| 1 | Hardware solder + smoke test | ⏳ | Phase-1 wires per `HARDWARE-WIRING.md` §2 |
-| 2 | ADXL355 SPI driver | ⏳ | `firmware/esp32-s3/src/adxl355.rs` + UART-only `main.rs` |
-| 3 | Battery readout | ⏳ | `firmware/esp32-s3/src/battery.rs` (ADC1 + divider) |
-| 4 | SD ring + sequencing | ⏳ | `firmware/esp32-s3/src/sd_logger.rs`, fixed-size 20-byte records |
-| 5 | WiFi single-sensor + ACKs + time-sync | ⏳ | One sensor visible in dashboard, live + batch frames |
-| 6 | Hardwired TG + signed announce | ⏳ | `trust_keys/tg_pub.bin`, signed `SENSOR_ANNOUNCE` |
-| 7 | BLE bootstrap FSM | ⏳ | Sensor FSM ports the M10 design; `wifi_config.toml` retired |
-| 8 | Per-sensor calibration | ⏳ | Two-position cal protocol + dashboard-side rotation matrix |
-| 9 | Multi-sensor dashboard UI | ⏳ | Grid, canvas, joint groups, pairwise differential, stress indicator, trend |
-| 10 | OTA + TG-signed images | ⏳ | `r2-build` push, signed binaries, SD-backed rollback |
+| 0o | Setup helpers | ✅ | `tools/setup-hotspot.sh` brings up the NM AP profile on the USB WiFi adapter (default `wlx0c0e766e358c`), generating fresh creds with `--rotate` or reusing what's in `wifi_config.toml`. `tools/setup-firmware.sh` pre-stages `partitions.csv` for the chicken-and-egg fresh-clone case. |
+| 1 | Hardware solder + smoke test | ⏳ | Phase-1 wires per `HARDWARE-WIRING.md` §2 — operator-driven; awaits user availability |
+| 2 | ADXL355 SPI driver | ⏳ | Replaces `sim.rs`; `firmware/esp32-s3/src/adxl355.rs` + DRDY-driven 100 Hz sampler |
+| 3 | SD ring + sequencing | ⏳ | `firmware/esp32-s3/src/sd_logger.rs`, fixed 20-byte records, NVS `last_acked_seq`, replay on reconnect |
+| 4 | Live WiFi single-sensor + ACKs + time-sync | ✅ (effectively 0L) | Already delivered as part of 0L: WiFi, TCP, R2-WIRE compact frames, CBOR. Server-side ACKs (`r2.dash.ack`) + sync_pulse round-trip pending in firmware (currently sender drives the cadence solo). |
+| 5a | Hardwired TG + signed announce | ✅ | TG keypair generated via `r2-rocker-tg`; `trust_keys/tg_pub.bin` + `tg_cert.bin` committed; firmware embeds TG pub via `include_bytes!`. **NVS-persistent Ed25519 device key** mints on first boot, reloads on subsequent boots. Real Ed25519 signature on the announce body, verified working end-to-end on MAC `1c:db:d4:41:28:3c`. |
+| 5b | Dashboard verifies announce sig | ⏳ | Server-side Ed25519 verify against `device_pk` from the announce; reject if invalid. Trivially small once firmware-side is committed. |
+| 5c | HMAC envelope per R2-WIRE frame | ⏳ | DEK + HK derivation from TG SK (HKDF-SHA256, `r2-trust` SPEC §3); HMAC tag on every frame; R2-WIRE has-hmac flag. Authenticates EVERY frame, not just announce. |
+| 5d | Relay forwarding (remote dashboards) | ⏳ | Onsite dashboard publishes encrypted events to `r2-relay`; remote dashboards subscribe. "The relay never sees your data." |
+| 5e | Cloud archive consumer | ⏳ | Long-term storage as a TG-member subscriber to the relay. Database TBD. |
+| 5L | RGB LED state machine | ⏳ | WS2812 RMT driver + animator task. Per `HARDWARE-WIRING.md` §5 colour map. **OTA-active gets a distinct colour** (e.g. magenta cycle) to differentiate from boot's brief white flash. |
+| 6 | BLE bootstrap FSM | ⏳ | Port `tools/r2-sensor`'s FSM to ESP32-S3 with NimBLE; sensor advertises R2-BEACON, receives signed `#wifi_offer`, persists in NVS. **Retires `wifi_config.toml`.** Calm-tech endpoint. |
+| 7 | Per-sensor calibration | ⏳ | Two-position cal protocol + dashboard-side rotation matrix |
+| 8 | Multi-sensor dashboard UI | ⏳ | Grid, canvas, joint groups, pairwise differential, stress indicator, trend |
+| 9 | OTA + TG-signed images | ⏳ | `r2-build` push, signed binaries, SD-backed rollback |
 
 Phases 0e–0h block all coding (PROCESS rule 1 — spec before code).
 Phase 1 (soldering) can run in parallel with the spec writing.
@@ -173,3 +178,4 @@ r2-rocker/
 | 2026-05-07 | 0.6 | Session 02: phase 0j complete — firmware flashed and running on MAC `1c:db:d4:41:28:3c`. End-to-end toolchain → build → flash → boot → UART proven. Custom partition table deferred to Phase 9 (esp-idf-sys metadata path); test board's reported MAC noted in PLAN. |
 | 2026-05-07 | 0.7 | Session 02: phase 0k complete — custom two-OTA-slot partition table now baked into firmware and flashed on chip. Cribbed the OUT-dir-copy build.rs trick from r2-core/platforms/esp32-s3. `tools/setup-firmware.sh` added for fresh-clone bootstrap. OTA infrastructure ready ahead of Phase 9 implementation. |
 | 2026-05-07 | 0.8 | Session 02: phase 0L complete — firmware streams synthetic data over WiFi/TCP per WIRE spec. Phase 0m in progress — dashboard vendored from r2-core into Cargo workspace at repo root, CBOR-payload remap adapts integer-keyed maps to friendly browser keys. Phase 0n complete — git-SHA + timestamp version stamping on both firmware and dashboard, /api/version endpoint exposed for OTA decision logic. |
+| 2026-05-07 | 0.9 | Session 02: end-to-end demo verified on real hardware (MAC `1c:db:d4:41:28:3c`). Schema/parser fixes during integration: R2-WIRE compact frame is 12-byte header (not 7-byte M10 layout); `hostname` not `name` for the friendly label; raw-LSB→g scaling moved server-side. Live decimation to 10 Hz keeps the browser smooth. `tools/setup-hotspot.sh` automates the AP bring-up. **Phase 5a complete** — NVS-persistent Ed25519 device key, signed announce verified on the wire. Phase 5b–5e (dashboard verify, HMAC, relay, cloud) carried forward. Phase 4 effectively delivered as part of 0L (WiFi+TCP+frames). New tasks: #17 Trust Group + remote access (5b/c/d/e), #18 LED state machine. |
