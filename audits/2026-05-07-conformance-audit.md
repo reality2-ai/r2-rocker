@@ -275,10 +275,52 @@ Phase 9 in PLAN.md; nothing to verify until then.
 
 ---
 
+## Reconciliation: AOT compilation as conformance
+
+User-flagged 2026-05-07, after the audit returned: **the architectural
+"gap" reconciles cleanly through the lens of compilation vs
+interpretation.**
+
+R2-BUILD and R2-COMPILE explicitly anticipate that sentants and
+plugins can be **AOT-compiled** into native firmware rather than
+loaded into a runtime interpreter. The externally-observable
+behaviour — events on the wire, R2-FNV / R2-CBOR / R2-WIRE
+conformance, TG semantics — is what defines conformance, not the
+runtime form of the binary.
+
+Under this lens:
+
+* `firmware/esp32-s3/` is a **manually-compiled sensor sentant**
+  whose plugin boundaries (accelerometer driver, battery monitor,
+  SD-storage, WiFi connector, identity/TG, OTA) are notional but
+  whose external event surface is correct.
+* `dashboard/` is a **manually-compiled dashboard ensemble**
+  (bridge / KeyHolder / archive roles) with the same property.
+* The audit's "gap" is therefore really a **documentation gap**:
+  we haven't authored the `r2-rocker.ensemble.yaml` that describes
+  the compile-time composition. Once that file exists (Phase
+  5d-ensemble), the binary behind it is a valid R2 ensemble whether
+  it's interpreted (via `r2-engine` at runtime) or AOT-compiled
+  (the current path).
+
+This matters because it changes Phase 5d-ensemble from "rewrite to
+use r2-engine" to "author the YAML and verify it describes what
+the binary already does." Materially less work; same conformance
+outcome.
+
+It also matters for the Phase 5d browser viewer: the WASM hive WILL
+load sentants at runtime via `r2-engine` (interpreted form), while
+the firmware can stay AOT-compiled. Both are valid. They share the
+ensemble definition.
+
 ## Bottom line
 
 * **Phase 5a ships now** — wire-level conformance is solid.
-* **Phase 5d gets the architectural refactor** — ensemble.yaml,
-  sentants on `r2-engine`, plugins for the side-effects.
+* **Phase 5d-ensemble** = author `r2-rocker.ensemble.yaml`
+  (documenting the compile-time composition that already exists),
+  not a runtime rewrite.
+* **r2-engine usage** is required only on platforms that interpret
+  sentants at runtime (the browser hive). Firmware can stay
+  AOT-compiled until/unless we want runtime sentant migration.
 * **r2-notekeeper is the working reference** for both the ensemble
   shape and the WASM-hive enrolment flow.
