@@ -73,9 +73,22 @@ Key distinctions:
   frames AND runs a TG-member archiver consumer that keeps the
   long-term store. (Public r2-relay is the bootstrap path; migrating
   to own server is a config swap, not an architecture change.)
-* **Enrolment via QR / link** (preferred path): the onsite dashboard
-  generates a one-time join token (single-use, ≤5 min expiry). The
-  token is encoded into both:
+* **TG membership: who joins how** —
+  - **Sensors** (ESP32-S3): TG members **automatically** by their
+    firmware build. The firmware bakes in `trust_keys/tg_pub.bin` via
+    `include_bytes!` and generates its own per-device Ed25519 keypair
+    in NVS on first boot (Phase 5a, done). No enrolment dance.
+  - **Onsite controller** (the dashboard host): TG member
+    **automatically** by config — it's the KeyHolder, holds
+    `tg_priv.bin` off-tree at `~/.config/r2-rocker/tg_signer/`. It
+    doesn't enrol; it issues enrolments.
+  - **Browsers** (laptops, phones, tablets — anything that runs the
+    WebApp): TG members **by the QR/link enrolment flow** below. This
+    is the only path that uses one-time tokens.
+
+* **Browser enrolment via QR / link** (preferred path): the onsite
+  dashboard generates a one-time join token (single-use, ≤5 min
+  expiry). The token is encoded into both:
   - a **QR code** displayed on the dashboard (operator points another
     device's camera at the screen), and
   - a **shareable link** of the form
