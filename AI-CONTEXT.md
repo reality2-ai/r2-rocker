@@ -73,10 +73,24 @@ Key distinctions:
   frames AND runs a TG-member archiver consumer that keeps the
   long-term store. (Public r2-relay is the bootstrap path; migrating
   to own server is a config swap, not an architecture change.)
-* **Enrolment via download + code**: get the WebApp from GitHub,
-  enter a code from the onsite dashboard's UI, browser submits its
-  generated public key, onsite KeyHolder issues a TG-signed device
-  cert. Same shape as r2-notekeeper.
+* **Enrolment via QR / link** (preferred path): the onsite dashboard
+  generates a one-time join token (single-use, ≤5 min expiry). The
+  token is encoded into both:
+  - a **QR code** displayed on the dashboard (operator points another
+    device's camera at the screen), and
+  - a **shareable link** of the form
+    `https://reality2-roycdavies.github.io/r2-rocker/?join=<token>`
+    (operator emails / messages it).
+
+  Either path opens the WebApp **and** triggers enrolment in the same
+  step — the WASM hive reads `?join=` from the URL on first load,
+  generates its keypair (IndexedDB), submits its public key + the
+  token to the onsite host's KeyHolder endpoint over the relay, gets
+  back a TG-signed device cert, becomes a member. From then on the
+  device just works (cert persists in IndexedDB).
+
+  Fallback: a manual "paste a join link" field in the WebApp's
+  not-enrolled landing page, in case QR-scan / link-click both fail.
 
 This shape supersedes the earlier separate Phase 5d (relay) +
 Phase 5e (cloud archive) — they're one component now.
@@ -156,6 +170,14 @@ charts updating in Chart.js. Hardware: ESP32-S3-DevKitC-1-N8R8 MAC
   and the browser is itself a TG member: holds its own keypair +
   TG-signed cert, decrypts + verifies frames, talks peer-to-peer
   with other TG members through the relay.
+
+  **Phase 5d is REPLACE, not AUGMENT** — the existing Axum-served
+  HTML+JS dashboard goes away. The Rust process stays only for: (a)
+  sensor TCP listener, (b) relay-compatible WSS forwarding raw R2-WIRE
+  bytes to connected browser hives, (c) TG KeyHolder cert issuance,
+  (d) local data archive (Phase 5f). It no longer decodes frames or
+  serves HTML/JSON. The browser is the canonical viewer in both
+  onsite and remote modes — same WebApp binary either way.
 
   Three hosts at deployment of Phase 5d:
 
