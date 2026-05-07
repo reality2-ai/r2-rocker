@@ -194,6 +194,16 @@ charts updating in Chart.js. Hardware: ESP32-S3-DevKitC-1-N8R8 MAC
   serves HTML/JSON. The browser is the canonical viewer in both
   onsite and remote modes — same WebApp binary either way.
 
+  **Why do this now rather than retrofit later** (user, 2026-05-07):
+  the longer the current Rust-server-decoded model is in use, the
+  more accumulated state it picks up — calibration storage, joint
+  groups, session history, per-peer metadata — and the harder it
+  gets to migrate to the WASM-hive model without breaking saved data
+  or rewriting half the code twice. Migrating before that drift
+  accumulates is the cheaper path. Phase 5b's Rust-side announce
+  verification is acknowledged as transitional — the same logic
+  re-emerges in WASM during 5d, just compiled differently.
+
   Three hosts at deployment of Phase 5d:
 
   | Host | Role | Why this host |
