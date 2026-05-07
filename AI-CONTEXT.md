@@ -86,9 +86,11 @@ Key distinctions:
     WebApp): TG members **by the QR/link enrolment flow** below. This
     is the only path that uses one-time tokens.
 
-* **Browser enrolment via QR / link** (preferred path): the onsite
-  dashboard generates a one-time join token (single-use, ≤5 min
-  expiry). The token is encoded into both:
+* **Browser enrolment via QR / link** — **same model as r2-notekeeper**.
+  Joining a WebApp requires either a link or a QR code (e.g. scan
+  from a phone); there is no other way in. The onsite dashboard
+  generates a one-time join token (single-use, ≤5 min expiry). The
+  token is encoded into both:
   - a **QR code** displayed on the dashboard (operator points another
     device's camera at the screen), and
   - a **shareable link** of the form
