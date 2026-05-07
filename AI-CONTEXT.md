@@ -90,6 +90,15 @@ charts updating in Chart.js. Hardware: ESP32-S3-DevKitC-1-N8R8 MAC
   (Axum + JS) stays — it's the privileged producer that knows the
   TG signing key. Remote consumers are pure browser+WASM viewers.
 
+  **Layering inside the browser**: WASM = protocol + crypto core
+  (frame decode, HMAC verify, TG key derivation, cert
+  validation, signature checks); **plain JavaScript = UX layer**
+  (DOM, layout, Chart.js, event handlers, calibration wizard,
+  joint-group editor). Same split as the current local dashboard,
+  same Chart.js + handwritten-JS style — just with WASM
+  intermediating between the WSS connection and the rendering JS
+  instead of a Rust server.
+
 * **Each remote browser is its own enrolled TG member** — not a copy
   of the dashboard's keys. Per `r2-trust` SPEC §2, each browser
   generates its own Ed25519 keypair on first run (persisted in
