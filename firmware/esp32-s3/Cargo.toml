@@ -25,6 +25,7 @@ debug     = true
 [dependencies]
 log          = "0.4"
 anyhow       = "1"
+libm         = "0.2"
 esp-idf-svc  = { version = "0.51", default-features = false, features = ["binstart", "std"] }
 
 [build-dependencies]

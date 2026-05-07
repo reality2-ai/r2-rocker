@@ -1,0 +1,12 @@
+# Copy to wifi_config.toml (gitignored) and fill in your network's details.
+# The build.rs picks these up at compile time via env vars.
+# Re-run `cargo build` after editing.
+
+ssid     = "your-network-ssid"
+password = "your-network-psk"
+
+# IP of the machine running the dashboard (where r2-rocker dashboard
+# listens on TCP :21042). For the eventual demo on a laptop hotspot
+# this is typically 10.42.0.1; for your home network, it's whatever
+# IP your laptop has on that LAN.
+gateway_ip = "192.168.1.10"
