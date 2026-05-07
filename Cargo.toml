@@ -11,11 +11,18 @@ members = [
     "crates/r2-wire",
     "crates/r2-core",
     "crates/r2-bootstrap",
-    "dashboard",
-    "tools/r2-rocker-tg",
+    "crates/r2-trust",
+    "crates/r2-transport",
+    "crates/r2-route",
+    "crates/r2-engine",
+    # r2-wasm has cdylib + wasm32-only deps (wasm-bindgen, getrandom/js).
+    # It is built with `wasm-pack` from the wasm-viewer/ package, NOT
+    # by the host workspace. Excluded so `cargo check --workspace` on
+    # x86_64-linux doesn't try to compile the wasm-bindgen targets.
 ]
 exclude = [
     "firmware/esp32-s3",
+    "crates/r2-wasm",
 ]
 
 [workspace.package]

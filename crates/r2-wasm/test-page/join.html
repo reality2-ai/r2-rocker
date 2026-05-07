@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>R2 Trust Group</title>
+    <style>
+        :root {
+            --bg: #1a1a2e;
+            --surface: #16213e;
+            --surface2: #0f3460;
+            --accent: #00d4ff;
+            --accent-dim: #0094b3;
+            --green: #00ff88;
+            --red: #ff4444;
+            --text: #e0e0e0;
+            --text-dim: #888;
+            --mono: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+
+        /* Join screen */
+        #join-screen {
+            position: fixed; inset: 0; background: var(--bg); z-index: 300;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .join-box { text-align: center; max-width: 400px; padding: 32px; }
+        .join-box h1 { color: var(--accent); font-size: 24px; margin-bottom: 8px; }
+        .join-box p { color: var(--text-dim); margin-bottom: 24px; font-size: 14px; }
+        .field { margin-bottom: 12px; }
+        .field-input {
+            width: 100%; padding: 12px; background: var(--surface); border: 1px solid var(--surface2);
+            border-radius: 8px; color: var(--text); font-size: 16px; outline: none;
+        }
+        .field-input:focus { border-color: var(--accent); }
+        .field-input.code { text-align: center; font-size: 20px; letter-spacing: 3px; font-family: var(--mono); }
+        .btn {
+            border: none; border-radius: 8px; padding: 12px 32px; cursor: pointer;
+            font-weight: 600; font-size: 16px; width: 100%; margin-bottom: 8px;
+        }
+        .btn-primary { background: var(--accent); color: #000; }
+        .btn-secondary { background: var(--surface2); color: var(--text); }
+        .btn:hover { opacity: 0.9; }
+        .error { color: var(--red); font-size: 13px; margin-bottom: 12px; display: none; }
+        .or-divider { color: var(--text-dim); font-size: 13px; margin: 16px 0; }
+
+        /* App screen */
+        #app-screen { display: none; padding: 32px; max-width: 700px; margin: 0 auto; }
+        .card { background: var(--surface); border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+        .card h2 { color: var(--accent); font-size: 16px; margin-bottom: 12px; }
+        .card-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; font-size: 14px; }
+        .card-row .label { color: var(--text-dim); }
+        .card-row .value { font-family: var(--mono); font-size: 13px; color: var(--green); word-break: break-all; }
+        .mono { font-family: var(--mono); font-size: 13px; }
+        .invite-code {
+            font-family: var(--mono); font-size: 28px; letter-spacing: 4px;
+            color: var(--accent); text-align: center; padding: 16px;
+            background: var(--bg); border-radius: 8px; margin: 12px 0;
+            user-select: all;
+        }
+        .member-list { list-style: none; }
+        .member-list li { padding: 8px 0; border-bottom: 1px solid var(--surface2); font-size: 14px; }
+        .member-list li:last-child { border-bottom: none; }
+        .member-pk { font-family: var(--mono); font-size: 11px; color: var(--text-dim); }
+        .status { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--green); margin-right: 8px; }
+        .log { background: var(--bg); border-radius: 8px; padding: 12px; font-family: var(--mono); font-size: 12px; color: var(--text-dim); max-height: 200px; overflow-y: auto; margin-top: 12px; }
+        .log-entry { margin-bottom: 2px; }
+        .log-ok { color: var(--green); }
+        .log-info { color: var(--accent); }
+    </style>
+</head>
+<body>
+
+<!-- Join / Create screen -->
+<div id="join-screen">
+    <div class="join-box">
+        <h1>R2 Mesh</h1>
+        <p>Create a new trust group or join an existing one.</p>
+
+        <div class="field">
+            <input id="join-code" class="field-input code" placeholder="xxxx-xxxx-xxxx" maxlength="14"
+                   oninput="formatJoinCode(this)">
+        </div>
+        <div class="field">
+            <input id="join-name" class="field-input" placeholder="Device name (e.g. My Laptop)">
+        </div>
+        <div id="join-error" class="error"></div>
+        <button class="btn btn-primary" onclick="joinTrustGroup()">Join Trust Group</button>
+
+        <div class="or-divider">— or —</div>
+
+        <button class="btn btn-secondary" onclick="createTrustGroup()">Create New Trust Group</button>
+
+        <p style="color:var(--text-dim);font-size:11px;margin-top:20px">
+            R2 protocol stack running in WebAssembly. No server required.
+        </p>
+    </div>
+</div>
+
+<!-- App screen (shown after join/create) -->
+<div id="app-screen">
+    <div class="card">
+        <h2>Trust Group</h2>
+        <div class="card-row">
+            <span class="label">Role</span>
+            <span class="value" id="app-role">—</span>
+        </div>
+        <div class="card-row">
+            <span class="label">Trust Group ID</span>
+            <span class="value" id="app-tg-id">—</span>
+        </div>
+        <div class="card-row">
+            <span class="label">Device ID</span>
+            <span class="value" id="app-device-id">—</span>
+        </div>
+        <div class="card-row">
+            <span class="label">Status</span>
+            <span class="value"><span class="status"></span><span id="app-status">Active</span></span>
+        </div>
+    </div>
+
+    <!-- Key holder: invite section -->
+    <div class="card" id="invite-section" style="display:none">
+        <h2>Invite Device</h2>
+        <p style="color:var(--text-dim);font-size:13px;margin-bottom:12px">
+            Share this code with someone to let them join your trust group. Expires in 5 minutes.
+        </p>
+        <div id="invite-code" class="invite-code">—</div>
+        <div style="text-align:center;font-size:12px;color:var(--text-dim);margin-bottom:12px">
+            <span id="invite-timer"></span>
+        </div>
+        <button class="btn btn-secondary" onclick="generateInvite()" style="width:auto;padding:8px 20px;font-size:14px">
+            New Code
+        </button>
+    </div>
+
+    <!-- Members list -->
+    <div class="card">
+        <h2>Members (<span id="member-count">0</span>)</h2>
+        <ul class="member-list" id="member-list">
+            <li style="color:var(--text-dim)">No other members yet</li>
+        </ul>
+    </div>
+
+    <!-- Event log -->
+    <div class="card">
+        <h2>Event Log</h2>
+        <div class="log" id="event-log"></div>
+    </div>
+
+    <button class="btn btn-secondary" onclick="resetState()" style="margin-top:16px;width:auto;padding:8px 20px;font-size:13px">
+        Leave Trust Group
+    </button>
+</div>
+
+<script type="module">
+    import init, * as r2 from '../pkg/r2_wasm.js';
+
+    // ── State ──
+    let trustGroup = null;   // R2TrustGroup (key holder) or null
+    let member = null;        // R2Member (always, after join/create)
+    let isKeyHolder = false;
+    let inviteExpiry = 0;
+    let inviteTimer = null;
+
+    const STORAGE_KEY_MEMBER = 'r2_member_state';
+    const STORAGE_KEY_TG = 'r2_trust_group_state';
+    const STORAGE_KEY_ROLE = 'r2_role';
+
+    // ── Helpers ──
+    function hex(bytes) { return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(''); }
+    function hexShort(bytes) { return hex(bytes).substring(0, 16) + '...'; }
+    function now() { return BigInt(Math.floor(Date.now() / 1000)); }
+
+    function formatJoinCode(input) {
+        let v = input.value.replace(/[^a-fA-F0-9]/g, '').substring(0, 12);
+        if (v.length > 8) v = v.substring(0, 4) + '-' + v.substring(4, 8) + '-' + v.substring(8);
+        else if (v.length > 4) v = v.substring(0, 4) + '-' + v.substring(4);
+        input.value = v;
+    }
+
+    function parseJoinCode(input) {
+        return input.replace(/-/g, '').toLowerCase();
+    }
+
+    function formatCodeDisplay(hexCode) {
+        // Format as xxxx-xxxx-xxxx (first 12 hex chars of the 32-char code)
+        const short = hexCode.substring(0, 12);
+        return short.substring(0, 4) + '-' + short.substring(4, 8) + '-' + short.substring(8, 12);
+    }
+
+    function logEvent(msg, cls = '') {
+        const log = document.getElementById('event-log');
+        const div = document.createElement('div');
+        div.className = `log-entry ${cls}`;
+        div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+        log.prepend(div);
+    }
+
+    function showError(msg) {
+        const el = document.getElementById('join-error');
+        el.textContent = msg;
+        el.style.display = 'block';
+    }
+
+    function hideError() {
+        document.getElementById('join-error').style.display = 'none';
+    }
+
+    // ── Persistence ──
+    function saveState() {
+        if (member) {
+            const bytes = member.to_bytes();
+            localStorage.setItem(STORAGE_KEY_MEMBER, btoa(String.fromCharCode(...bytes)));
+        }
+        if (trustGroup && isKeyHolder) {
+            const bytes = trustGroup.to_bytes();
+            localStorage.setItem(STORAGE_KEY_TG, btoa(String.fromCharCode(...bytes)));
+        }
+        localStorage.setItem(STORAGE_KEY_ROLE, isKeyHolder ? 'key_holder' : 'member');
+    }
+
+    function loadState() {
+        const memberB64 = localStorage.getItem(STORAGE_KEY_MEMBER);
+        const tgB64 = localStorage.getItem(STORAGE_KEY_TG);
+        const role = localStorage.getItem(STORAGE_KEY_ROLE);
+
+        if (!memberB64) return false;
+
+        try {
+            const memberBytes = new Uint8Array(atob(memberB64).split('').map(c => c.charCodeAt(0)));
+            member = r2.R2Member.from_bytes(memberBytes);
+
+            if (role === 'key_holder' && tgB64) {
+                const tgBytes = new Uint8Array(atob(tgB64).split('').map(c => c.charCodeAt(0)));
+                trustGroup = r2.R2TrustGroup.from_bytes(tgBytes, now());
+                isKeyHolder = true;
+            }
+
+            return member.is_valid(now());
+        } catch (e) {
+            console.error('Failed to restore state:', e);
+            localStorage.removeItem(STORAGE_KEY_MEMBER);
+            localStorage.removeItem(STORAGE_KEY_TG);
+            localStorage.removeItem(STORAGE_KEY_ROLE);
+            return false;
+        }
+    }
+
+    // ── UI ──
+    function showApp() {
+        document.getElementById('join-screen').style.display = 'none';
+        document.getElementById('app-screen').style.display = 'block';
+
+        document.getElementById('app-role').textContent = isKeyHolder ? 'Key Holder' : 'Member';
+        document.getElementById('app-tg-id').textContent = hexShort(member.trust_group_id);
+        document.getElementById('app-device-id').textContent = hexShort(member.public_key);
+
+        if (isKeyHolder) {
+            document.getElementById('invite-section').style.display = 'block';
+            generateInvite();
+            updateMemberList();
+        }
+    }
+
+    function updateMemberList() {
+        if (!trustGroup) return;
+        const list = document.getElementById('member-list');
+        const count = trustGroup.member_count;
+        document.getElementById('member-count').textContent = count + 1; // +1 for key holder
+
+        if (count === 0) {
+            list.innerHTML = '<li style="color:var(--text-dim)">No other members yet — share the invite code above</li>';
+            return;
+        }
+
+        const names = trustGroup.member_names();
+        list.innerHTML = names.map(name =>
+            `<li><span class="status"></span>${name}</li>`
+        ).join('');
+    }
+
+    // ── Actions ──
+    window.createTrustGroup = function() {
+        hideError();
+        const deviceName = document.getElementById('join-name').value.trim() || 'Key Holder';
+
+        try {
+            // Create trust group (key holder)
+            trustGroup = new r2.R2TrustGroup(now());
+            isKeyHolder = true;
+
+            // The key holder also needs a member state for their own operations.
+            // Generate a device key and self-join.
+            const keypair = r2.generate_device_keypair();
+            const joinCode = trustGroup.generate_join_code(now(), BigInt(300));
+            const encrypted = trustGroup.process_join(
+                joinCode,
+                new Uint8Array(keypair.public_key),
+                deviceName,
+                now()
+            );
+            member = r2.complete_join(
+                new Uint8Array(keypair.secret_key),
+                new Uint8Array(trustGroup.public_key),
+                encrypted,
+                now()
+            );
+
+            saveState();
+            logEvent(`Trust group created`, 'log-ok');
+            logEvent(`TG ID: ${hexShort(trustGroup.public_key)}`, 'log-info');
+            logEvent(`Device: ${deviceName}`, 'log-info');
+            showApp();
+        } catch (e) {
+            showError('Failed to create trust group: ' + e.message);
+        }
+    };
+
+    window.joinTrustGroup = function() {
+        hideError();
+        const codeInput = document.getElementById('join-code').value.trim();
+        const deviceName = document.getElementById('join-name').value.trim() || 'unnamed device';
+
+        if (!codeInput) {
+            showError('Enter a join code.');
+            return;
+        }
+
+        const codeHex = parseJoinCode(codeInput);
+        if (codeHex.length < 12) {
+            showError('Join code must be at least 12 hex characters (xxxx-xxxx-xxxx).');
+            return;
+        }
+
+        // In a real deployment, we'd send this code over a transport to the key holder.
+        // For this demo, we simulate by checking if we have a trust group in the same page.
+        // In production: WebSocket/WebBluetooth/WebUSB carries the join handshake.
+
+        if (!trustGroup) {
+            showError('No trust group available to join. In production, this would connect via WebSocket/WebBluetooth to the key holder.');
+            return;
+        }
+
+        try {
+            const keypair = r2.generate_device_keypair();
+            const encrypted = trustGroup.process_join(
+                codeHex.padEnd(32, '0'), // Pad short code to 32 hex chars (16 bytes)
+                new Uint8Array(keypair.public_key),
+                deviceName,
+                now()
+            );
+            member = r2.complete_join(
+                new Uint8Array(keypair.secret_key),
+                new Uint8Array(trustGroup.public_key),
+                encrypted,
+                now()
+            );
+            isKeyHolder = false;
+
+            saveState();
+            logEvent(`Joined trust group as "${deviceName}"`, 'log-ok');
+            showApp();
+        } catch (e) {
+            showError('Join failed: ' + (e.message || e));
+        }
+    };
+
+    window.generateInvite = function() {
+        if (!trustGroup) return;
+
+        const codeHex = trustGroup.generate_join_code(now(), BigInt(300));
+        document.getElementById('invite-code').textContent = formatCodeDisplay(codeHex);
+        inviteExpiry = Date.now() + 300000; // 5 minutes
+
+        if (inviteTimer) clearInterval(inviteTimer);
+        inviteTimer = setInterval(() => {
+            const remaining = Math.max(0, Math.ceil((inviteExpiry - Date.now()) / 1000));
+            document.getElementById('invite-timer').textContent =
+                remaining > 0 ? `Expires in ${Math.floor(remaining/60)}:${(remaining%60).toString().padStart(2,'0')}` : 'Expired';
+            if (remaining <= 0) clearInterval(inviteTimer);
+        }, 1000);
+
+        saveState();
+        logEvent('New join code generated', 'log-info');
+    };
+
+    window.resetState = function() {
+        if (!confirm('Leave this trust group? Your device credentials will be deleted.')) return;
+        localStorage.removeItem(STORAGE_KEY_MEMBER);
+        localStorage.removeItem(STORAGE_KEY_TG);
+        localStorage.removeItem(STORAGE_KEY_ROLE);
+        trustGroup = null;
+        member = null;
+        isKeyHolder = false;
+        document.getElementById('join-screen').style.display = 'flex';
+        document.getElementById('app-screen').style.display = 'none';
+    };
+
+    // ── Keyboard ──
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            if (document.getElementById('join-screen').style.display !== 'none') {
+                joinTrustGroup();
+            }
+        }
+    });
+
+    // ── Hash join (QR code) ──
+    function checkHashJoin() {
+        const hash = window.location.hash;
+        if (hash.startsWith('#join=')) {
+            const code = hash.slice(6);
+            if (code) {
+                setTimeout(() => {
+                    const input = document.getElementById('join-code');
+                    if (input) { input.value = code; input.focus(); }
+                }, 100);
+                history.replaceState(null, '', window.location.pathname + window.location.search);
+            }
+        }
+    }
+
+    // ── Init ──
+    async function start() {
+        await init();
+        logEvent(`${r2.r2_version()} loaded`, 'log-info');
+
+        // Try to restore from localStorage
+        if (loadState()) {
+            logEvent('Restored from localStorage', 'log-ok');
+            logEvent(`Role: ${isKeyHolder ? 'Key Holder' : 'Member'}`, 'log-info');
+            showApp();
+        } else {
+            // Show join screen
+            document.getElementById('join-screen').style.display = 'flex';
+            checkHashJoin();
+        }
+    }
+
+    start().catch(e => {
+        console.error(e);
+        showError('Failed to load R2 WASM: ' + e.message);
+    });
+</script>
+</body>
+</html>

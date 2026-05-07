@@ -1,0 +1,1590 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>R2 Notekeeper</title>
+    <!-- Favicon: inline SVG adapts to system theme via CSS -->
+    <link rel="icon" type="image/svg+xml" href="icons/notekeeper.svg">
+    <link rel="icon" type="image/png" sizes="32x32" href="icons/icon-32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="icons/icon-16.png">
+
+    <!-- Apple -->
+    <link rel="apple-touch-icon" href="icons/icon-180.png">
+    <link rel="apple-touch-icon" sizes="152x152" href="icons/icon-152.png">
+    <link rel="apple-touch-icon" sizes="167x167" href="icons/icon-167.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="icons/icon-180.png">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Notekeeper">
+
+    <!-- Android / Chrome -->
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#151518" media="(prefers-color-scheme: dark)">
+    <meta name="theme-color" content="#f5f2ed" media="(prefers-color-scheme: light)">
+
+    <!-- Windows -->
+    <meta name="msapplication-TileImage" content="icons/icon-144.png">
+    <meta name="msapplication-TileColor" content="#151518">
+
+    <!-- General -->
+    <meta name="application-name" content="R2 Notekeeper">
+    <meta name="description" content="Private notes on the R2 mesh. End-to-end encrypted. No server required.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root, [data-theme="dark"] {
+            --bg: #151518; --surface: #1c1c21; --surface2: #26262d; --surface3: #32323b;
+            --accent: #d4a853; --accent-dim: #a07d3a; --accent-glow: #d4a85322;
+            --green: #6ecb8b; --red: #e05555; --amber: #d4a853;
+            --text: #d8d4cf; --text-dim: #706c65; --text-faint: #4a4740;
+            --logo-bg: #151518;
+            --border: rgba(212, 168, 83, 0.08);
+            --border-strong: rgba(212, 168, 83, 0.15);
+        }
+        [data-theme="light"] {
+            --bg: #f5f2ed; --surface: #ffffff; --surface2: #ede9e3; --surface3: #ddd8d0;
+            --accent: #9a7030; --accent-dim: #7a5820; --accent-glow: #9a703015;
+            --green: #2d8a52; --red: #c43030; --amber: #9a7030;
+            --text: #2c2820; --text-dim: #7a7568; --text-faint: #a8a098;
+            --logo-bg: #f5f2ed;
+            --border: rgba(0, 0, 0, 0.06);
+            --border-strong: rgba(0, 0, 0, 0.12);
+        }
+        @media (prefers-color-scheme: light) {
+            :root:not([data-theme="dark"]) {
+                --bg: #f5f2ed; --surface: #ffffff; --surface2: #ede9e3; --surface3: #ddd8d0;
+                --accent: #9a7030; --accent-dim: #7a5820; --accent-glow: #9a703015;
+                --green: #2d8a52; --red: #c43030; --amber: #9a7030;
+                --text: #2c2820; --text-dim: #7a7568; --text-faint: #a8a098;
+                --logo-bg: #f5f2ed;
+                --border: rgba(0, 0, 0, 0.06);
+                --border-strong: rgba(0, 0, 0, 0.12);
+            }
+        }
+        :root {
+            --display: 'DM Sans', -apple-system, sans-serif;
+            --sans: 'DM Sans', -apple-system, sans-serif;
+            --mono: 'JetBrains Mono', 'SF Mono', monospace;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: var(--sans); background: var(--bg); color: var(--text); height: 100vh; overflow: hidden; }
+        ::selection { background: var(--accent); color: var(--bg); }
+
+        /* Join screen */
+        #join-screen {
+            position: fixed; inset: 0; z-index: 300;
+            display: flex; align-items: center; justify-content: center;
+            background: var(--bg);
+            background-image: radial-gradient(ellipse at 50% 30%, var(--accent-glow) 0%, transparent 60%);
+        }
+        .join-box { text-align: center; max-width: 380px; padding: 40px 32px; }
+        .join-box h1 {
+            font-family: var(--display); font-size: 28px; font-weight: 700;
+            color: var(--accent); letter-spacing: -0.3px; margin-bottom: 6px;
+        }
+        .join-box .subtitle { color: var(--text-dim); font-size: 13px; margin-bottom: 32px; line-height: 1.5; }
+        .field { margin-bottom: 14px; }
+        .field-input {
+            width: 100%; padding: 13px 16px; font-family: var(--sans); font-size: 14px;
+            background: var(--surface); border: 1px solid var(--border-strong);
+            border-radius: 10px; color: var(--text); outline: none;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+        .field-input:focus { border-color: var(--accent-dim); box-shadow: 0 0 0 3px var(--accent-glow); }
+        .field-input::placeholder { color: var(--text-faint); }
+        .btn {
+            border: none; border-radius: 10px; padding: 13px 24px; cursor: pointer;
+            font-family: var(--sans); font-weight: 600; font-size: 14px;
+            transition: transform 0.1s, opacity 0.15s;
+        }
+        .btn:active { transform: scale(0.98); }
+        .btn-block { width: 100%; margin-bottom: 8px; }
+        .btn-primary { background: var(--accent); color: var(--bg); }
+        .btn-primary:hover { opacity: 0.9; }
+        .btn-secondary { background: var(--surface2); color: var(--text-dim); border: 1px solid var(--border-strong); }
+        .btn-secondary:hover { background: var(--surface3); color: var(--text); }
+        .btn-danger { background: transparent; color: var(--red); border: 1px solid var(--red); }
+        .btn-danger:hover { background: var(--red); color: #fff; }
+        .btn-small { padding: 7px 14px; font-size: 12px; border-radius: 8px; }
+        .error { color: var(--red); font-size: 13px; margin-bottom: 12px; display: none; }
+        .or-divider {
+            color: var(--text-faint); font-size: 12px; margin: 20px 0;
+            display: flex; align-items: center; gap: 12px;
+        }
+        .or-divider::before, .or-divider::after { content: ''; flex: 1; height: 1px; background: var(--border-strong); }
+        .join-footer { color: var(--text-faint); font-size: 11px; margin-top: 28px; line-height: 1.5; }
+        .join-footer span { font-family: var(--mono); font-size: 10px; color: var(--text-dim); }
+
+        /* App layout */
+        #app-screen { display: none; height: 100vh; }
+        .app-header {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 14px 24px;
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+        }
+        .app-header h1 { font-family: var(--display); font-size: 17px; font-weight: 700; color: var(--accent); letter-spacing: -0.2px; }
+        .header-meta { font-family: var(--mono); font-size: 10px; color: var(--text-faint); margin-top: 2px; letter-spacing: 0.3px; }
+        .header-actions { display: flex; gap: 6px; align-items: center; }
+        .app-body { display: flex; height: calc(100vh - 53px); }
+
+        /* Note list */
+        .note-list { width: 300px; border-right: 1px solid var(--border); overflow-y: auto; flex-shrink: 0; background: var(--surface); }
+        .note-list::-webkit-scrollbar { width: 4px; }
+        .note-list::-webkit-scrollbar-thumb { background: var(--surface3); border-radius: 4px; }
+        .note-list-header {
+            padding: 16px 20px 12px; display: flex; justify-content: space-between; align-items: center;
+            border-bottom: 1px solid var(--border);
+        }
+        .note-list-header span { font-size: 11px; color: var(--text-faint); font-family: var(--mono); text-transform: uppercase; letter-spacing: 1px; }
+        .note-card {
+            padding: 14px 20px; border-bottom: 1px solid var(--border); cursor: pointer;
+            transition: background 0.15s, border-color 0.15s;
+        }
+        .note-card:hover { background: var(--surface2); }
+        .note-card.active { background: var(--surface2); border-left: 2px solid var(--accent); padding-left: 18px; }
+        .note-card .title { font-size: 14px; font-weight: 500; margin-bottom: 5px; color: var(--text); line-height: 1.3; }
+        .note-card .preview { font-size: 12px; color: var(--text-dim); line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+        .note-card .meta { font-size: 10px; color: var(--text-faint); margin-top: 6px; font-family: var(--mono); }
+        .empty-list { padding: 60px 24px; text-align: center; color: var(--text-faint); font-size: 13px; line-height: 1.6; }
+
+        /* Invite panel */
+        #invite-panel {
+            padding: 16px 20px; background: var(--bg); border-bottom: 1px solid var(--border);
+        }
+        .invite-label { font-size: 11px; color: var(--accent-dim); font-family: var(--mono); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; }
+        .invite-code-display {
+            font-family: var(--mono); font-size: 10px; line-height: 1.5;
+            background: var(--surface2); padding: 10px 12px; border-radius: 8px;
+            word-break: break-all; user-select: all; cursor: pointer;
+            color: var(--green); border: 1px solid var(--border);
+            transition: background 0.15s;
+        }
+        .invite-code-display:hover { background: var(--surface3); }
+        .invite-meta { font-size: 10px; color: var(--text-faint); margin-top: 8px; display: flex; justify-content: space-between; align-items: center; }
+
+        /* Editor */
+        .editor { flex: 1; display: flex; flex-direction: column; background: var(--bg); }
+        .editor-empty {
+            flex: 1; display: flex; align-items: center; justify-content: center;
+            color: var(--text-faint);
+            background-image: radial-gradient(circle at 50% 50%, var(--accent-glow) 0%, transparent 50%);
+        }
+        .editor-empty p:first-child { font-family: var(--display); font-size: 22px; color: var(--text-dim); margin-bottom: 8px; }
+        .editor-empty p:last-child { font-size: 13px; }
+        .editor-toolbar {
+            padding: 10px 24px; display: flex; justify-content: space-between; align-items: center;
+            background: var(--surface); border-bottom: 1px solid var(--border);
+        }
+        .editor-title {
+            width: 100%; padding: 20px 32px 12px; background: transparent; border: none;
+            color: var(--text); font-family: var(--display); font-size: 24px; font-weight: 600;
+            outline: none; letter-spacing: -0.3px; line-height: 1.3;
+        }
+        .editor-title::placeholder { color: var(--text-faint); }
+        .editor-content {
+            flex: 1; padding: 8px 32px 32px; background: transparent; border: none;
+            color: var(--text); font-family: var(--mono); font-size: 14px; line-height: 1.7;
+            outline: none; resize: none; tab-size: 2;
+        }
+        .editor-content::placeholder { color: var(--text-faint); }
+
+        /* Formatting toolbar */
+        .fmt-bar {
+            display: flex; gap: 2px; padding: 6px 32px; background: var(--surface);
+            border-bottom: 1px solid var(--border); flex-wrap: wrap; align-items: center;
+        }
+        .fmt-btn {
+            background: none; border: 1px solid transparent; border-radius: 6px;
+            color: var(--text-dim); font-size: 13px; padding: 4px 8px; cursor: pointer;
+            font-family: var(--sans); transition: all 0.1s;
+        }
+        .fmt-btn:hover { background: var(--surface2); color: var(--text); border-color: var(--border); }
+        .fmt-btn.active { background: var(--surface3); color: var(--accent); border-color: var(--accent-dim); }
+        .fmt-sep { width: 1px; height: 18px; background: var(--border); margin: 0 4px; }
+        .mode-toggle {
+            margin-left: auto; display: flex; gap: 0; border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
+        }
+        .mode-toggle button {
+            background: none; border: none; color: var(--text-dim); font-size: 11px;
+            padding: 4px 10px; cursor: pointer; font-family: var(--mono);
+        }
+        .mode-toggle button.active { background: var(--surface3); color: var(--accent); }
+
+        /* Markdown preview */
+        .editor-preview {
+            flex: 1; padding: 8px 32px 32px; overflow-y: auto;
+            color: var(--text); font-family: var(--sans); font-size: 15px; line-height: 1.75;
+        }
+        .editor-preview h1 { font-family: var(--display); font-size: 24px; font-weight: 700; color: var(--text); margin: 20px 0 10px; letter-spacing: -0.3px; }
+        .editor-preview h2 { font-family: var(--display); font-size: 20px; font-weight: 600; color: var(--text); margin: 18px 0 8px; }
+        .editor-preview h3 { font-family: var(--sans); font-size: 16px; font-weight: 600; color: var(--text); margin: 16px 0 6px; }
+        .editor-preview p { margin: 8px 0; }
+        .editor-preview strong { color: var(--text); font-weight: 600; }
+        .editor-preview em { color: var(--text-dim); font-style: italic; }
+        .editor-preview code {
+            font-family: var(--mono); font-size: 13px; background: var(--surface2);
+            padding: 2px 6px; border-radius: 4px; color: var(--accent);
+        }
+        .editor-preview pre {
+            background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+            padding: 14px 16px; margin: 12px 0; overflow-x: auto;
+        }
+        .editor-preview pre code { background: none; padding: 0; font-size: 13px; color: var(--text); }
+        .editor-preview blockquote {
+            border-left: 3px solid var(--accent-dim); padding: 4px 16px; margin: 12px 0;
+            color: var(--text-dim); font-style: italic;
+        }
+        .editor-preview ul, .editor-preview ol { padding-left: 24px; margin: 8px 0; }
+        .editor-preview li { margin: 4px 0; }
+        .editor-preview hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
+        .editor-preview a { color: var(--accent); text-decoration: none; }
+        .editor-preview a:hover { text-decoration: underline; }
+
+        /* Sync indicator */
+        .sync-status { font-size: 11px; font-family: var(--mono); transition: color 0.3s; }
+        @keyframes sync-wave {
+            0% { opacity: 1; }
+            50% { opacity: 0.3; }
+            100% { opacity: 1; }
+        }
+        .syncing { animation: sync-wave 1s ease-in-out infinite; color: var(--accent) !important; }
+
+        /* Event log (slide-in panel from right, like settings) */
+        .event-backdrop {
+            position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 100;
+            display: none; opacity: 0; transition: opacity 0.2s;
+        }
+        .event-backdrop.open { display: block; opacity: 1; }
+        .event-panel {
+            position: fixed; top: 0; right: -420px; bottom: 0; width: 400px; max-width: 90vw;
+            background: var(--surface); z-index: 101;
+            transition: right 0.25s ease; overflow-y: auto;
+            border-left: 1px solid var(--border);
+        }
+        .event-panel.open { right: 0; }
+        .event-panel-header {
+            padding: 16px 20px; font-size: 11px; font-family: var(--mono); color: var(--accent-dim);
+            border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center;
+            text-transform: uppercase; letter-spacing: 1px; position: sticky; top: 0; background: var(--surface);
+        }
+        .event-entry {
+            padding: 5px 20px; font-family: var(--mono); font-size: 10px; color: var(--text-faint);
+            border-bottom: 1px solid var(--border); line-height: 1.5;
+        }
+        .event-entry .op { color: var(--amber); }
+        .event-entry .hash { color: var(--text-dim); }
+
+        /* Settings panel */
+        .settings-backdrop {
+            position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 100;
+            display: none; opacity: 0; transition: opacity 0.2s;
+        }
+        .settings-backdrop.open { display: block; opacity: 1; }
+        .settings-panel {
+            position: fixed; top: 0; right: -380px; bottom: 0; width: 360px; max-width: 90vw;
+            background: var(--surface); z-index: 101; padding: 0;
+            transition: right 0.25s ease; overflow-y: auto;
+            border-left: 1px solid var(--border);
+        }
+        .settings-panel.open { right: 0; }
+        .settings-header {
+            padding: 20px 24px 16px; display: flex; justify-content: space-between; align-items: center;
+            border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface);
+        }
+        .settings-header h2 { font-family: var(--display); font-size: 18px; font-weight: 700; color: var(--accent); }
+        .settings-section { padding: 20px 24px; border-bottom: 1px solid var(--border); }
+        .settings-section h3 {
+            font-family: var(--mono); font-size: 10px; text-transform: uppercase;
+            letter-spacing: 1px; color: var(--text-faint); margin-bottom: 12px;
+        }
+        .settings-row {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 6px 0; font-size: 13px;
+        }
+        .settings-row .label { color: var(--text-dim); }
+        .settings-row .value { font-family: var(--mono); font-size: 11px; color: var(--text); word-break: break-all; max-width: 200px; text-align: right; }
+
+        /* Mobile: full-screen panels that switch */
+        @media (max-width: 700px) {
+            .app-body { position: relative; }
+            .note-list { width: 100%; border-right: none; }
+            .editor {
+                position: absolute; inset: 0; z-index: 10;
+                display: none; background: var(--bg);
+            }
+            .editor.mobile-visible { display: flex; }
+            .editor-title { font-size: 22px; padding: 16px 20px 8px; }
+            .editor-content { padding: 4px 20px 20px; font-size: 15px; }
+            .app-header h1 { font-size: 17px; }
+            .join-box { padding: 24px 20px; }
+            .join-box h1 { font-size: 28px; }
+            .invite-code-display { font-size: 9px; }
+        }
+    </style>
+</head>
+<body>
+
+<!-- Join / Create screen -->
+<div id="join-screen">
+    <div class="join-box">
+        <div style="margin-bottom:16px">
+            <svg width="64" height="64" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg" class="logo-icon">
+                <path d="M256 72L400 156V324L256 408L112 324V156Z" fill="none" stroke="var(--accent)" stroke-width="20" stroke-linejoin="round" opacity="0.85"/>
+                <line x1="176" y1="200" x2="336" y2="200" stroke="var(--accent)" stroke-width="12" stroke-linecap="round" opacity="0.5"/>
+                <line x1="176" y1="244" x2="310" y2="244" stroke="var(--accent)" stroke-width="12" stroke-linecap="round" opacity="0.5"/>
+                <line x1="176" y1="288" x2="280" y2="288" stroke="var(--accent)" stroke-width="12" stroke-linecap="round" opacity="0.5"/>
+                <path d="M310 320L420 120" stroke="var(--accent)" stroke-width="14" stroke-linecap="round"/>
+                <path d="M310 320L300 330L314 326Z" fill="var(--accent)"/>
+                <path d="M420 120Q440 96 448 72Q432 100 420 120" fill="var(--accent)" opacity="0.7"/>
+                <path d="M420 120Q408 92 414 68Q424 96 420 120" fill="var(--accent)" opacity="0.5"/>
+            </svg>
+        </div>
+        <h1>Notekeeper</h1>
+        <p class="subtitle">Private notes on the R2 mesh.<br>No server. No cloud. End-to-end encrypted.</p>
+        <div class="field">
+            <input id="join-code" class="field-input" placeholder="xxxx-xxxx-xxxx or scan QR" style="font-family:var(--mono);font-size:14px;text-align:center;letter-spacing:2px"
+                   oninput="formatShortCode(this)" maxlength="14">
+        </div>
+        <div class="field">
+            <input id="join-name" class="field-input" placeholder="Device name">
+        </div>
+        <div class="field">
+            <input id="relay-url" class="field-input" placeholder="Relay URL" style="font-family:var(--mono);font-size:12px">
+        </div>
+        <div id="join-error" class="error"></div>
+        <button class="btn btn-primary btn-block" onclick="joinTrustGroup()">Join Trust Group</button>
+        <div class="or-divider">or</div>
+        <button class="btn btn-secondary btn-block" onclick="createTrustGroup()">Create New Notekeeper</button>
+        <p class="join-footer">
+            Powered by <span>r2-wasm</span> &mdash; the R2 protocol stack running in your browser.
+        </p>
+    </div>
+</div>
+
+<!-- App screen -->
+<div id="app-screen">
+    <div class="app-header">
+        <div style="display:flex;align-items:center;gap:10px">
+            <svg width="24" height="24" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M256 72L400 156V324L256 408L112 324V156Z" fill="none" stroke="var(--accent)" stroke-width="24" stroke-linejoin="round" opacity="0.85"/>
+                <line x1="176" y1="200" x2="336" y2="200" stroke="var(--accent)" stroke-width="16" stroke-linecap="round" opacity="0.5"/>
+                <line x1="176" y1="248" x2="300" y2="248" stroke="var(--accent)" stroke-width="16" stroke-linecap="round" opacity="0.5"/>
+                <path d="M310 300L410 130" stroke="var(--accent)" stroke-width="18" stroke-linecap="round"/>
+            </svg>
+            <div>
+            <h1>Notekeeper</h1>
+            <div class="header-meta">
+                <span id="app-tg-id"></span> &middot; <span id="app-device-name"></span>
+            </div>
+        </div></div>
+        <div class="header-actions">
+            <span id="relay-status" style="font-size:10px;font-family:var(--mono);color:var(--text-faint)"></span>
+            <button class="btn btn-small btn-secondary" id="event-log-toggle" onclick="toggleEventLog()">Events</button>
+            <button class="btn btn-small btn-secondary" onclick="toggleSettings()" id="settings-toggle">Settings</button>
+        </div>
+    </div>
+    <div class="app-body">
+        <div class="note-list" id="note-list">
+            <div class="note-list-header">
+                <span id="note-count">0 notes</span>
+                <button class="btn btn-small btn-primary" onclick="newNote()">+ New</button>
+            </div>
+            <div id="note-cards"></div>
+        </div>
+        <div class="editor" id="editor">
+            <div class="editor-empty" id="editor-empty">
+                <div style="text-align:center">
+                    <p>Select a note or create a new one</p>
+                    <p>Notes are signed R2 events, ready for mesh sync</p>
+                </div>
+            </div>
+            <div id="editor-active" style="display:none;flex:1;display:none;flex-direction:column">
+                <div class="editor-toolbar">
+                    <span style="font-family:var(--mono);font-size:10px;color:var(--text-faint)" id="editor-meta"></span>
+                    <div style="display:flex;gap:8px;align-items:center">
+                        <span id="sync-indicator" class="sync-status" style="color:var(--text-faint)"></span>
+                        <button class="btn btn-small btn-primary" onclick="saveNote()" id="sync-btn">Sync</button>
+                        <button class="btn btn-small btn-danger" onclick="deleteCurrentNote()">Delete</button>
+                        <button class="btn btn-small btn-secondary" onclick="closeEditor()">Close</button>
+                    </div>
+                </div>
+                <input class="editor-title" id="editor-title" placeholder="Untitled">
+                <div class="fmt-bar" id="fmt-bar">
+                    <button class="fmt-btn" onclick="fmt('heading')" title="Heading">H</button>
+                    <button class="fmt-btn" onclick="fmt('bold')" title="Bold"><strong>B</strong></button>
+                    <button class="fmt-btn" onclick="fmt('italic')" title="Italic"><em>I</em></button>
+                    <button class="fmt-btn" onclick="fmt('code')" title="Inline code">&lt;/&gt;</button>
+                    <button class="fmt-btn" onclick="fmt('codeblock')" title="Code block">```</button>
+                    <div class="fmt-sep"></div>
+                    <button class="fmt-btn" onclick="fmt('ul')" title="Bullet list">&bull; List</button>
+                    <button class="fmt-btn" onclick="fmt('ol')" title="Numbered list">1. List</button>
+                    <button class="fmt-btn" onclick="fmt('quote')" title="Blockquote">&gt; Quote</button>
+                    <button class="fmt-btn" onclick="fmt('hr')" title="Horizontal rule">&mdash;</button>
+                    <button class="fmt-btn" onclick="fmt('link')" title="Link">Link</button>
+                    <div class="mode-toggle">
+                        <button id="mode-edit" class="active" onclick="setEditorMode('edit')">Edit</button>
+                        <button id="mode-preview" onclick="setEditorMode('preview')">Preview</button>
+                    </div>
+                </div>
+                <textarea class="editor-content" id="editor-content" placeholder="Start writing... (Markdown supported)"></textarea>
+                <div class="editor-preview" id="editor-preview" style="display:none"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Event log panel (slide-in from right) -->
+<div class="event-backdrop" id="event-backdrop" onclick="toggleEventLog()"></div>
+<div class="event-panel" id="event-panel">
+    <div class="event-panel-header">
+        <span>Event Log</span>
+        <div style="display:flex;align-items:center;gap:12px">
+            <span id="event-count" style="text-transform:none;letter-spacing:0">0</span>
+            <button class="btn btn-small btn-secondary" onclick="toggleEventLog()">Close</button>
+        </div>
+    </div>
+    <div id="event-entries"></div>
+</div>
+
+<!-- Settings panel -->
+<div class="settings-backdrop" id="settings-backdrop" onclick="toggleSettings()"></div>
+<div class="settings-panel" id="settings-panel">
+    <div class="settings-header">
+        <h2>Settings</h2>
+        <button class="btn btn-small btn-secondary" onclick="toggleSettings()">Close</button>
+    </div>
+    <div class="settings-section">
+        <h3>Trust Group</h3>
+        <div class="settings-row">
+            <span class="label">Group ID</span>
+            <span class="value" id="settings-tg-id">—</span>
+        </div>
+        <div class="settings-row">
+            <span class="label">Role</span>
+            <span class="value" id="settings-role">—</span>
+        </div>
+        <div class="settings-row">
+            <span class="label">Device</span>
+            <span class="value" id="settings-device">—</span>
+        </div>
+        <div class="settings-row">
+            <span class="label">Device ID</span>
+            <span class="value" id="settings-device-id">—</span>
+        </div>
+    </div>
+    <div class="settings-section" id="settings-invite-section" style="display:none">
+        <h3>Invitation</h3>
+        <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;line-height:1.5">Generate a code to add another device to this trust group. Valid for 5 minutes, single use.</p>
+        <div id="settings-invite-display" style="display:none">
+            <div style="text-align:center;padding:16px 0 8px">
+                <div id="settings-short-code" style="font-family:var(--mono);font-size:28px;letter-spacing:4px;color:var(--accent);user-select:all;cursor:pointer" onclick="copyShortCode()"></div>
+                <div style="font-size:10px;color:var(--text-faint);margin-top:4px">Type this on the other device, or scan QR below</div>
+            </div>
+            <div style="margin-top:16px;text-align:center">
+                <div id="settings-qr-code" style="display:inline-block;background:white;padding:12px;border-radius:8px"></div>
+                <div style="font-size:10px;color:var(--text-faint);margin-top:6px">Scan with phone camera to join</div>
+            </div>
+            <div style="margin-top:12px">
+                <div style="font-size:10px;color:var(--text-faint);margin-bottom:4px;font-family:var(--mono);text-transform:uppercase;letter-spacing:0.5px">Full Link</div>
+                <div class="invite-code-display" id="settings-invite-code" onclick="copyInvite()" style="font-size:9px"></div>
+            </div>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
+                <span id="settings-invite-timer" style="font-size:10px;font-family:var(--mono);color:var(--text-faint)"></span>
+            </div>
+        </div>
+        <button class="btn btn-small btn-secondary" onclick="generateNewInvite()" style="margin-top:8px" id="settings-invite-btn">Generate Invitation</button>
+    </div>
+    <div class="settings-section">
+        <h3>Relay</h3>
+        <div style="display:flex;gap:8px;margin-bottom:8px">
+            <input id="settings-relay-input" class="field-input" placeholder="ws://host:21042/r2"
+                   style="font-family:var(--mono);font-size:12px;padding:8px 12px;flex:1">
+            <button class="btn btn-small btn-primary" onclick="updateRelay()">Connect</button>
+        </div>
+        <div class="settings-row">
+            <span class="label">Status</span>
+            <span class="value" id="settings-relay-status">—</span>
+        </div>
+    </div>
+    <div class="settings-section">
+        <h3>Appearance</h3>
+        <div style="display:flex;gap:8px">
+            <button class="btn btn-small btn-secondary" onclick="setTheme('light')">Light</button>
+            <button class="btn btn-small btn-secondary" onclick="setTheme('dark')">Dark</button>
+            <button class="btn btn-small btn-secondary" onclick="setTheme('auto')">Auto</button>
+        </div>
+    </div>
+    <div class="settings-section">
+        <h3>Actions</h3>
+        <button class="btn btn-secondary btn-block" onclick="toggleSettings(); setTimeout(toggleEventLog, 300)" style="margin-bottom:8px;text-align:left;padding-left:16px">View Event Log</button>
+        <button class="btn btn-danger btn-block" onclick="resetState()" style="text-align:left;padding-left:16px">Leave Trust Group</button>
+    </div>
+</div>
+
+<script>
+// Minimal QR code generator (alphanumeric, version 1-6, error correction L)
+// Produces an SVG string. No external dependencies.
+function generateQrSvg(text, size) {
+    // Use a canvas-based approach with the simplest possible QR encoding
+    // For brevity, delegate to a tiny inline encoder
+    const modules = qrEncode(text);
+    if (!modules) return '';
+    const n = modules.length;
+    const cellSize = Math.floor(size / (n + 8)); // quiet zone
+    const totalSize = cellSize * (n + 8);
+    const offset = cellSize * 4; // quiet zone
+    let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${totalSize}" height="${totalSize}" viewBox="0 0 ${totalSize} ${totalSize}">`;
+    svg += `<rect width="${totalSize}" height="${totalSize}" fill="white"/>`;
+    for (let y = 0; y < n; y++) {
+        for (let x = 0; x < n; x++) {
+            if (modules[y][x]) {
+                svg += `<rect x="${offset + x * cellSize}" y="${offset + y * cellSize}" width="${cellSize}" height="${cellSize}" fill="#1c1c21"/>`;
+            }
+        }
+    }
+    svg += '</svg>';
+    return svg;
+}
+
+// QR encoding (byte mode, ECC L, versions 1-10)
+function qrEncode(text) {
+    const data = new TextEncoder().encode(text);
+    const len = data.length;
+    // Version selection (byte mode capacity at ECC L)
+    const caps = [0,17,32,53,78,106,134,154,192,230,271];
+    let ver = 0;
+    for (let v = 1; v <= 10; v++) { if (len <= caps[v]) { ver = v; break; } }
+    if (!ver) return null; // too long
+
+    const size = 17 + ver * 4;
+    const grid = Array.from({length: size}, () => new Uint8Array(size));
+    const reserved = Array.from({length: size}, () => new Uint8Array(size));
+
+    // Finder patterns
+    function finderPattern(ox, oy) {
+        for (let y = -1; y <= 7; y++) for (let x = -1; x <= 7; x++) {
+            const px = ox + x, py = oy + y;
+            if (px < 0 || py < 0 || px >= size || py >= size) continue;
+            const ring = Math.max(Math.abs(x - 3), Math.abs(y - 3));
+            grid[py][px] = (ring !== 2 && ring !== 4) ? 1 : 0;
+            reserved[py][px] = 1;
+        }
+    }
+    finderPattern(0, 0); finderPattern(size - 7, 0); finderPattern(0, size - 7);
+
+    // Timing patterns
+    for (let i = 8; i < size - 8; i++) {
+        grid[6][i] = grid[i][6] = (i % 2 === 0) ? 1 : 0;
+        reserved[6][i] = reserved[i][6] = 1;
+    }
+
+    // Alignment patterns (ver >= 2)
+    if (ver >= 2) {
+        const positions = [6, [0,0,0,0,0, 6,18, 6,22, 6,26, 6,30, 6,34, 6,22,38][ver * 2 - 2] || (size - 7)];
+        // Simplified: one alignment pattern for ver 2-6
+        const ap = ver === 2 ? [[18,18]] : ver === 3 ? [[22,22]] : ver === 4 ? [[26,26]] :
+                   ver === 5 ? [[30,30]] : ver === 6 ? [[34,34]] : [];
+        for (const [cx, cy] of ap) {
+            for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+                const px = cx+dx, py = cy+dy;
+                if (reserved[py][px]) continue;
+                grid[py][px] = (Math.abs(dx) === 2 || Math.abs(dy) === 2 || (dx === 0 && dy === 0)) ? 1 : 0;
+                reserved[py][px] = 1;
+            }
+        }
+    }
+
+    // Reserve format info areas
+    for (let i = 0; i < 8; i++) {
+        reserved[8][i] = reserved[i][8] = 1;
+        reserved[8][size-1-i] = reserved[size-1-i][8] = 1;
+    }
+    reserved[8][8] = 1;
+    grid[size - 8][8] = 1; reserved[size-8][8] = 1; // dark module
+
+    // Encode data
+    const totalCodewords = [0,26,44,70,100,134,172,196,242,292,346][ver];
+    const eccCodewords = [0,7,10,15,20,26,18,20,24,30,18][ver];
+    const dataCodewords = totalCodewords - eccCodewords;
+
+    // Build bit stream: mode(4) + count(8) + data + terminator + padding
+    let bits = [];
+    function pushBits(val, n) { for (let i = n-1; i >= 0; i--) bits.push((val >> i) & 1); }
+    pushBits(0b0100, 4); // byte mode
+    pushBits(len, ver >= 10 ? 16 : 8);
+    for (const b of data) pushBits(b, 8);
+    pushBits(0, Math.min(4, dataCodewords * 8 - bits.length));
+    while (bits.length % 8) bits.push(0);
+    const pads = [0xEC, 0x11];
+    let pi = 0;
+    while (bits.length < dataCodewords * 8) { pushBits(pads[pi], 8); pi ^= 1; }
+
+    // Convert to codewords
+    const codewords = [];
+    for (let i = 0; i < bits.length; i += 8)
+        codewords.push(bits.slice(i, i+8).reduce((a, b) => (a << 1) | b, 0));
+
+    // Reed-Solomon ECC (GF(256) with primitive polynomial 0x11d)
+    const gfExp = new Uint8Array(512), gfLog = new Uint8Array(256);
+    let val = 1;
+    for (let i = 0; i < 255; i++) { gfExp[i] = val; gfLog[val] = i; val = (val << 1) ^ (val >= 128 ? 0x11d : 0); }
+    for (let i = 255; i < 512; i++) gfExp[i] = gfExp[i - 255];
+    function gfMul(a, b) { return (a === 0 || b === 0) ? 0 : gfExp[gfLog[a] + gfLog[b]]; }
+
+    // Generator polynomial
+    let gen = [1];
+    for (let i = 0; i < eccCodewords; i++) {
+        const ng = new Array(gen.length + 1).fill(0);
+        for (let j = 0; j < gen.length; j++) {
+            ng[j] ^= gen[j];
+            ng[j+1] ^= gfMul(gen[j], gfExp[i]);
+        }
+        gen = ng;
+    }
+
+    // Polynomial division
+    const msg = [...codewords, ...new Array(eccCodewords).fill(0)];
+    for (let i = 0; i < dataCodewords; i++) {
+        const coef = msg[i];
+        if (coef !== 0) for (let j = 0; j < gen.length; j++) msg[i+j] ^= gfMul(gen[j], coef);
+    }
+    const ecc = msg.slice(dataCodewords);
+    const allCodewords = [...codewords, ...ecc];
+
+    // Place data bits
+    const allBits = [];
+    for (const cw of allCodewords) for (let i = 7; i >= 0; i--) allBits.push((cw >> i) & 1);
+
+    let bitIdx = 0;
+    for (let right = size - 1; right >= 1; right -= 2) {
+        if (right === 6) right = 5;
+        for (let vert = 0; vert < size; vert++) {
+            for (let j = 0; j < 2; j++) {
+                const x = right - j;
+                const upward = ((Math.floor((size - 1 - right) / 2)) % 2) === 0;
+                const y = upward ? (size - 1 - vert) : vert;
+                if (reserved[y][x]) continue;
+                if (bitIdx < allBits.length) grid[y][x] = allBits[bitIdx++];
+            }
+        }
+    }
+
+    // Apply mask (pattern 0: (y+x) % 2 === 0) and format info
+    for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+        if (!reserved[y][x]) grid[y][x] ^= ((y + x) % 2 === 0) ? 1 : 0;
+    }
+
+    // Format bits for ECC L, mask 0
+    const fmtBits = [1,1,1,0,1,1,1,1,1,0,0,0,1,0,0];
+    const fmtPositions = [
+        [[0,8],[1,8],[2,8],[3,8],[4,8],[5,8],[7,8],[8,8],[8,7],[8,5],[8,4],[8,3],[8,2],[8,1],[8,0]],
+        [[8,size-1],[8,size-2],[8,size-3],[8,size-4],[8,size-5],[8,size-6],[8,size-7],[8,size-8],[size-7,8],[size-6,8],[size-5,8],[size-4,8],[size-3,8],[size-2,8],[size-1,8]]
+    ];
+    for (const positions of fmtPositions)
+        for (let i = 0; i < 15; i++) grid[positions[i][0]][positions[i][1]] = fmtBits[i];
+
+    // Version info (ver >= 7 only, skip for now)
+
+    return grid;
+}
+</script>
+<script type="module">
+    import init, * as r2 from '../pkg/r2_wasm.js';
+
+    // ── State ──
+    let trustGroup = null;
+    let member = null;
+    let isKeyHolder = false;
+    let currentNoteId = null;
+    let notes = {};
+    let events = [];
+    let tgShort = '';
+
+    let HASH_CREATE, HASH_UPDATE, HASH_DELETE;
+
+    let relay = null;
+
+    const SK_MEMBER = 'r2_member_state';
+    const SK_TG = 'r2_trust_group_state';
+    const SK_ROLE = 'r2_role';
+    const SK_DEVICE_NAME = 'r2_device_name';
+    const SK_RELAY_URL = 'r2_relay_url';
+
+    let autoSaveTimer = null;
+    let isDirty = false;
+    const AUTO_SAVE_DELAY = 10000;
+
+    function notesKey() { return `r2_nk_notes_${tgShort}`; }
+    function eventsKey() { return `r2_nk_events_${tgShort}`; }
+
+    // ── Relay Transport ──
+    class R2RelayTransport {
+        constructor(url, member) {
+            this.url = url;
+            this.member = member;
+            this.ws = null;
+            this.connected = false;
+            this.attempt = 0;
+            this.pingInterval = null;
+            this.onFrame = null;
+            this.onStatus = null;
+        }
+
+        connect() {
+            if (this.ws) this.disconnect();
+            this._setStatus('connecting...');
+            try {
+                this.ws = new WebSocket(this.url);
+                this.ws.binaryType = 'arraybuffer';
+            } catch (e) {
+                this._setStatus('failed');
+                this._reconnect();
+                return;
+            }
+
+            this.ws.onopen = () => {
+                const ts = Math.floor(Date.now() / 1000);
+                const hello = this.member.sign_relay_hello(BigInt(ts));
+                this.ws.send(hello);
+            };
+
+            this.ws.onmessage = (evt) => {
+                if (typeof evt.data === 'string') {
+                    try {
+                        const msg = JSON.parse(evt.data);
+                        if (msg.type === 'welcome') {
+                            this.connected = true;
+                            this.attempt = 0;
+                            this._setStatus(`relay: ${msg.peers} peer${msg.peers !== 1 ? 's' : ''}`);
+                            this._startPing();
+                            const lastEvent = events.length > 0 ? events[0].ts : 0;
+                            if (lastEvent > 0) {
+                                this.ws.send(JSON.stringify({ type: 'catchup', since: lastEvent }));
+                            }
+                        }
+                    } catch {}
+                } else {
+                    if (this.onFrame) this.onFrame(new Uint8Array(evt.data));
+                }
+            };
+
+            this.ws.onclose = (evt) => {
+                this.connected = false;
+                this._stopPing();
+                this._setStatus(evt.code === 4401 ? 'auth failed' : 'disconnected');
+                if (evt.code !== 4401) this._reconnect();
+            };
+
+            this.ws.onerror = () => {};
+        }
+
+        disconnect() {
+            this._stopPing();
+            if (this.ws) { this.ws.onclose = null; this.ws.close(); this.ws = null; }
+            this.connected = false;
+            this._setStatus('disconnected');
+        }
+
+        send(frameBytes) {
+            if (this.ws && this.connected) this.ws.send(frameBytes);
+        }
+
+        _startPing() {
+            this._stopPing();
+            this.pingInterval = setInterval(() => {
+                if (this.ws && this.connected) this.ws.send(JSON.stringify({ type: 'ping' }));
+            }, 30000);
+        }
+        _stopPing() { if (this.pingInterval) { clearInterval(this.pingInterval); this.pingInterval = null; } }
+
+        _reconnect() {
+            this.attempt++;
+            const delay = Math.min(1000 * Math.pow(2, this.attempt - 1), 60000);
+            const jitter = delay * (0.8 + Math.random() * 0.4);
+            this._setStatus(`reconnect ${Math.ceil(jitter/1000)}s`);
+            setTimeout(() => this.connect(), jitter);
+        }
+
+        _setStatus(status) {
+            if (this.onStatus) this.onStatus(status);
+            const el = document.getElementById('relay-status');
+            if (el) el.textContent = status;
+        }
+    }
+
+    // ── Helpers ──
+    function hex(bytes) { return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(''); }
+    function hexShort(bytes) { return hex(bytes).substring(0, 12); }
+    function now() { return BigInt(Math.floor(Date.now() / 1000)); }
+    function nowNum() { return Math.floor(Date.now() / 1000); }
+    function randomId() { const b = new Uint8Array(4); crypto.getRandomValues(b); return hex(b); }
+    function randomU16() { const b = new Uint8Array(2); crypto.getRandomValues(b); return (b[0] << 8) | b[1]; }
+    function timeAgo(ts) {
+        const d = nowNum() - ts;
+        if (d < 60) return 'just now';
+        if (d < 3600) return `${Math.floor(d/60)}m ago`;
+        if (d < 86400) return `${Math.floor(d/3600)}h ago`;
+        return new Date(ts * 1000).toLocaleDateString();
+    }
+    function hex_decode_js(hexStr) {
+        const bytes = new Uint8Array(hexStr.length / 2);
+        for (let i = 0; i < hexStr.length; i += 2) bytes[i / 2] = parseInt(hexStr.substring(i, i + 2), 16);
+        return bytes;
+    }
+    function formatShortCode(input) {
+        let v = input.value.replace(/[^a-fA-F0-9]/g, '').substring(0, 12);
+        if (v.length > 8) v = v.substring(0, 4) + '-' + v.substring(4, 8) + '-' + v.substring(8);
+        else if (v.length > 4) v = v.substring(0, 4) + '-' + v.substring(4);
+        input.value = v;
+    }
+
+    // Format 16-byte join code as Anthill-style xxxx-xxxx-xxxx (first 6 bytes)
+    function formatJoinCodeShort(hexCode) {
+        const short = hexCode.substring(0, 12);
+        return short.substring(0, 4) + '-' + short.substring(4, 8) + '-' + short.substring(8, 12);
+    }
+
+    // Parse short code (xxxx-xxxx-xxxx) back to 32 hex chars (16 bytes, zero-padded)
+    function parseShortCode(input) {
+        const stripped = input.replace(/[^a-fA-F0-9]/g, '').toLowerCase();
+        if (stripped.length >= 12) return stripped.substring(0, 12).padEnd(32, '0');
+        return null;
+    }
+
+    // Build QR-ready URL: r2://relay/tg_hash/join_code_short
+    function buildInvitationUrl(relayUrl, tgHash, joinCodeHex) {
+        const shortCode = joinCodeHex.substring(0, 12);
+        // Use relay URL but replace ws:// with r2://
+        let base = relayUrl.replace(/^wss?:\/\//, '');
+        // Remove /r2 path if present
+        base = base.replace(/\/r2$/, '');
+        return `r2://${base}/${tgHash}/${shortCode}`;
+    }
+
+    // Parse invitation URL: r2://host:port/tg_hash/short_code
+    function parseInvitationUrl(url) {
+        const m = url.match(/^r2:\/\/([^/]+)\/([a-f0-9]{16})\/([a-f0-9]{12})$/i);
+        if (!m) return null;
+        return {
+            relayUrl: `ws://${m[1]}/r2`,
+            tgHash: m[2],
+            joinCodeHex: m[3].padEnd(32, '0'),
+        };
+    }
+
+    function showError(msg) { const el = document.getElementById('join-error'); el.textContent = msg; el.style.display = 'block'; el.style.color = 'var(--red)'; }
+    function hideError() { document.getElementById('join-error').style.display = 'none'; }
+
+    // ── Persistence ──
+    function saveAuth() {
+        if (member) localStorage.setItem(SK_MEMBER, btoa(String.fromCharCode(...member.to_bytes())));
+        if (trustGroup && isKeyHolder) localStorage.setItem(SK_TG, btoa(String.fromCharCode(...trustGroup.to_bytes())));
+        localStorage.setItem(SK_ROLE, isKeyHolder ? 'key_holder' : 'member');
+    }
+    function loadAuth() {
+        const mb = localStorage.getItem(SK_MEMBER);
+        if (!mb) return false;
+        try {
+            member = r2.R2Member.from_bytes(new Uint8Array(atob(mb).split('').map(c => c.charCodeAt(0))));
+            const role = localStorage.getItem(SK_ROLE);
+            const tgb = localStorage.getItem(SK_TG);
+            if (role === 'key_holder' && tgb) {
+                trustGroup = r2.R2TrustGroup.from_bytes(new Uint8Array(atob(tgb).split('').map(c => c.charCodeAt(0))), now());
+                isKeyHolder = true;
+            }
+            return member.is_valid(now());
+        } catch (e) { console.error('Restore failed:', e); return false; }
+    }
+    function saveNotes() { localStorage.setItem(notesKey(), JSON.stringify({ notes, version: 1 })); }
+    function loadNotes() { try { const d = JSON.parse(localStorage.getItem(notesKey()) || '{}'); notes = d.notes || {}; } catch { notes = {}; } }
+    function saveEvents() { localStorage.setItem(eventsKey(), JSON.stringify(events)); }
+    function loadEvents() { try { events = JSON.parse(localStorage.getItem(eventsKey()) || '[]'); } catch { events = []; } }
+
+    // ── R2 Event Emission ──
+    function emitNoteEvent(opCode, noteId) {
+        const noteIdU32 = parseInt(noteId, 16);
+        const ts = nowNum();
+        const eventNames = ['note.create', 'note.update', 'note.delete'];
+        const hashes = [HASH_CREATE, HASH_UPDATE, HASH_DELETE];
+        const payload = r2.cbor_encode_int_map(new Uint8Array([0, 1, 2]), new Uint32Array([opCode, noteIdU32, ts]));
+        const msgId = randomU16();
+        const frame = r2.encode_compact_frame(0, 5, 3, msgId, hashes[opCode], 0, payload);
+        const tag = r2.hmac_compact_tag(frame, new Uint8Array(member.hk));
+        const signedFrame = new Uint8Array(frame.length + tag.length);
+        signedFrame.set(frame);
+        signedFrame.set(tag, frame.length);
+
+        if (relay && relay.connected) {
+            relay.send(signedFrame);
+            if (opCode === 0 || opCode === 1) {
+                const note = notes[noteId];
+                if (note) sendPluginData(noteId, note.title, note.content, ts);
+            }
+        }
+
+        const evt = { ts, op: eventNames[opCode], note_id: noteId, msg_id: msgId, frame_hex: hex(frame), hmac_hex: hex(tag) };
+        events.unshift(evt);
+        saveEvents();
+        renderEventLog();
+        return evt;
+    }
+
+    // ── Plugin: Encrypted Note Content ──
+    const PLUGIN_DATA = 0xFE;
+    function isPluginData(data) { return data.length > 1 && data[0] === PLUGIN_DATA; }
+
+    function sendPluginData(noteId, title, content, ts) {
+        if (!relay || !relay.connected || !member) return;
+        const payload = JSON.stringify({ note_id: noteId, title, content, ts });
+        const plaintext = new TextEncoder().encode(payload);
+        const encrypted = r2.encrypt_with_dek(new Uint8Array(member.dek), plaintext);
+        const msg = new Uint8Array(1 + encrypted.length);
+        msg[0] = PLUGIN_DATA;
+        msg.set(encrypted, 1);
+        relay.send(msg);
+    }
+
+    function handlePluginData(data) {
+        if (!member) return;
+        try {
+            const encrypted = data.slice(1);
+            const plaintext = r2.decrypt_with_dek(new Uint8Array(member.dek), encrypted);
+            const json = new TextDecoder().decode(plaintext);
+            const { note_id, title, content, ts } = JSON.parse(json);
+            if (!notes[note_id]) {
+                notes[note_id] = { id: note_id, title, content, created_at: ts, updated_at: ts, deleted: false };
+            } else {
+                if (ts >= notes[note_id].updated_at) {
+                    notes[note_id].title = title;
+                    notes[note_id].content = content;
+                    notes[note_id].updated_at = ts;
+                }
+            }
+            saveNotes();
+            renderNoteList();
+            if (currentNoteId === note_id) renderEditor();
+        } catch (e) { console.warn('Plugin data decrypt failed:', e); }
+    }
+
+    // ── Incoming Frame Handler ──
+    function handleIncomingFrame(frameBytes) {
+        try {
+            // Cross-transport routing may deliver frames in EITHER compact
+            // (12-byte header, LoRa/BLE origin) or extended (22-byte header,
+            // WiFi/UDP/relayed). Try extended first (more common after relay
+            // transcoding per R2-WIRE §4.3.5), then compact as fallback.
+            let decoded = null;
+            try {
+                // Extended: no HMAC stripping needed (H flag is in the header;
+                // the decoder handles it internally)
+                decoded = r2.decode_extended_frame(frameBytes);
+            } catch {
+                try {
+                    // Compact: strip assumed 8-byte truncated HMAC tag
+                    decoded = r2.decode_compact_frame(frameBytes.slice(0, frameBytes.length - 8));
+                } catch { return; }
+            }
+            if (!decoded) return;
+            let opName = 'unknown', opCode = -1;
+            if (decoded.event_hash === HASH_CREATE) { opName = 'note.create'; opCode = 0; }
+            else if (decoded.event_hash === HASH_UPDATE) { opName = 'note.update'; opCode = 1; }
+            else if (decoded.event_hash === HASH_DELETE) { opName = 'note.delete'; opCode = 2; }
+            else return;
+
+            const payload = decoded.payload;
+            if (payload.length < 3) return;
+            let noteIdU32 = 0, ts = 0, pos = 1;
+            for (let i = 0; i < 3; i++) {
+                const key = payload[pos++];
+                let val = 0;
+                if (payload[pos] < 24) { val = payload[pos++]; }
+                else if (payload[pos] === 0x18) { pos++; val = payload[pos++]; }
+                else if (payload[pos] === 0x19) { pos++; val = (payload[pos] << 8) | payload[pos+1]; pos += 2; }
+                else if (payload[pos] === 0x1a) { pos++; val = (payload[pos] << 24) | (payload[pos+1] << 16) | (payload[pos+2] << 8) | payload[pos+3]; pos += 4; }
+                if (key === 1) noteIdU32 = val >>> 0;
+                if (key === 2) ts = val >>> 0;
+            }
+            const noteId = noteIdU32.toString(16).padStart(8, '0');
+
+            events.unshift({ ts: ts || nowNum(), op: opName + ' (remote)', note_id: noteId, msg_id: decoded.msg_id,
+                frame_hex: hex(frameBytes).substring(0, 32) + '..', hmac_hex: hex(frameBytes.slice(frameBytes.length - 8)) });
+            saveEvents(); renderEventLog();
+
+            if (opCode === 0 || opCode === 1) {
+                if (!notes[noteId]) {
+                    notes[noteId] = { id: noteId, title: '(syncing...)', content: '', created_at: ts, updated_at: ts, deleted: false };
+                    saveNotes(); renderNoteList();
+                }
+            } else if (opCode === 2) {
+                if (notes[noteId]) {
+                    notes[noteId].deleted = true; notes[noteId].updated_at = ts;
+                    saveNotes();
+                    if (currentNoteId === noteId) { currentNoteId = null; renderEditor(); }
+                    renderNoteList();
+                }
+            }
+        } catch (e) { console.warn('Frame decode failed:', e); }
+    }
+
+    // ── Auto-Save & Dirty Tracking ──
+    function markDirty() {
+        if (!currentNoteId) return;
+        isDirty = true;
+        updateSyncIndicator('unsaved');
+        if (autoSaveTimer) clearTimeout(autoSaveTimer);
+        autoSaveTimer = setTimeout(() => { if (isDirty) saveNote(); }, AUTO_SAVE_DELAY);
+    }
+    function updateSyncIndicator(state) {
+        const el = document.getElementById('sync-indicator');
+        if (!el) return;
+        el.className = 'sync-status';
+        switch (state) {
+            case 'unsaved': el.textContent = 'unsaved'; el.style.color = 'var(--amber)'; break;
+            case 'syncing': el.textContent = 'syncing'; el.classList.add('syncing'); break;
+            case 'synced': el.textContent = 'synced'; el.style.color = 'var(--green)';
+                setTimeout(() => { if (el.textContent === 'synced') el.textContent = ''; }, 3000); break;
+            default: el.textContent = ''; break;
+        }
+    }
+    function flushIfDirty() {
+        if (isDirty && currentNoteId) {
+            if (autoSaveTimer) { clearTimeout(autoSaveTimer); autoSaveTimer = null; }
+            saveNote();
+        }
+    }
+
+    // ── Markdown Renderer ──
+    function renderMarkdown(src) {
+        let html = escHtml(src);
+        // Code blocks (``` ... ```)
+        html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) =>
+            `<pre><code>${code.trim()}</code></pre>`);
+        // Headings
+        html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+        html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+        html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+        // Horizontal rule
+        html = html.replace(/^---$/gm, '<hr>');
+        // Blockquote
+        html = html.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
+        // Bold and italic
+        html = html.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+        html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+        html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+        // Inline code
+        html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+        // Links
+        html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+        // Unordered lists
+        html = html.replace(/^[\-\*] (.+)$/gm, '<li>$1</li>');
+        html = html.replace(/(<li>.*<\/li>\n?)+/g, m => `<ul>${m}</ul>`);
+        // Ordered lists
+        html = html.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
+        // Paragraphs (double newline)
+        html = html.replace(/\n\n/g, '</p><p>');
+        html = html.replace(/\n/g, '<br>');
+        html = `<p>${html}</p>`;
+        // Clean up empty paragraphs
+        html = html.replace(/<p>\s*<\/p>/g, '');
+        html = html.replace(/<p>\s*(<h[123]>)/g, '$1');
+        html = html.replace(/(<\/h[123]>)\s*<\/p>/g, '$1');
+        html = html.replace(/<p>\s*(<pre>)/g, '$1');
+        html = html.replace(/(<\/pre>)\s*<\/p>/g, '$1');
+        html = html.replace(/<p>\s*(<hr>)\s*<\/p>/g, '$1');
+        html = html.replace(/<p>\s*(<ul>)/g, '$1');
+        html = html.replace(/(<\/ul>)\s*<\/p>/g, '$1');
+        html = html.replace(/<p>\s*(<blockquote>)/g, '$1');
+        html = html.replace(/(<\/blockquote>)\s*<\/p>/g, '$1');
+        return html;
+    }
+
+    // ── Editor Mode Toggle ──
+    let editorMode = 'edit';
+
+    window.setEditorMode = function(mode) {
+        editorMode = mode;
+        const textarea = document.getElementById('editor-content');
+        const preview = document.getElementById('editor-preview');
+        const editBtn = document.getElementById('mode-edit');
+        const previewBtn = document.getElementById('mode-preview');
+
+        if (mode === 'preview') {
+            textarea.style.display = 'none';
+            preview.style.display = 'block';
+            preview.innerHTML = renderMarkdown(textarea.value);
+            editBtn.classList.remove('active');
+            previewBtn.classList.add('active');
+        } else {
+            textarea.style.display = 'block';
+            preview.style.display = 'none';
+            editBtn.classList.add('active');
+            previewBtn.classList.remove('active');
+            textarea.focus();
+        }
+    };
+
+    // ── Formatting Commands ──
+    window.fmt = function(type) {
+        // Ensure we're in edit mode
+        if (editorMode !== 'edit') setEditorMode('edit');
+
+        const ta = document.getElementById('editor-content');
+        const start = ta.selectionStart;
+        const end = ta.selectionEnd;
+        const sel = ta.value.substring(start, end);
+        const before = ta.value.substring(0, start);
+        const after = ta.value.substring(end);
+        let insert = '', cursorOffset = 0;
+
+        switch (type) {
+            case 'heading': insert = `# ${sel || 'Heading'}`; cursorOffset = sel ? 0 : -7; break;
+            case 'bold': insert = `**${sel || 'text'}**`; cursorOffset = sel ? 0 : -6; break;
+            case 'italic': insert = `*${sel || 'text'}*`; cursorOffset = sel ? 0 : -5; break;
+            case 'code': insert = `\`${sel || 'code'}\``; cursorOffset = sel ? 0 : -5; break;
+            case 'codeblock': insert = `\`\`\`\n${sel || 'code'}\n\`\`\``; cursorOffset = sel ? 0 : -8; break;
+            case 'ul': insert = `- ${sel || 'item'}`; cursorOffset = sel ? 0 : -4; break;
+            case 'ol': insert = `1. ${sel || 'item'}`; cursorOffset = sel ? 0 : -4; break;
+            case 'quote': insert = `> ${sel || 'quote'}`; cursorOffset = sel ? 0 : -5; break;
+            case 'hr': insert = `\n---\n`; break;
+            case 'link': insert = `[${sel || 'text'}](url)`; cursorOffset = sel ? -1 : -10; break;
+        }
+
+        ta.value = before + insert + after;
+        const newPos = start + insert.length + cursorOffset;
+        ta.setSelectionRange(newPos, newPos);
+        ta.focus();
+        markDirty();
+    };
+
+    // ── Note Operations ──
+    window.newNote = function() {
+        flushIfDirty();
+        const id = randomId();
+        const ts = nowNum();
+        notes[id] = { id, title: '', content: '', created_at: ts, updated_at: ts, deleted: false };
+        currentNoteId = id;
+        saveNotes(); renderNoteList(); renderEditor();
+        setEditorMode('edit');
+        document.getElementById('editor').classList.add('mobile-visible');
+        document.getElementById('editor-title').focus();
+    };
+    window.saveNote = function() {
+        if (!currentNoteId || !notes[currentNoteId]) return;
+        const n = notes[currentNoteId];
+        const title = document.getElementById('editor-title').value.trim();
+        const content = document.getElementById('editor-content').value;
+        const isNew = !n.title && !n.content;
+        n.title = title || 'Untitled'; n.content = content; n.updated_at = nowNum();
+        saveNotes(); updateSyncIndicator('syncing');
+        emitNoteEvent(isNew ? 0 : 1, n.id);
+        isDirty = false;
+        if (autoSaveTimer) { clearTimeout(autoSaveTimer); autoSaveTimer = null; }
+        renderNoteList();
+        document.getElementById('editor-meta').textContent = `${n.id} \u00b7 ${timeAgo(n.updated_at)}`;
+        updateSyncIndicator('synced');
+    };
+    window.deleteCurrentNote = function() {
+        if (!currentNoteId || !notes[currentNoteId]) return;
+        if (!confirm('Delete this note?')) return;
+        notes[currentNoteId].deleted = true; notes[currentNoteId].updated_at = nowNum();
+        emitNoteEvent(2, currentNoteId); saveNotes();
+        currentNoteId = null; renderNoteList(); renderEditor();
+    };
+    window.selectNote = function(id) {
+        flushIfDirty(); currentNoteId = id; updateSyncIndicator('');
+        renderNoteList(); renderEditor();
+        document.getElementById('editor').classList.add('mobile-visible');
+    };
+    window.closeEditor = function() {
+        flushIfDirty(); currentNoteId = null; updateSyncIndicator('');
+        document.getElementById('editor').classList.remove('mobile-visible');
+        renderNoteList(); renderEditor();
+    };
+
+    // ── Rendering ──
+    function renderNoteList() {
+        const active = Object.values(notes).filter(n => !n.deleted).sort((a, b) => b.updated_at - a.updated_at);
+        document.getElementById('note-count').textContent = `${active.length} note${active.length !== 1 ? 's' : ''}`;
+        const container = document.getElementById('note-cards');
+        if (active.length === 0) {
+            container.innerHTML = '<div class="empty-list">No notes yet.<br>Press <strong>+ New</strong> to create one.</div>';
+            return;
+        }
+        container.innerHTML = active.map(n => `
+            <div class="note-card ${n.id === currentNoteId ? 'active' : ''}" onclick="selectNote('${n.id}')">
+                <div class="title">${escHtml(n.title || 'Untitled')}</div>
+                <div class="preview">${escHtml((n.content || '').substring(0, 120))}</div>
+                <div class="meta">${timeAgo(n.updated_at)}</div>
+            </div>
+        `).join('');
+    }
+    function renderEditor() {
+        const empty = document.getElementById('editor-empty');
+        const active = document.getElementById('editor-active');
+        if (!currentNoteId || !notes[currentNoteId] || notes[currentNoteId].deleted) {
+            empty.style.display = 'flex'; active.style.display = 'none'; return;
+        }
+        empty.style.display = 'none'; active.style.display = 'flex';
+        const n = notes[currentNoteId];
+        document.getElementById('editor-title').value = n.title;
+        document.getElementById('editor-content').value = n.content;
+        document.getElementById('editor-meta').textContent = `${n.id} \u00b7 ${timeAgo(n.updated_at)}`;
+        // Refresh preview if in preview mode
+        if (editorMode === 'preview') {
+            document.getElementById('editor-preview').innerHTML = renderMarkdown(n.content);
+        }
+    }
+    function renderEventLog() {
+        document.getElementById('event-count').textContent = events.length;
+        document.getElementById('event-entries').innerHTML = events.slice(0, 50).map(e => `
+            <div class="event-entry">
+                ${new Date(e.ts * 1000).toLocaleTimeString()}
+                <span class="op">${e.op}</span> ${e.note_id}
+                <span class="hash">${e.frame_hex.substring(0, 16)}.. ${e.hmac_hex}</span>
+            </div>
+        `).join('');
+    }
+    window.toggleEventLog = function() {
+        const panel = document.getElementById('event-panel');
+        const backdrop = document.getElementById('event-backdrop');
+        const isOpen = panel.classList.contains('open');
+        if (isOpen) {
+            panel.classList.remove('open');
+            backdrop.classList.remove('open');
+        } else {
+            panel.classList.add('open');
+            backdrop.classList.add('open');
+        }
+    };
+    function escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+    // ── Join Protocol Over Relay ──
+    const JOIN_REQUEST = 0x01, JOIN_RESPONSE = 0x02;
+    let pendingJoinKeypair = null;
+    function isJoinMessage(data) { return data.length > 2 && data[0] === 0xFF; }
+
+    function handleJoinMessage(data) {
+        const msgType = data[1];
+        if (msgType === JOIN_REQUEST && isKeyHolder && trustGroup) {
+            const devicePk = data.slice(2, 34);
+            const joinCode = data.slice(34, 50);
+            const deviceName = new TextDecoder().decode(data.slice(50)) || 'remote';
+            try {
+                const encrypted = trustGroup.process_join(hex(joinCode), devicePk, deviceName, now());
+                saveAuth();
+                // Response: [0xFF, 0x02] + target_pk(32) + tg_pk(32) + encrypted
+                const tgPk = new Uint8Array(trustGroup.public_key);
+                const resp = new Uint8Array(2 + 32 + 32 + encrypted.length);
+                resp[0] = 0xFF; resp[1] = JOIN_RESPONSE;
+                resp.set(devicePk, 2); resp.set(tgPk, 34); resp.set(encrypted, 66);
+                relay.send(resp);
+                events.unshift({ ts: nowNum(), op: 'join.accepted', note_id: hex(devicePk).substring(0, 8), msg_id: 0, frame_hex: '', hmac_hex: '' });
+                saveEvents(); renderEventLog();
+            } catch (e) { console.warn('Join request failed:', e); }
+        }
+        if (msgType === JOIN_RESPONSE && pendingJoinKeypair) {
+            const targetPk = data.slice(2, 34);
+            if (hex(targetPk) !== hex(new Uint8Array(pendingJoinKeypair.public_key))) return;
+            const tgPk = data.slice(34, 66);
+            const encrypted = data.slice(66);
+            if (!pendingInviteData) return;
+            try {
+                member = r2.complete_join(new Uint8Array(pendingJoinKeypair.secret_key), tgPk, encrypted, now());
+                isKeyHolder = false; saveAuth();
+                pendingJoinKeypair = null; pendingInviteData = null;
+                initApp();
+                events.unshift({ ts: nowNum(), op: 'joined', note_id: '', msg_id: 0, frame_hex: '', hmac_hex: '' });
+                saveEvents(); renderEventLog();
+            } catch (e) { showError('Join failed: ' + e.message); }
+        }
+    }
+
+    let pendingInviteData = null;
+    let currentInviteString = '';
+    let inviteExpiry = 0;
+    let inviteTimerInterval = null;
+
+    // ── Trust Group ──
+    window.createTrustGroup = function() {
+        hideError();
+        const deviceName = document.getElementById('join-name').value.trim() || 'Notekeeper';
+        const relayUrl = document.getElementById('relay-url').value.trim();
+        try {
+            trustGroup = new r2.R2TrustGroup(now());
+            isKeyHolder = true;
+            const kp = r2.generate_device_keypair();
+            const code = trustGroup.generate_join_code(now(), BigInt(300));
+            const enc = trustGroup.process_join(code, new Uint8Array(kp.public_key), deviceName, now());
+            member = r2.complete_join(new Uint8Array(kp.secret_key), new Uint8Array(trustGroup.public_key), enc, now());
+            localStorage.setItem(SK_DEVICE_NAME, deviceName);
+            if (relayUrl) localStorage.setItem(SK_RELAY_URL, relayUrl);
+            saveAuth(); initApp();
+        } catch (e) { showError(e.message); }
+    };
+    window.joinTrustGroup = function() {
+        hideError();
+        const codeInput = document.getElementById('join-code').value.trim();
+        const deviceName = document.getElementById('join-name').value.trim() || 'unnamed';
+        let relayUrl = document.getElementById('relay-url').value.trim();
+        if (!codeInput) { showError('Enter an invitation code.'); return; }
+
+        let tgHash, joinCodeHex;
+
+        // Try parsing as r2:// URL first (from QR scan)
+        const urlParsed = parseInvitationUrl(codeInput);
+        if (urlParsed) {
+            relayUrl = urlParsed.relayUrl;
+            tgHash = urlParsed.tgHash;
+            joinCodeHex = urlParsed.joinCodeHex;
+            document.getElementById('relay-url').value = relayUrl;
+        } else {
+            // Try as short code (xxxx-xxxx-xxxx)
+            joinCodeHex = parseShortCode(codeInput);
+            if (!joinCodeHex) {
+                // Try as base64url invitation (legacy)
+                try {
+                    const invite = r2.decode_invite(codeInput);
+                    tgHash = invite.trust_group_hash;
+                    joinCodeHex = invite.join_code_hex;
+                } catch {
+                    showError('Invalid invitation code.'); return;
+                }
+            }
+        }
+
+        if (!relayUrl) { showError('Enter a relay URL — needed to reach the trust group.'); return; }
+
+        // If we have tgHash, we can connect. If not (short code only), we need it from relay URL field.
+        // For short code, we need the trust group hash — but we don't have it!
+        // The short code only works when the relay URL field contains a hash hint,
+        // or when using the r2:// URL format which includes it.
+        if (!tgHash) {
+            showError('Short code requires r2:// URL format (scan QR) or paste the full link from the invitation.'); return;
+        }
+
+        try {
+            pendingInviteData = { trust_group_hash: tgHash, join_code_hex: joinCodeHex, tg_public_key: null };
+            pendingJoinKeypair = r2.generate_device_keypair();
+            localStorage.setItem(SK_RELAY_URL, relayUrl);
+            localStorage.setItem(SK_DEVICE_NAME, deviceName);
+            const devicePkHex = hex(new Uint8Array(pendingJoinKeypair.public_key));
+            const ts = Math.floor(Date.now() / 1000);
+            const helloMsg = `${tgHash}:${devicePkHex}:${ts}`;
+            const sigBytes = r2.sign_ed25519(new Uint8Array(pendingJoinKeypair.secret_key), new TextEncoder().encode(helloMsg));
+            const helloJson = JSON.stringify({ type: 'hello', version: 1, trust_group: tgHash, device_id: devicePkHex, timestamp: ts, signature: hex(sigBytes) });
+            const ws = new WebSocket(relayUrl);
+            ws.binaryType = 'arraybuffer';
+            ws.onopen = () => ws.send(helloJson);
+            ws.onmessage = (evt) => {
+                if (typeof evt.data === 'string') {
+                    const msg = JSON.parse(evt.data);
+                    if (msg.type === 'welcome') {
+                        const nameBytes = new TextEncoder().encode(deviceName);
+                        const joinCodeBytes = hex_decode_js(joinCodeHex);
+                        const req = new Uint8Array(2 + 32 + 16 + nameBytes.length);
+                        req[0] = 0xFF; req[1] = JOIN_REQUEST;
+                        req.set(new Uint8Array(pendingJoinKeypair.public_key), 2);
+                        req.set(joinCodeBytes, 34); req.set(nameBytes, 50);
+                        ws.send(req);
+                        const errEl = document.getElementById('join-error');
+                        errEl.style.display = 'block'; errEl.style.color = 'var(--accent)';
+                        errEl.textContent = 'Waiting for key holder...';
+                    }
+                } else {
+                    const data = new Uint8Array(evt.data);
+                    if (isJoinMessage(data) && data[1] === JOIN_RESPONSE) { handleJoinMessage(data); ws.close(); }
+                }
+            };
+            ws.onerror = () => showError('Relay connection failed.');
+            ws.onclose = (evt) => { if (!member && evt.code === 4401) showError('Auth failed.'); };
+        } catch (e) { showError(e.message || e); }
+    };
+    window.toggleSettings = function() {
+        const panel = document.getElementById('settings-panel');
+        const backdrop = document.getElementById('settings-backdrop');
+        const isOpen = panel.classList.contains('open');
+        if (isOpen) {
+            panel.classList.remove('open');
+            backdrop.classList.remove('open');
+        } else {
+            panel.classList.add('open');
+            backdrop.classList.add('open');
+            // Populate settings
+            document.getElementById('settings-tg-id').textContent = tgShort;
+            document.getElementById('settings-role').textContent = isKeyHolder ? 'Key Holder' : 'Member';
+            document.getElementById('settings-device').textContent = localStorage.getItem(SK_DEVICE_NAME) || 'device';
+            document.getElementById('settings-device-id').textContent = member ? hexShort(member.public_key) : '—';
+            document.getElementById('settings-relay-input').value = localStorage.getItem(SK_RELAY_URL) || '';
+            document.getElementById('settings-relay-status').textContent = relay && relay.connected ? 'connected' : (localStorage.getItem(SK_RELAY_URL) ? 'disconnected' : 'not configured');
+            // Show invite section for key holders
+            if (isKeyHolder) {
+                document.getElementById('settings-invite-section').style.display = 'block';
+            }
+        }
+    };
+    let currentShortCode = '';
+
+    window.generateNewInvite = function() {
+        if (!trustGroup) return;
+        const codeHex = trustGroup.generate_join_code(now(), BigInt(300));
+
+        // Short code for reading aloud / typing
+        currentShortCode = formatJoinCodeShort(codeHex);
+        document.getElementById('settings-short-code').textContent = currentShortCode;
+
+        // Full URL for QR / copy
+        const relayUrl = localStorage.getItem(SK_RELAY_URL) || '';
+        const tgHash = member.trust_group_hash();
+        if (relayUrl) {
+            currentInviteString = buildInvitationUrl(relayUrl, tgHash, codeHex);
+        } else {
+            // No relay — fall back to base64 invite
+            currentInviteString = r2.encode_invite(new Uint8Array(trustGroup.public_key), codeHex);
+        }
+
+        document.getElementById('settings-invite-display').style.display = 'block';
+        document.getElementById('settings-invite-btn').textContent = 'New Code';
+        document.getElementById('settings-invite-code').textContent = currentInviteString;
+
+        // Generate QR code
+        const qrContainer = document.getElementById('settings-qr-code');
+        const qrSvg = generateQrSvg(currentInviteString, 200);
+        qrContainer.innerHTML = qrSvg || '<span style="color:#888;font-size:12px">QR generation failed</span>';
+        inviteExpiry = Date.now() + 300000;
+        if (inviteTimerInterval) clearInterval(inviteTimerInterval);
+        inviteTimerInterval = setInterval(() => {
+            const rem = Math.max(0, Math.ceil((inviteExpiry - Date.now()) / 1000));
+            const el = document.getElementById('settings-invite-timer');
+            if (el) el.textContent = rem > 0 ? `Expires ${Math.floor(rem/60)}:${(rem%60).toString().padStart(2,'0')}` : 'Expired';
+            if (rem <= 0) clearInterval(inviteTimerInterval);
+        }, 1000);
+        saveAuth();
+    };
+    window.copyShortCode = function() {
+        navigator.clipboard.writeText(currentShortCode).then(() => {
+            const el = document.getElementById('settings-short-code');
+            const orig = el.textContent;
+            el.textContent = 'Copied!';
+            setTimeout(() => el.textContent = orig, 1000);
+        });
+    };
+    window.copyInvite = function() {
+        navigator.clipboard.writeText(currentInviteString).then(() => {
+            const el = document.getElementById('settings-invite-code');
+            const orig = el.textContent;
+            el.textContent = 'Copied!';
+            setTimeout(() => el.textContent = orig, 1000);
+        });
+    };
+    window.updateRelay = function() {
+        const url = document.getElementById('settings-relay-input').value.trim();
+        if (relay) relay.disconnect();
+        if (!url) {
+            localStorage.removeItem(SK_RELAY_URL);
+            relay = null;
+            document.getElementById('settings-relay-status').textContent = 'not configured';
+            document.getElementById('relay-status').textContent = '';
+            return;
+        }
+        localStorage.setItem(SK_RELAY_URL, url);
+        if (member) {
+            relay = new R2RelayTransport(url, member);
+            relay.onFrame = (data) => {
+                if (isJoinMessage(data)) handleJoinMessage(data);
+                else if (isPluginData(data)) handlePluginData(data);
+                else handleIncomingFrame(data);
+            };
+            relay.connect();
+            document.getElementById('settings-relay-status').textContent = 'connecting...';
+        }
+    };
+
+    window.resetState = function() {
+        if (!confirm('Leave this trust group? Notes will be deleted.')) return;
+        if (relay) relay.disconnect();
+        [SK_MEMBER, SK_TG, SK_ROLE, SK_DEVICE_NAME, SK_RELAY_URL].forEach(k => localStorage.removeItem(k));
+        localStorage.removeItem(notesKey()); localStorage.removeItem(eventsKey());
+        location.reload();
+    };
+
+    // ── Init ──
+    function initApp() {
+        tgShort = hexShort(member.trust_group_id);
+        document.getElementById('join-screen').style.display = 'none';
+        document.getElementById('app-screen').style.display = 'block';
+        document.getElementById('app-tg-id').textContent = tgShort;
+        document.getElementById('app-device-name').textContent = localStorage.getItem(SK_DEVICE_NAME) || 'device';
+        loadNotes(); loadEvents();
+        renderNoteList(); renderEditor(); renderEventLog();
+        const relayUrl = localStorage.getItem(SK_RELAY_URL);
+        if (relayUrl) {
+            relay = new R2RelayTransport(relayUrl, member);
+            relay.onFrame = (data) => {
+                if (isJoinMessage(data)) handleJoinMessage(data);
+                else if (isPluginData(data)) handlePluginData(data);
+                else handleIncomingFrame(data);
+            };
+            relay.connect();
+        }
+    }
+
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && document.getElementById('join-screen').style.display !== 'none') { joinTrustGroup(); return; }
+        if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); saveNote(); }
+        if ((e.ctrlKey || e.metaKey) && e.key === 'n') { e.preventDefault(); newNote(); }
+    });
+    document.getElementById('editor-title').addEventListener('input', markDirty);
+    document.getElementById('editor-content').addEventListener('input', markDirty);
+    window.addEventListener('beforeunload', () => flushIfDirty());
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushIfDirty(); });
+
+    function checkHashJoin() {
+        const hash = window.location.hash;
+        if (hash.startsWith('#join=')) {
+            const code = decodeURIComponent(hash.slice(6));
+            if (code) setTimeout(() => {
+                const i = document.getElementById('join-code');
+                if (i) { i.value = code; i.focus(); }
+                // If it's an r2:// URL, extract the relay URL too
+                const parsed = parseInvitationUrl(code);
+                if (parsed) {
+                    document.getElementById('relay-url').value = parsed.relayUrl;
+                }
+            }, 100);
+            history.replaceState(null, '', location.pathname + location.search);
+        }
+    }
+
+    // ── Theme ──
+    window.setTheme = function(theme) {
+        if (theme === 'auto') {
+            document.documentElement.removeAttribute('data-theme');
+            localStorage.removeItem('r2_theme');
+        } else {
+            document.documentElement.setAttribute('data-theme', theme);
+            localStorage.setItem('r2_theme', theme);
+        }
+    };
+    // Apply saved theme
+    const savedTheme = localStorage.getItem('r2_theme');
+    if (savedTheme) document.documentElement.setAttribute('data-theme', savedTheme);
+
+    async function start() {
+        await init();
+        HASH_CREATE = r2.r2_hash('note.create');
+        HASH_UPDATE = r2.r2_hash('note.update');
+        HASH_DELETE = r2.r2_hash('note.delete');
+        if (loadAuth()) initApp();
+        else {
+            document.getElementById('join-screen').style.display = 'flex';
+            const savedRelay = localStorage.getItem(SK_RELAY_URL);
+            if (savedRelay) document.getElementById('relay-url').value = savedRelay;
+            checkHashJoin();
+        }
+    }
+    start().catch(e => { console.error(e); showError('Failed to load: ' + e.message); });
+</script>
+</body>
+</html>

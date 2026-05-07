@@ -281,6 +281,37 @@ already tracks FSM state internally for the physical LED; just include
 the state in `r2.sensor.status`. The browser's CSS animations
 (solid / pulse / heartbeat / strobe) match the physical LED 1:1.
 
+## Performance — WASM/TG live-streaming budget
+
+Asked + analysed 2026-05-07: is the WASM/TG model fast enough for
+live streaming?
+
+**Yes, by 2+ orders of magnitude on the figures we care about.**
+The hot path per acceleration frame (WSS bytes → WASM decode → CBOR
+parse → HMAC verify → JS event → Chart.js update) totals ~15 µs of
+WASM work plus Chart.js's render cost. At the spec'd 10 Hz live
+decimation × 20 sensors = 200 events/sec the WASM side is ~3 ms/sec
+CPU — well under 1% of a single core on a modern laptop.
+
+Bottleneck is and stays Chart.js render time at high peer counts,
+which Phase 8b (Canvas mini-charts) already addresses. WASM does not
+add meaningful overhead vs the current Rust-decode-then-JSON-push
+model — and JSON serialisation on the server side is usually MORE
+expensive than CBOR decode on the client.
+
+Risks documented for completeness:
+
+* Full 100 Hz to browser pre-decimation would hurt — keep the
+  onsite controller's 10 Hz live decimation in place after Phase 5d.
+* Per-frame Ed25519 sig would be expensive (~500 µs each); we only
+  Ed25519-verify the announce. Per-frame integrity is HMAC (~10 µs).
+* Mobile-browser WASM is slower but still trivial at 10 Hz × small N.
+* First-load bundle size: r2-wasm ≈ 200–400 KB compressed. One-time
+  cost; cached after first visit.
+
+Validated externally by r2-notekeeper and anthill running this exact
+model in production today.
+
 ## Lessons learned the hard way (carry these forward)
 
 * **esp-idf-sys + custom partition table**: ESP-IDF resolves

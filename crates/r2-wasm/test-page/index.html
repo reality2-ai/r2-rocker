@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>R2 WASM Hive Test</title>
+    <style>
+        body { font-family: monospace; background: #1a1a2e; color: #e0e0e0; padding: 2em; max-width: 900px; }
+        h1 { color: #00d4ff; }
+        h2 { color: #00d4ff; margin-top: 1.5em; font-size: 1.1em; }
+        .test { margin: 0.3em 0; }
+        .pass { color: #00ff88; }
+        .fail { color: #ff4444; }
+        .info { color: #aaa; }
+        .section { color: #ffaa00; font-weight: bold; margin-top: 1em; }
+        pre { background: #0a0a1a; padding: 1em; border-radius: 4px; overflow-x: auto; font-size: 0.9em; }
+        .hex { color: #88aaff; }
+    </style>
+</head>
+<body>
+    <h1>R2 WASM Hive Test</h1>
+    <div id="output"></div>
+
+    <script type="module">
+        import init, * as r2 from '../pkg/r2_wasm.js';
+
+        const out = document.getElementById('output');
+        let passed = 0, failed = 0;
+
+        function log(msg, cls = '') {
+            const div = document.createElement('div');
+            div.className = `test ${cls}`;
+            div.textContent = msg;
+            out.appendChild(div);
+        }
+        function section(msg) { log(msg, 'section'); }
+        function hex(bytes) {
+            return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+        }
+
+        function assert(name, condition, detail = '') {
+            if (condition) { log(`  PASS  ${name}`, 'pass'); passed++; }
+            else { log(`  FAIL  ${name}  ${detail}`, 'fail'); failed++; }
+        }
+
+        async function run() {
+            await init();
+
+            const ver = r2.r2_version();
+            log(`${ver}`, 'info');
+            const wasmSize = 176;
+            const gzipSize = 68;
+            log(`WASM: ${wasmSize}KB (${gzipSize}KB gzipped) — full R2 stack with trust group crypto`, 'info');
+            log('');
+
+            // ─── r2-fnv ───
+            section('r2-fnv: Event Name Hashing');
+            assert('r2_hash("#ping") = 0x7CB36B0A', r2.r2_hash('#ping') === 0x7CB36B0A);
+            assert('r2_hash("read_level") = 0x424D3E4C', r2.r2_hash('read_level') === 0x424D3E4C);
+            assert('Canonicalisation', r2.r2_hash('  Set_Temp ') === r2.r2_hash('set_temp'));
+
+            // ─── r2-cbor ───
+            section('r2-cbor: CBOR Encoding');
+            const cbor = r2.cbor_encode_int_map(new Uint8Array([1, 2]), new Uint32Array([2550, 6230]));
+            const expected = [0xA2, 0x01, 0x19, 0x09, 0xF6, 0x02, 0x19, 0x18, 0x56];
+            assert('CBOR {1:2550, 2:6230}', cbor.length === expected.length && cbor.every((v, i) => v === expected[i]));
+
+            // ─── r2-wire: compact ───
+            section('r2-wire: Compact Frame Encode/Decode');
+            const payload = new Uint8Array([0xA1, 0x00, 0x18, 0xEA]);
+            const frame = r2.encode_compact_frame(0, 5, 3, 0xA1B2, 0x424D3E4C, 0x1A2B3C4D, payload);
+            assert('Encode succeeds (16 bytes)', frame.length === 16);
+            const dec = r2.decode_compact_frame(frame);
+            assert('Decode event_hash', dec.event_hash === 0x424D3E4C);
+            assert('Decode target', dec.target === 0x1A2B3C4D);
+            assert('Decode payload intact', dec.payload.length === 4);
+
+            // ─── r2-wire: extended ───
+            section('r2-wire: Extended Frame Encode/Decode');
+            const ext = r2.encode_extended_frame(0, 5, 3, 0xA1B2, 0x424D3E4C, 0x11111111, 0x22222222, payload);
+            assert('Extended encode succeeds', ext.length > 22);
+            const ext_dec = r2.decode_extended_frame(ext);
+            assert('Extended target_group', ext_dec.target_group === 0x11111111);
+
+            // ─── r2-wire: transcoding ───
+            section('r2-wire: Transcoding');
+            const to_ext = r2.transcode_to_extended(frame);
+            const roundtrip = r2.transcode_to_compact(to_ext);
+            const rt_dec = r2.decode_compact_frame(roundtrip);
+            assert('Compact→Extended→Compact roundtrip', rt_dec.event_hash === 0x424D3E4C);
+
+            // ─── Trust Group Creation ───
+            section('r2-trust: Create Trust Group');
+            const now = Math.floor(Date.now() / 1000);
+            const tg = new r2.R2TrustGroup(BigInt(now));
+            assert('Trust group created', tg.public_key.length === 32);
+            assert('DEK is 32 bytes', tg.dek.length === 32);
+            assert('HK is 32 bytes', tg.hk.length === 32);
+            assert('No members yet', tg.member_count === 0);
+            log(`  Trust Group ID: ${hex(tg.public_key).substring(0, 16)}...`, 'hex');
+
+            // ─── Generate Join Code ───
+            section('r2-trust: Generate Join Code');
+            const joinCodeHex = tg.generate_join_code(BigInt(now), BigInt(300));
+            assert('Join code is 32 hex chars (16 bytes)', joinCodeHex.length === 32);
+            log(`  Join Code: ${joinCodeHex}`, 'hex');
+
+            // ─── Device Keypair ───
+            section('r2-trust: Generate Device Keypair');
+            const keypair = r2.generate_device_keypair();
+            assert('Secret key is 32 bytes', keypair.secret_key.length === 32);
+            assert('Public key is 32 bytes', keypair.public_key.length === 32);
+            log(`  Device PK: ${hex(keypair.public_key).substring(0, 16)}...`, 'hex');
+
+            // ─── Join Handshake ───
+            section('r2-trust: Join Handshake (full flow)');
+
+            // Key holder processes the join request
+            const encryptedResponse = tg.process_join(
+                joinCodeHex,
+                new Uint8Array(keypair.public_key),
+                'Browser Hive #1',
+                BigInt(now)
+            );
+            assert('Encrypted response generated', encryptedResponse.length > 0);
+            assert('Member count is now 1', tg.member_count === 1);
+            log(`  Encrypted response: ${encryptedResponse.length} bytes`, 'info');
+
+            // Device completes the join
+            const member = r2.complete_join(
+                new Uint8Array(keypair.secret_key),
+                new Uint8Array(tg.public_key),
+                encryptedResponse,
+                BigInt(now)
+            );
+            assert('Member created successfully', member !== null);
+            assert('Member has correct TG ID', hex(member.trust_group_id) === hex(tg.public_key));
+            assert('Member has HK', member.hk.length === 32);
+            assert('Member has DEK', member.dek.length === 32);
+            assert('Member HK matches TG HK', hex(member.hk) === hex(tg.hk));
+            assert('Certificate valid now', member.is_valid(BigInt(now)));
+            assert('Certificate valid in 1 hour', member.is_valid(BigInt(now + 3600)));
+            log(`  Member PK: ${hex(member.public_key).substring(0, 16)}...`, 'hex');
+
+            // ─── Second Device ───
+            section('r2-trust: Second Device Join');
+            const joinCode2 = tg.generate_join_code(BigInt(now), BigInt(300));
+            const kp2 = r2.generate_device_keypair();
+            const enc2 = tg.process_join(
+                joinCode2, new Uint8Array(kp2.public_key), 'Browser Hive #2', BigInt(now)
+            );
+            const member2 = r2.complete_join(
+                new Uint8Array(kp2.secret_key), new Uint8Array(tg.public_key), enc2, BigInt(now)
+            );
+            assert('Second member joined', tg.member_count === 2);
+            assert('Second member valid', member2.is_valid(BigInt(now)));
+            const names = tg.member_names();
+            assert('Member names correct', JSON.stringify(names) === '["Browser Hive #1","Browser Hive #2"]');
+            log(`  Members: ${JSON.stringify(names)}`, 'info');
+
+            // ─── HMAC with Trust Group Keys ───
+            section('r2-trust: HMAC Sign/Verify with Group Keys');
+            const tag = r2.hmac_compact_tag(frame, new Uint8Array(member.hk));
+            assert('HMAC tag is 8 bytes', tag.length === 8);
+            log(`  HMAC tag: ${hex(tag)}`, 'hex');
+
+            // ─── Encode + Sign a real event ───
+            section('End-to-end: Encode Event + HMAC');
+            const sensorHash = r2.r2_hash('read_level');
+            const sensorPayload = r2.cbor_encode_int_map(new Uint8Array([0]), new Uint32Array([234]));
+            const sensorFrame = r2.encode_compact_frame(0, 5, 3, 42, sensorHash, 0, sensorPayload);
+            const sensorTag = r2.hmac_compact_tag(sensorFrame, new Uint8Array(member.hk));
+            assert('Sensor event encoded', sensorFrame.length > 0);
+            assert('Sensor event signed', sensorTag.length === 8);
+            log(`  Event "read_level" → hash 0x${sensorHash.toString(16)} → ${sensorFrame.length} bytes + ${sensorTag.length} byte tag`, 'info');
+
+            // ─── Framing for transport ───
+            section('r2-transport: USB/BLE Framing');
+            const usb_framed = r2.frame_with_le_prefix(sensorFrame);
+            assert('USB/BLE frame: LE prefix + payload', usb_framed.length === sensorFrame.length + 2);
+            const tcp_framed = r2.frame_with_be_prefix(sensorFrame);
+            assert('TCP frame: BE prefix + payload', tcp_framed.length === sensorFrame.length + 4);
+
+            // ─── Persist / Restore: Member ───
+            section('Persist: Member State Roundtrip');
+            const memberBytes = member.to_bytes();
+            assert('Member serialized to 277 bytes', memberBytes.length === 277);
+            log(`  Serialized: ${memberBytes.length} bytes`, 'info');
+
+            const restored = r2.R2Member.from_bytes(memberBytes);
+            assert('Restored member has correct PK', hex(restored.public_key) === hex(member.public_key));
+            assert('Restored member has correct TG ID', hex(restored.trust_group_id) === hex(member.trust_group_id));
+            assert('Restored member has correct HK', hex(restored.hk) === hex(member.hk));
+            assert('Restored member has correct DEK', hex(restored.dek) === hex(member.dek));
+            assert('Restored member is valid', restored.is_valid(BigInt(now)));
+
+            // Sign a frame with the restored member's HK — should produce same tag
+            const restoredTag = r2.hmac_compact_tag(frame, new Uint8Array(restored.hk));
+            assert('Restored HMAC matches original', hex(restoredTag) === hex(tag));
+
+            // ─── Persist / Restore: Trust Group (Key Holder) ───
+            section('Persist: Trust Group Roundtrip');
+            const tgBytes = tg.to_bytes();
+            assert('TG serialized to 38 bytes', tgBytes.length === 38);
+            log(`  Serialized: ${tgBytes.length} bytes (signing key + sequence + crypto level)`, 'info');
+
+            const restoredTg = r2.R2TrustGroup.from_bytes(tgBytes, BigInt(now));
+            assert('Restored TG has correct public key', hex(restoredTg.public_key) === hex(tg.public_key));
+            assert('Restored TG has correct DEK', hex(restoredTg.dek) === hex(tg.dek));
+            assert('Restored TG has correct HK', hex(restoredTg.hk) === hex(tg.hk));
+            assert('Restored TG member count is 0 (members rejoin)', restoredTg.member_count === 0);
+
+            // New device can join the restored trust group
+            const joinCode3 = restoredTg.generate_join_code(BigInt(now), BigInt(300));
+            const kp3 = r2.generate_device_keypair();
+            const enc3 = restoredTg.process_join(
+                joinCode3, new Uint8Array(kp3.public_key), 'Rejoined Device', BigInt(now)
+            );
+            const member3 = r2.complete_join(
+                new Uint8Array(kp3.secret_key), new Uint8Array(restoredTg.public_key), enc3, BigInt(now)
+            );
+            assert('Device joined restored TG', restoredTg.member_count === 1);
+            assert('New member valid in restored TG', member3.is_valid(BigInt(now)));
+            assert('New member HK matches restored TG', hex(member3.hk) === hex(restoredTg.hk));
+            log(`  New member "${restoredTg.member_names()}" joined restored trust group`, 'info');
+
+            // ─── localStorage Simulation ───
+            section('Persist: localStorage Simulation');
+            // Save member state as base64 in localStorage
+            const b64 = btoa(String.fromCharCode(...memberBytes));
+            localStorage.setItem('r2_member_test', b64);
+            assert('Saved to localStorage', localStorage.getItem('r2_member_test') === b64);
+
+            // Load it back
+            const loaded = localStorage.getItem('r2_member_test');
+            const loadedBytes = new Uint8Array(atob(loaded).split('').map(c => c.charCodeAt(0)));
+            const fromStorage = r2.R2Member.from_bytes(loadedBytes);
+            assert('Loaded from localStorage', hex(fromStorage.public_key) === hex(member.public_key));
+            assert('Loaded member is valid', fromStorage.is_valid(BigInt(now)));
+
+            // Clean up
+            localStorage.removeItem('r2_member_test');
+            log(`  Full cycle: WASM → serialize → base64 → localStorage → base64 → deserialize → WASM`, 'info');
+
+            // ─── Summary ───
+            log('');
+            section('════════════════════════════════════');
+            log(`  ${passed} passed, ${failed} failed`, failed === 0 ? 'pass' : 'fail');
+            log('');
+            log('  The R2 protocol stack is running in your browser.', 'info');
+            log('  Trust group created. Devices joined. Events signed.', 'info');
+            log('  State persisted to localStorage and restored.', 'info');
+            log('  Ready for WebSocket / WebBluetooth / WebUSB transport.', 'info');
+        }
+
+        run().catch(e => { log(`ERROR: ${e.message || e}`, 'fail'); console.error(e); });
+    </script>
+</body>
+</html>

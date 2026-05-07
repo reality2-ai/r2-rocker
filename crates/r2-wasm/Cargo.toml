@@ -1,0 +1,39 @@
+[package]
+name = "r2-wasm"
+version = "0.1.1"
+edition.workspace = true
+license.workspace = true
+description = "R2 protocol stack compiled to WebAssembly — browser becomes an R2 hive"
+repository = "https://github.com/reality2-ai/r2-core"
+keywords = ["wasm", "mesh", "r2", "browser", "webassembly"]
+categories = ["wasm", "web-programming", "network-programming"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+r2-fnv = { path = "../r2-fnv" }
+r2-cbor = { path = "../r2-cbor" }
+r2-wire = { path = "../r2-wire", features = ["alloc"] }
+r2-trust = { path = "../r2-trust" }
+r2-transport = { path = "../r2-transport" }
+r2-route = { path = "../r2-route" }
+r2-engine = { path = "../r2-engine", features = ["alloc"] }
+
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+getrandom = { version = "0.2", features = ["js"] }
+rand_core = { version = "0.6", default-features = false }
+ed25519-dalek = { version = "=2.1.1", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true

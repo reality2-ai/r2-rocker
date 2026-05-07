@@ -1,0 +1,19 @@
+[package]
+name = "r2-engine"
+version = "0.1.0"
+edition = "2021"
+description = "R2 sentant engine — event bus, state machines, plugin interface"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["alloc"]
+alloc = []
+std = ["alloc"]
+
+[dependencies]
+r2-fnv = { path = "../r2-fnv" }
+r2-cbor = { path = "../r2-cbor", default-features = false }
+r2-wire = { path = "../r2-wire", default-features = false }
+
+[dev-dependencies]
+serde_json = "1.0"

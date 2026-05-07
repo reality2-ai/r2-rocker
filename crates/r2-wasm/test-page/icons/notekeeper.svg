@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Background: rounded square -->
+  <rect width="512" height="512" rx="96" fill="#1c1c21"/>
+
+  <!-- Honeycomb hexagon (the R2 cell) -->
+  <path d="M256 72 L400 156 L400 324 L256 408 L112 324 L112 156 Z"
+        fill="none" stroke="#d4a853" stroke-width="20" stroke-linejoin="round" opacity="0.85"/>
+
+  <!-- Text lines inside hexagon (the "note") -->
+  <line x1="176" y1="200" x2="336" y2="200" stroke="#d4a853" stroke-width="12" stroke-linecap="round" opacity="0.5"/>
+  <line x1="176" y1="244" x2="310" y2="244" stroke="#d4a853" stroke-width="12" stroke-linecap="round" opacity="0.5"/>
+  <line x1="176" y1="288" x2="280" y2="288" stroke="#d4a853" stroke-width="12" stroke-linecap="round" opacity="0.5"/>
+
+  <!-- Quill pen (diagonal, crossing the hexagon corner) -->
+  <path d="M310 320 L420 120" stroke="#d4a853" stroke-width="14" stroke-linecap="round"/>
+  <!-- Pen nib -->
+  <path d="M310 320 L300 330 L314 326 Z" fill="#d4a853"/>
+  <!-- Feather -->
+  <path d="M420 120 Q440 96 448 72 Q432 100 420 120" fill="#d4a853" opacity="0.7"/>
+  <path d="M420 120 Q408 92 414 68 Q424 96 420 120" fill="#d4a853" opacity="0.5"/>
+</svg>

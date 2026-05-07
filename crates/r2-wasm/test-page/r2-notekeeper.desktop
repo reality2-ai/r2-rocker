@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=R2 Notekeeper
+Comment=Private notes on the R2 mesh
+GenericName=Notes
+Exec=xdg-open http://localhost:21045/test-page/notekeeper.html
+Icon=r2-notekeeper
+Terminal=false
+Type=Application
+Categories=Office;TextEditor;Utility;
+Keywords=notes;mesh;r2;encrypted;
+StartupWMClass=r2-notekeeper
