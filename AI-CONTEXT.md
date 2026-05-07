@@ -8,6 +8,79 @@ user explicitly.
 
 ---
 
+## Final / target architecture (canonical)
+
+User-described 2026-05-07. The end-state shape — what we're
+incrementally building toward:
+
+```
+                     ┌─────────────────────────────────┐
+                     │  Own relay+archive server        │
+                     │  (own VPS, eventually replaces   │
+                     │   public r2-relay)               │
+                     │  · forwards TG-encrypted frames  │
+                     │  · TG-member archiver: stores    │
+                     │    sensor data long-term         │
+                     └────────▲───────────────▲─────────┘
+                              │ WSS           │ WSS
+                              │               │
+   GitHub Pages               │               │
+   (static WebApp bundle)     │               │
+            │                 │               │
+            │ HTTPS           │               │
+            ▼                 │               │
+   ┌──────────────────┐       │               │
+   │ Browser hive     │       │  REMOTE       │
+   │ (WASM stack +    ├───────┘               │
+   │  JS UX, runs     │                       │
+   │  ANYWHERE)       │  ONSITE (over hotspot)│
+   │                  ├───────────────────────┤
+   └─────▲────────────┘                       │
+         │ download + enrolment-code          │
+         │                                    │
+   ┌─────┴──────────────────────┐             │
+   │ Onsite host                │             │
+   │  · sensor TCP listener     │◄────────────┘
+   │  · bridges to relay        │ publishes encrypted events
+   │  · LOCAL data archive      │
+   │  · TG signing key + cert   │
+   │    issuance (KeyHolder)    │
+   └────────▲───────────────────┘
+            │ WiFi (AP on onsite host)
+            │
+       ┌────┴────┐
+       │ Sensors │  ESP32-S3 (×N), TG members,
+       └─────────┘  signed announce + HMAC frames
+```
+
+Key distinctions:
+
+* **One WebApp binary, two modes**: same WASM bundle from GitHub
+  Pages, runs onsite (links to onsite host over hotspot) or remote
+  (links via relay). Browser detects mode by which transport
+  succeeds, or by an explicit operator-set flag.
+* **Onsite mode is the privileged one**: the operator on the rig
+  floor can Start/Mark/Stop a measurement session. Remote viewers
+  are read-only by default — a remote viewer must not "upset a
+  running experiment". This is enforceable via TG cert role
+  (KeyHolder vs Member) plus a UI affordance (controls greyed out
+  for remote).
+* **Onsite host stores data locally** — independent of any cloud /
+  relay. So an offline onsite session works without the internet,
+  and survives even if the cloud server is unreachable.
+* **Own relay + archive in one server** — eventually replaces the
+  public `r2-relay` for this deployment. Same VPS forwards encrypted
+  frames AND runs a TG-member archiver consumer that keeps the
+  long-term store. (Public r2-relay is the bootstrap path; migrating
+  to own server is a config swap, not an architecture change.)
+* **Enrolment via download + code**: get the WebApp from GitHub,
+  enter a code from the onsite dashboard's UI, browser submits its
+  generated public key, onsite KeyHolder issues a TG-signed device
+  cert. Same shape as r2-notekeeper.
+
+This shape supersedes the earlier separate Phase 5d (relay) +
+Phase 5e (cloud archive) — they're one component now.
+
 ## What this project is
 
 Wireless **structural-health-monitoring** sensor system for a half-tonne
