@@ -17,6 +17,83 @@ group → WiFi → R2-WIRE) but **vendored self-contained** so the entire
 project — protocol crates, dashboard, firmware, tools — can be handed
 off to the university as a single repository.
 
+## How it works (a non-traditional architecture)
+
+If you're used to thinking *"the dashboard is a website running on a
+server somewhere; the browser is just a viewer of that server's
+data"*, r2-rocker is **not that**. The eventual shape (Phase 5d
+onward) is closer to how an encrypted-messenger app works:
+
+```
+                        ┌──────────────────────────┐
+                        │  Your browser            │
+                        │   running the WebApp     │
+                        │   IT IS the viewer       │
+                        │   AND the protocol stack │
+                        │   AND a trust-group      │
+                        │   member, all in WASM    │
+                        └──────────▲───────────────┘
+                                   │ encrypted only
+                                   │
+                ┌──────────────────┴─────────────────┐
+                │  Relay (or local hotspot link)     │
+                │  Forwards sealed envelopes between │
+                │  trust-group members. Never sees   │
+                │  what's inside.                    │
+                └──────────▲─────────────────────────┘
+                           │
+                ┌──────────┴───────────┐
+                │  Onsite controller   │     The privileged authority
+                │  (a Linux box on     │     for your trust group.
+                │  the rig floor)      │     Talks to sensors, signs
+                │  · TCP from sensors  │     things, archives data.
+                │  · KeyHolder         │
+                │  · Local archive     │
+                └──────────▲───────────┘
+                           │ WiFi (controller's hotspot)
+                           │
+                      ┌────┴────┐
+                      │ Sensors │
+                      └─────────┘
+```
+
+A few things this implies that may be unfamiliar:
+
+- **There is no central web server with a database.** The "data" lives
+  in: each sensor's SD card, the onsite controller's local archive,
+  and (eventually) a small VPS that combines relay + long-term store
+  — owned by you, not a third party. The relay forwards *sealed
+  envelopes* and cannot read them.
+- **The browser is a hive.** Same WebApp bundle (downloaded from
+  GitHub Pages over the internet, or from the onsite controller over
+  the local hotspot — byte-identical) runs in any browser. It loads
+  the R2 protocol stack as WebAssembly, which decodes / verifies /
+  signs frames itself. Plain JavaScript handles the UX (charts,
+  layout, controls); WASM handles the cryptography.
+- **Sensors and the controller are members of the trust group
+  automatically.** They ship with the right keys baked into firmware
+  / config. They don't enrol.
+- **Every browser, however, must enrol** to become a trust-group
+  member — there's no public log-in. The onsite dashboard's "Enrol
+  device" button shows a QR code (or shareable link). You scan it
+  with the device you want to add (laptop, tablet, phone). The
+  WebApp opens, generates its own keypair, presents the one-time
+  token, and the controller signs a device certificate that proves
+  TG membership. The certificate stays in the device's IndexedDB —
+  next time, the device is just a member.
+- **Onsite and remote use the same app.** The onsite controller is
+  the WebApp's host on the local hotspot; GitHub Pages is the
+  WebApp's host on the public internet. Same app either way; the
+  difference is which transport (local-hotspot or relay) the device
+  uses to reach the trust group.
+- **Closed-network deployments work without any internet.** Onsite
+  controller, sensors, and a tablet on the controller's hotspot is
+  the whole rig — no cloud, no third party, no GitHub.
+
+If you want the full architectural details (deployment-host
+breakdown, trust model, enrolment flow, phase plan), see
+[`AI-CONTEXT.md`](AI-CONTEXT.md) and [`plan/PLAN.md`](plan/PLAN.md).
+
 ## Current status (2026-05-07)
 
 **End-to-end demo is alive.** A simulated-data ESP32-S3 sensor (the
