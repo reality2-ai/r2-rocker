@@ -281,6 +281,26 @@ already tracks FSM state internally for the physical LED; just include
 the state in `r2.sensor.status`. The browser's CSS animations
 (solid / pulse / heartbeat / strobe) match the physical LED 1:1.
 
+## R2-specifications conformance — recurring gate
+
+Every protocol-touching phase (5c HMAC envelope, 5d WASM port, 6 BLE
+bootstrap) and every release candidate **must cross-validate against
+the canonical specs in `../r2-specifications/specs/r2-core/`** before
+landing. We have THREE places that encode R2-WIRE / R2-CBOR / sign
+HMACs: firmware (inline encoder in `firmware/esp32-s3/src/wire.rs`),
+the onsite controller's Rust process (using `crates/r2-cbor` +
+`crates/r2-wire`), and eventually the WASM hive (using `r2-wasm`'s
+exposed `encode_compact_frame` etc.). All three MUST produce
+byte-identical bytes for the same inputs — that's the test.
+
+Mechanism: `testing/wire-vectors.json` (per `SPEC-R2-ROCKER-WIRE.md`
+§9) lists `(event_name, payload, expected_frame_hex,
+expected_hmac_hex, expected_sig_hex)` tuples. Firmware unit tests +
+dashboard unit tests + WASM unit tests all check against it. CI
+runs all three on every push.
+
+Note: not a one-shot deliverable. It's a gate. Phase Z in PLAN.md.
+
 ## Performance — WASM/TG live-streaming budget
 
 Asked + analysed 2026-05-07: is the WASM/TG model fast enough for
