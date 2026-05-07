@@ -101,6 +101,12 @@ charts updating in Chart.js. Hardware: ESP32-S3-DevKitC-1-N8R8 MAC
   `git push`; updates to the protocol stack are an `r2-wasm` rebuild
   + push.
 
+  **This is the same deployment shape as `r2-notekeeper`** — viewer
+  on GitHub Pages, relay on a small VPS, producer device(s) on the
+  user's hardware. When implementing Phase 5d, study how notekeeper
+  wires its enrolment flow and per-device cert management; we
+  inherit the proven UX rather than designing it fresh.
+
   **Layering inside the browser**: WASM = protocol + crypto core
   (frame decode, HMAC verify, TG key derivation, cert
   validation, signature checks); **plain JavaScript = UX layer**
