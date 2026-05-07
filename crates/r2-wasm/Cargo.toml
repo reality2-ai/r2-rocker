@@ -1,8 +1,8 @@
 [package]
 name = "r2-wasm"
 version = "0.1.1"
-edition.workspace = true
-license.workspace = true
+edition = "2021"
+license = "MIT OR Apache-2.0"
 description = "R2 protocol stack compiled to WebAssembly — browser becomes an R2 hive"
 repository = "https://github.com/reality2-ai/r2-core"
 keywords = ["wasm", "mesh", "r2", "browser", "webassembly"]
@@ -37,3 +37,10 @@ wasm-bindgen-test = "0.3"
 opt-level = "z"
 lto = true
 strip = true
+
+# Disable wasm-pack's bundled wasm-opt — it's an older version that
+# chokes on the WASM features modern Rust+wasm-bindgen emits ("error
+# validating input"). The wasm bundle still gets size-optimised by the
+# Rust compiler's opt-level="z" + lto=true.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false

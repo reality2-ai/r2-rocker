@@ -56,6 +56,10 @@ dependencies.lock
 .embuild/
 **/.embuild/
 
+# wasm-pack output; reproduced by any developer running
+#   wasm-pack build crates/r2-wasm --target web --release
+crates/*/pkg/
+
 # Build-time-generated sdkconfig fragments (host-specific absolute paths).
 **/sdkconfig.partitions.generated
 **/sdkconfig.*.generated

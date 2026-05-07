@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>r2-rocker — WASM smoke test</title>
+  <style>
+    body { font: 14px/1.5 system-ui, -apple-system, sans-serif;
+           background: #0f172a; color: #e2e8f0; padding: 2em; max-width: 900px; margin: auto; }
+    h1 { color: #4a9eff; }
+    .row { background: #1e293b; border: 1px solid #334155; border-radius: 8px;
+           padding: 1em 1.2em; margin: 0.6em 0; }
+    .label { color: #64748b; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
+    .value { font-family: 'SF Mono', Menlo, monospace; color: #e2e8f0; word-break: break-all; }
+    .ok { color: #22c55e; }
+    .fail { color: #ef4444; }
+    pre { background: #0f172a; padding: 0.8em; border-radius: 6px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <h1>r2-rocker — WASM hive smoke test</h1>
+  <p>Phase 5d step 2: confirm the WASM bundle loads in the browser and the R2 protocol primitives (FNV hashing, R2-WIRE frame decode) work end-to-end. This is the foundation for replacing the Axum-served dashboard with a full browser-side R2 hive.</p>
+
+  <div class="row">
+    <div class="label">r2-wasm load status</div>
+    <div class="value" id="loadStatus">⏳ loading…</div>
+  </div>
+
+  <div class="row">
+    <div class="label">r2_version()</div>
+    <div class="value" id="versionOut">—</div>
+  </div>
+
+  <div class="row">
+    <div class="label">fnv1a_32(b"r2.sensor.acceleration") — should match firmware's EVT_SENSOR_ACCELERATION</div>
+    <div class="value" id="fnvOut">—</div>
+  </div>
+
+  <div class="row">
+    <div class="label">decode_compact_frame() of a synthetic announce frame</div>
+    <pre class="value" id="decodeOut">—</pre>
+  </div>
+
+  <div class="row">
+    <div class="label">generate_device_keypair() — used by browser enrolment in Phase 5d-enrol</div>
+    <pre class="value" id="keypairOut">—</pre>
+  </div>
+
+  <script type="module">
+    import init, {
+      r2_version,
+      fnv1a_32,
+      decode_compact_frame,
+      encode_compact_frame,
+      generate_device_keypair,
+    } from '../crates/r2-wasm/pkg/r2_wasm.js';
+
+    function set(id, text, cls) {
+      const el = document.getElementById(id);
+      el.textContent = text;
+      if (cls) el.className = 'value ' + cls;
+    }
+
+    function hex(arr) {
+      return Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    try {
+      await init();
+      set('loadStatus', '✓ WASM bundle loaded and initialised', 'ok');
+
+      // 1. Version string
+      set('versionOut', r2_version());
+
+      // 2. FNV-1a — must match the firmware's EVT_SENSOR_ACCELERATION constant
+      const accelHash = fnv1a_32(new TextEncoder().encode('r2.sensor.acceleration'));
+      set('fnvOut', '0x' + accelHash.toString(16).padStart(8, '0').toUpperCase());
+
+      // 3. Round-trip: encode a synthetic frame, decode it back, verify event_hash.
+      // R2-WIRE compact: msg_type=0 (Event), ttl=5, k=3, msg_id=0x1234,
+      // event_hash=fnv1a("r2.sensor.acceleration"), target=0 (broadcast),
+      // payload empty.
+      const synthFrame = encode_compact_frame(
+        0, 5, 3, 0x1234, accelHash >>> 0, 0, new Uint8Array([])
+      );
+      const decoded = decode_compact_frame(synthFrame);
+      set('decodeOut',
+        'frame bytes: ' + hex(synthFrame) + '\n\n' +
+        'decoded:     ' + JSON.stringify(decoded, null, 2));
+
+      // 4. Generate a fresh device keypair (this is what the browser does on
+      // first-run during Phase 5d-enrol, before submitting its public key
+      // to the onsite KeyHolder along with the QR/link join token).
+      const kp = generate_device_keypair();
+      set('keypairOut',
+        'public_key  (32 B): ' + hex(kp.public_key) + '\n' +
+        'secret_key  (32 B): ' + hex(kp.secret_key).slice(0, 32) + '… (truncated)');
+
+    } catch (e) {
+      set('loadStatus', '✗ ' + (e?.message || e), 'fail');
+      console.error(e);
+    }
+  </script>
+</body>
+</html>
