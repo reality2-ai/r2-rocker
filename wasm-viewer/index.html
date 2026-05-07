@@ -1,104 +1,1323 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <title>r2-rocker — WASM smoke test</title>
-  <style>
-    body { font: 14px/1.5 system-ui, -apple-system, sans-serif;
-           background: #0f172a; color: #e2e8f0; padding: 2em; max-width: 900px; margin: auto; }
-    h1 { color: #4a9eff; }
-    .row { background: #1e293b; border: 1px solid #334155; border-radius: 8px;
-           padding: 1em 1.2em; margin: 0.6em 0; }
-    .label { color: #64748b; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
-    .value { font-family: 'SF Mono', Menlo, monospace; color: #e2e8f0; word-break: break-all; }
-    .ok { color: #22c55e; }
-    .fail { color: #ef4444; }
-    pre { background: #0f172a; padding: 0.8em; border-radius: 6px; overflow-x: auto; }
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>R2 Rocker Rig — WASM viewer</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #0a0e17;
+    color: #e0e0e0;
+    min-height: 100vh;
+  }
+  .header {
+    background: linear-gradient(135deg, #1a1f35 0%, #0d1220 100%);
+    border-bottom: 1px solid #2a3050;
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .header h1 { font-size: 20px; font-weight: 600; color: #fff; }
+  .header h1 span { color: #4a9eff; }
+  .header-controls {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .connection-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+  }
+  .status-dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: #ff4444;
+    transition: background 0.3s;
+  }
+  .status-dot.connected { background: #44ff88; }
+
+  .btn-connect {
+    padding: 8px 16px;
+    border: 1px solid #3b82f6;
+    border-radius: 8px;
+    background: #1e3a5f;
+    color: #93c5fd;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .btn-connect:hover:not(:disabled) { background: #2563eb; color: white; }
+  .btn-connect:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  /* ── Bootstrap log panel ── */
+  .bootstrap-panel {
+    display: none;
+    max-width: 1600px;
+    margin: 0 auto;
+    padding: 0 16px;
+  }
+  .bootstrap-panel.visible { display: block; }
+  .bootstrap-log-card {
+    background: #0c1017;
+    border: 1px solid #1e293b;
+    border-radius: 12px;
+    padding: 16px 20px;
+    position: relative;
+    margin-top: 12px;
+  }
+  .bootstrap-log-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+  }
+  .bootstrap-log-header h2 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #64748b;
+    margin: 0;
+  }
+  .bootstrap-close {
+    background: none;
+    border: none;
+    color: #64748b;
+    font-size: 18px;
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+  .bootstrap-close:hover { color: #e0e0e0; background: #1e293b; }
+  .bootstrap-log-entries {
+    max-height: 200px;
+    overflow-y: auto;
+    font-family: 'SF Mono', Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.7;
+    background: #080b10;
+    border-radius: 6px;
+    padding: 10px 14px;
+  }
+  .bootstrap-log-entries::-webkit-scrollbar { width: 6px; }
+  .bootstrap-log-entries::-webkit-scrollbar-track { background: transparent; }
+  .bootstrap-log-entries::-webkit-scrollbar-thumb { background: #2a3050; border-radius: 3px; }
+  .bs-line { color: #94a3b8; }
+  .bs-line.amber { color: #fbbf24; }
+  .bs-line.green { color: #34d399; }
+  .bs-line.red { color: #f87171; }
+
+  /* ── Main layout ── */
+  .main {
+    display: grid;
+    grid-template-columns: 1fr 280px;
+    gap: 16px;
+    padding: 16px;
+    max-width: 1600px;
+    margin: 0 auto;
+  }
+
+  /* Sensor charts area — always 2-col; lone sensor spans both */
+  .sensors-area {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  .sensor-card:only-child {
+    grid-column: 1 / -1;
+  }
+
+  /* Right sidebar */
+  .sidebar {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .card {
+    background: #111827;
+    border: 1px solid #1e293b;
+    border-radius: 12px;
+    padding: 20px;
+  }
+  .card h2 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #64748b;
+    margin-bottom: 14px;
+  }
+
+  /* Sensor chart card */
+  .sensor-card { position: relative; min-width: 0; }
+  .sensor-label {
+    font-size: 16px;
+    font-weight: 700;
+    color: #fff;
+    margin-bottom: 4px;
+  }
+  .sensor-label .sensor-addr {
+    font-size: 11px;
+    font-weight: 400;
+    color: #4a9eff;
+    font-family: 'SF Mono', monospace;
+    margin-left: 8px;
+  }
+  .sensor-stats {
+    display: flex;
+    gap: 16px;
+    margin-top: 8px;
+    font-family: 'SF Mono', monospace;
+    font-size: 12px;
+  }
+  .sensor-stats span { opacity: 0.7; }
+  .sensor-stats .vx { color: #ff6384; }
+  .sensor-stats .vy { color: #36a2eb; }
+  .sensor-stats .vz { color: #4bc0c0; }
+  .sensor-stats .vmag { color: #f59e0b; }
+  .chart-container { position: relative; height: 260px; }
+
+  /* Per-sensor event log */
+  .sensor-event-log {
+    max-height: 80px;
+    overflow-y: auto;
+    font-family: 'SF Mono', Consolas, monospace;
+    font-size: 0.75rem;
+    line-height: 1.5;
+    background: #111827;
+    border-radius: 6px;
+    padding: 6px 10px;
+    margin-top: 8px;
+  }
+  .sensor-event-log::-webkit-scrollbar { width: 5px; }
+  .sensor-event-log::-webkit-scrollbar-track { background: transparent; }
+  .sensor-event-log::-webkit-scrollbar-thumb { background: #2a3050; border-radius: 3px; }
+  .sensor-event-line { color: #64748b; }
+  .sensor-event-line .sel-time { color: #4a9eff; }
+  .sensor-event-line .sel-text { color: #94a3b8; }
+  .sensors-area.dual .chart-container { height: 260px; }
+
+  /* Controls */
+  .state-indicator {
+    text-align: center;
+    padding: 14px;
+    border-radius: 8px;
+    margin-bottom: 14px;
+    font-size: 16px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+  }
+  .state-idle { background: #1e293b; color: #64748b; }
+  .state-calibrating { background: #2d1f00; color: #fbbf24; }
+  .state-rocking { background: #002d1a; color: #34d399; }
+
+  .btn-group { display: flex; flex-direction: column; gap: 8px; }
+  .btn {
+    padding: 12px 16px;
+    border: none;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+  .btn:hover { transform: translateY(-1px); }
+  .btn:active { transform: translateY(0); }
+  .btn:disabled { opacity: 0.3; cursor: not-allowed; transform: none; }
+  .btn-start { background: #059669; color: white; }
+  .btn-start:hover:not(:disabled) { background: #047857; }
+  .btn-mark { background: #d97706; color: white; }
+  .btn-mark:hover:not(:disabled) { background: #b45309; }
+  .btn-stop { background: #dc2626; color: white; }
+  .btn-stop:hover:not(:disabled) { background: #b91c1c; }
+
+  .cal-status {
+    margin-top: 10px;
+    font-size: 11px;
+    color: #64748b;
+    font-family: 'SF Mono', monospace;
+    min-height: 16px;
+  }
+
+  /* Event log */
+  .log-card { grid-column: 1 / -1; }
+  .log-entries {
+    max-height: 120px;
+    overflow-y: auto;
+    font-family: 'SF Mono', Consolas, monospace;
+    font-size: 11px;
+    line-height: 1.6;
+  }
+  .log-entry { color: #64748b; }
+  .log-entry .time { color: #4a9eff; }
+  .log-entry .src  { color: #a78bfa; }
+  .log-entry .event { color: #34d399; }
+  .log-entry .value { color: #fbbf24; }
+
+  /* Log row below main grid */
+  .log-row {
+    padding: 0 16px 16px;
+    max-width: 1600px;
+    margin: 0 auto;
+  }
+
+  @media (max-width: 900px) {
+    .main { grid-template-columns: 1fr; }
+    .sensors-area.dual { grid-template-columns: 1fr; }
+    .chart-container { height: 220px; }
+  }
+
+  /* ── Phase 8a: Devices view ─────────────────────────────────────────── */
+  .view-toggle {
+    display: inline-flex;
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    overflow: hidden;
+    margin-right: 12px;
+  }
+  .view-toggle button {
+    background: transparent;
+    border: 0;
+    color: #94a3b8;
+    padding: 7px 14px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .view-toggle button.active {
+    background: #4a9eff;
+    color: #fff;
+    font-weight: 600;
+  }
+
+  .devices-main {
+    max-width: 1600px;
+    margin: 0 auto;
+    padding: 12px 24px 0;
+  }
+  .devices-area {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 12px;
+  }
+
+  .device-card {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 10px;
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .device-card .device-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-weight: 600;
+    color: #f1f5f9;
+  }
+  .device-card .online-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: #22c55e;
+    box-shadow: 0 0 6px #22c55e;
+    flex-shrink: 0;
+  }
+  .device-card.stale .online-dot { background: #facc15; box-shadow: 0 0 6px #facc15; }
+  .device-card.offline .online-dot { background: #475569; box-shadow: none; }
+
+  .device-card .device-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 13px;
+    color: #94a3b8;
+    font-family: 'SF Mono', Menlo, monospace;
+  }
+  .device-card .device-row .label { color: #64748b; }
+  .device-card .device-row .value { color: #e2e8f0; }
+
+  .battery-bar {
+    height: 6px; background: #0f172a; border-radius: 3px; overflow: hidden;
+    margin-top: 4px;
+  }
+  .battery-bar > div {
+    height: 100%;
+    background: linear-gradient(90deg, #22c55e, #84cc16);
+    transition: width 0.4s ease;
+  }
+  .battery-bar > div.low { background: linear-gradient(90deg, #f97316, #facc15); }
+  .battery-bar > div.crit { background: #ef4444; }
+
+  /* Virtual LED — solid until Phase 5L sends FSM state, then animated */
+  .virt-led {
+    width: 14px; height: 14px; border-radius: 50%;
+    border: 1px solid #475569;
+    background: #334155;
+    flex-shrink: 0;
+  }
+  .virt-led.tg-boot       { background: #f8fafc; box-shadow: 0 0 8px #f8fafc; animation: led-flash 1s 1; }
+  .virt-led.tg-advertising { background: #3b82f6; box-shadow: 0 0 8px #3b82f6; animation: led-pulse 1.0s ease-in-out infinite; }
+  .virt-led.tg-ble        { background: #06b6d4; box-shadow: 0 0 8px #06b6d4; animation: led-pulse 0.4s ease-in-out infinite; }
+  .virt-led.tg-streaming  { background: #22c55e; box-shadow: 0 0 8px #22c55e; animation: led-heartbeat 1.0s ease-in-out infinite; }
+  .virt-led.tg-catchup    { background: #facc15; box-shadow: 0 0 8px #facc15; animation: led-heartbeat 1.0s ease-in-out infinite; }
+  .virt-led.tg-cal        { background: #a855f7; box-shadow: 0 0 8px #a855f7; }
+  .virt-led.tg-low        { background: #f97316; box-shadow: 0 0 8px #f97316; animation: led-pulse 1.5s ease-in-out infinite; }
+  .virt-led.tg-ota        { background: #ec4899; box-shadow: 0 0 8px #ec4899; animation: led-strobe 0.18s steps(2) infinite; }
+  .virt-led.tg-error      { background: #ef4444; box-shadow: 0 0 8px #ef4444; animation: led-pulse 0.25s ease-in-out infinite; }
+
+  @keyframes led-pulse     { 0%,100% { opacity: 1; } 50% { opacity: 0.25; } }
+  @keyframes led-heartbeat { 0%, 30%, 100% { opacity: 1; } 15%, 45% { opacity: 0.3; } }
+  @keyframes led-strobe    { 0% { opacity: 1; } 50% { opacity: 0; } }
+  @keyframes led-flash     { 0% { opacity: 0; } 30%, 70% { opacity: 1; } 100% { opacity: 0; } }
+
+  .device-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: auto;
+  }
+  .btn-update {
+    flex: 1;
+    background: #475569;
+    color: #f1f5f9;
+    border: 0;
+    border-radius: 6px;
+    padding: 7px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .btn-update:hover { background: #64748b; }
+  .btn-update:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .devices-summary {
+    display: flex;
+    gap: 18px;
+    color: #94a3b8;
+    font-size: 13px;
+    margin-bottom: 10px;
+    padding: 10px 14px;
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 8px;
+  }
+  .devices-summary strong { color: #e2e8f0; }
+</style>
 </head>
 <body>
-  <h1>r2-rocker — WASM hive smoke test</h1>
-  <p>Phase 5d step 2: confirm the WASM bundle loads in the browser and the R2 protocol primitives (FNV hashing, R2-WIRE frame decode) work end-to-end. This is the foundation for replacing the Axum-served dashboard with a full browser-side R2 hive.</p>
 
-  <div class="row">
-    <div class="label">r2-wasm load status</div>
-    <div class="value" id="loadStatus">⏳ loading…</div>
+<div class="header">
+  <h1><span>R2</span> Rocker Rig — Dashboard</h1>
+  <div class="header-controls">
+    <div class="view-toggle" id="viewToggle">
+      <button id="viewLive"    class="active" onclick="setView('live')">Live</button>
+      <button id="viewDevices"               onclick="setView('devices')">Devices</button>
+    </div>
+    <button class="btn-connect" id="btn-connect" onclick="startBootstrap()">&#x1F50D; Connect Sensors</button>
+    <div class="connection-status">
+      <div class="status-dot" id="wsDot"></div>
+      <span id="wsStatus">Connecting...</span>
+      <span style="margin-left:14px; color:#64748b;">Sensors:</span>
+      <span id="sensorCount" style="font-weight:600; color:#4a9eff;">0</span>
+    </div>
+  </div>
+</div>
+
+<!-- ── Devices view (Phase 8a) ─────────────────────────────────────── -->
+<div class="devices-main" id="devicesMain" hidden>
+  <div class="devices-summary" id="devicesSummary">
+    <span><strong id="dsTotal">0</strong> known</span>
+    <span><strong id="dsOnline" style="color:#22c55e;">0</strong> online</span>
+    <span><strong id="dsStale" style="color:#facc15;">0</strong> stale</span>
+    <span><strong id="dsOffline" style="color:#64748b;">0</strong> offline</span>
+    <span><strong id="dsNeedsUpdate" style="color:#ec4899;">0</strong> needs update</span>
+  </div>
+  <div class="devices-area" id="devicesArea">
+    <div class="card" id="devicesPlaceholder" style="color:#475569; text-align:center; padding:40px;">
+      No sensors known yet — wait for an announce or click <em>Connect Sensors</em>.
+    </div>
+  </div>
+</div>
+
+<div class="main" id="liveMain">
+  <!-- Sensor charts (populated dynamically) -->
+  <div class="sensors-area" id="sensorsArea">
+    <div class="card" id="sensorPlaceholder" style="color:#475569; text-align:center; padding:60px;">
+      Waiting for sensors…
+    </div>
   </div>
 
-  <div class="row">
-    <div class="label">r2_version()</div>
-    <div class="value" id="versionOut">—</div>
+  <!-- Sidebar: controls -->
+  <div class="sidebar">
+    <div class="card">
+      <h2>Run Control</h2>
+      <div class="state-indicator state-idle" id="stateIndicator">IDLE</div>
+      <div class="btn-group">
+        <button class="btn btn-start" id="btnStart" onclick="sendCmd('start')">&#x25B6; Start</button>
+        <button class="btn btn-mark" id="btnMark" onclick="sendCmd('mark')" disabled>&#x2691; Mark</button>
+        <button class="btn btn-stop" id="btnStop" onclick="sendCmd('stop')" disabled>&#x25A0; Stop</button>
+      </div>
+      <div class="cal-status" id="calStatus">&mdash;</div>
+    </div>
+
+    <div class="card">
+      <h2>Connected Sensors</h2>
+      <div id="sensorList" style="font-family:'SF Mono',monospace; font-size:12px; color:#64748b;">
+        None
+      </div>
+    </div>
   </div>
+</div>
 
-  <div class="row">
-    <div class="label">fnv1a_32(b"r2.sensor.acceleration") — should match firmware's EVT_SENSOR_ACCELERATION</div>
-    <div class="value" id="fnvOut">—</div>
+<!-- Bootstrap log panel (between graphs and event log) -->
+<div class="bootstrap-panel" id="bootstrap-panel">
+  <div class="bootstrap-log-card">
+    <div class="bootstrap-log-header">
+      <h2>Bootstrap Log</h2>
+      <button class="bootstrap-close" onclick="closeBootstrapPanel()">&times;</button>
+    </div>
+    <div class="bootstrap-log-entries" id="bootstrap-log"></div>
   </div>
+</div>
 
-  <div class="row">
-    <div class="label">decode_compact_frame() of a synthetic announce frame</div>
-    <pre class="value" id="decodeOut">—</pre>
+<!-- Event log -->
+<div class="log-row">
+  <div class="card log-card">
+    <h2>Event Log</h2>
+    <div class="log-entries" id="logEntries"></div>
   </div>
+</div>
 
-  <div class="row">
-    <div class="label">generate_device_keypair() — used by browser enrolment in Phase 5d-enrol</div>
-    <pre class="value" id="keypairOut">—</pre>
-  </div>
+<script type="module">
+const MAX_POINTS = 200;
+const CALIBRATION_MIN = 10;
 
-  <script type="module">
-    import init, {
-      r2_version,
-      fnv1a_32,
-      decode_compact_frame,
-      encode_compact_frame,
-      generate_device_keypair,
-    } from './pkg/r2_wasm.js';
+// ── Global state ──
+let runState = 'idle';
+let totalEvents = 0;
 
-    function set(id, text, cls) {
-      const el = document.getElementById(id);
-      el.textContent = text;
-      if (cls) el.className = 'value ' + cls;
+// ── Per-sensor state ── keyed by source_addr (IP:port)
+const sensors = new Map();
+
+function getSensorKey(addr) {
+  return addr ? addr.split(':')[0] : addr;
+}
+
+function getOrCreateSensor(addr) {
+  const key = getSensorKey(addr);
+  if (sensors.has(key)) return sensors.get(key);
+
+  const area = document.getElementById('sensorsArea');
+  const placeholder = document.getElementById('sensorPlaceholder');
+  if (placeholder) placeholder.remove();
+
+  const safeKey = key.replace(/\./g, '-');
+  const card = document.createElement('div');
+  card.className = 'card sensor-card';
+  card.id = 'sensor-' + safeKey;
+
+  card.innerHTML = `
+    <div class="sensor-label" id="slabel-${safeKey}">${key}<span class="sensor-addr">${key}</span></div>
+    <div class="chart-container">
+      <canvas id="chart-${safeKey}"></canvas>
+    </div>
+    <div class="sensor-stats">
+      <span>x: <span class="vx" id="vx-${safeKey}">&mdash;</span></span>
+      <span>y: <span class="vy" id="vy-${safeKey}">&mdash;</span></span>
+      <span>z: <span class="vz" id="vz-${safeKey}">&mdash;</span></span>
+      <span>|A|: <span class="vmag" id="vmag-${safeKey}">&mdash;</span></span>
+      <span style="margin-left:auto; color:#475569;" id="rate-${safeKey}">&mdash; Hz</span>
+    </div>
+    <div class="sensor-event-log" id="slog-${safeKey}"></div>
+  `;
+  area.appendChild(card);
+  setTimeout(() => sensors.forEach(s => s.chart.resize()), 50);
+
+  const ctx = document.getElementById('chart-' + safeKey).getContext('2d');
+  const chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: [
+        { label: 'x (g)', data: [], borderColor: '#ff6384', borderWidth: 1.5, pointRadius: 0, tension: 0.2 },
+        { label: 'y (g)', data: [], borderColor: '#36a2eb', borderWidth: 1.5, pointRadius: 0, tension: 0.2 },
+        { label: 'z (g)', data: [], borderColor: '#4bc0c0', borderWidth: 1.5, pointRadius: 0, tension: 0.2 },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      scales: {
+        x: { display: true, grid: { color: '#1e293b' }, ticks: { color: '#475569', maxTicksLimit: 8 } },
+        y: { display: true, grid: { color: '#1e293b' }, ticks: { color: '#475569' }, title: { display: true, text: 'Acceleration (g)', color: '#64748b' }, suggestedMin: -2, suggestedMax: 2 },
+      },
+      plugins: { legend: { labels: { color: '#94a3b8', usePointStyle: true } } },
+    },
+  });
+
+  const sensor = {
+    key,
+    deviceName: null,
+    // Phase 8a (Devices view) state — populated by handlers in handleEvent.
+    fwVer: null,
+    devicePk: null,
+    bootTsMs: null,
+    battery: null,    // { voltage_mv, percent, charging, ts }
+    fsmState: null,   // populated once Phase 5L firmware emits status events
+    lastSeen: Date.now(),
+    online: true,
+    chart,
+    calibrationSamples: [],
+    calibrationOffset: { x: 0, y: 0, z: 0 },
+    sampleTimes: [],
+    logCount: 0,
+  };
+  sensors.set(key, sensor);
+  addSensorLog(sensor, 'connected');
+  updateSensorList();
+  return sensor;
+}
+
+function setDeviceName(sensor, name) {
+  if (!name) return;
+
+  // Deduplicate: if another sensor card already has this name (same physical device,
+  // different IP — e.g. after DHCP renewal or reconnect), destroy the stale card.
+  for (const [key, existing] of sensors) {
+    if (existing !== sensor && existing.deviceName === name) {
+      // Destroy the stale duplicate card
+      const staleKey = key.replace(/\./g, '-');
+      const staleCard = document.getElementById('sensor-' + staleKey);
+      if (staleCard) {
+        if (existing.chart) { existing.chart.destroy(); }
+        staleCard.remove();
+      }
+      sensors.delete(key);
+      break;
     }
+  }
 
-    function hex(arr) {
-      return Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('');
+  if (sensor.deviceName === name) return;
+  sensor.deviceName = name;
+  const sk = sensor.key.replace(/\./g, '-');
+  const labelEl = document.getElementById('slabel-' + sk);
+  if (labelEl) labelEl.innerHTML = name + '<span class="sensor-addr">' + sensor.key + '</span>';
+  updateSensorList();
+}
+
+function updateSensorList() {
+  const el = document.getElementById('sensorList');
+  document.getElementById('sensorCount').textContent = sensors.size;
+  if (sensors.size === 0) { el.textContent = 'None'; return; }
+  el.innerHTML = [...sensors.values()].map(s => {
+    const label = s.deviceName ? `${s.deviceName} <span style="color:#475569;">(${s.key})</span>` : s.key;
+    return `<div style="padding:4px 0; border-bottom:1px solid #1e293b; color:#94a3b8;">\u25CF ${label}</div>`;
+  }).join('');
+}
+
+function addSensorLog(sensor, text) {
+  const sk = sensor.key.replace(/\./g, '-');
+  const el = document.getElementById('slog-' + sk);
+  if (!el) return;
+  const now = new Date();
+  const ts = now.toLocaleTimeString('en-NZ', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const line = document.createElement('div');
+  line.className = 'sensor-event-line';
+  line.innerHTML = `<span class="sel-time">[${ts}]</span> <span class="sel-text">${text}</span>`;
+  el.appendChild(line);
+  sensor.logCount++;
+  while (sensor.logCount > 20) {
+    el.removeChild(el.firstChild);
+    sensor.logCount--;
+  }
+  el.scrollTop = el.scrollHeight;
+}
+
+// ── Bootstrap ──
+function startBootstrap() {
+  const btn = document.getElementById('btn-connect');
+  btn.disabled = true;
+  btn.textContent = 'Scanning...';
+
+  const panel = document.getElementById('bootstrap-panel');
+  panel.classList.add('visible');
+  document.getElementById('bootstrap-log').innerHTML = '';
+
+  fetch('/api/bootstrap', { method: 'POST' })
+    .then(r => {
+      if (r.status === 409) {
+        addBootstrapLine('Bootstrap already in progress', 'amber');
+        btn.disabled = false;
+        btn.textContent = '\uD83D\uDD0D Connect Sensors';
+      } else if (!r.ok) {
+        r.text().then(t => addBootstrapLine('Error: ' + t, 'red'));
+        btn.disabled = false;
+        btn.textContent = '\uD83D\uDD0D Connect Sensors';
+      }
+    })
+    .catch(e => {
+      addBootstrapLine('Fetch error: ' + e.message, 'red');
+      btn.disabled = false;
+      btn.textContent = '\uD83D\uDD0D Connect Sensors';
+    });
+}
+
+function closeBootstrapPanel() {
+  document.getElementById('bootstrap-panel').classList.remove('visible');
+}
+
+function handleBootstrapEvent(msg) {
+  const evt = msg.event;
+  if (!evt) return;
+
+  // Reset event clears the log panel and all sensor cards for a fresh bootstrap run
+  if (evt === null || 'Reset' in msg.event) {
+    document.getElementById('bootstrap-log').innerHTML = '';
+    document.getElementById('bootstrap-panel').classList.add('visible');
+    addBootstrapLine('↺ Restarting bootstrap…', 'amber');
+    // Destroy all sensor cards and chart instances
+    sensors.forEach(s => { try { s.chart.destroy(); } catch(e) {} });
+    sensors.clear();
+    const area = document.getElementById('sensorsArea');
+    area.innerHTML = '<div id="sensorPlaceholder" style="color:#475569; text-align:center; padding:40px;">Waiting for sensors…</div>';
+    document.getElementById('sensorCount').textContent = '0';
+    document.getElementById('sensorList').textContent = 'None';
+    return;
+  }
+
+  switch (evt.kind) {
+    case 'Log':
+      addBootstrapLine(evt.data, '');
+      break;
+    case 'SensorFound':
+      addBootstrapLine('Found sensor: ' + evt.data.addr, 'amber');
+      break;
+    case 'SensorConnected':
+      addBootstrapLine('\u2713 ' + evt.data.name + ' connected (' + evt.data.ip + ')', 'green');
+      break;
+    case 'Done': {
+      addBootstrapLine('Bootstrap complete \u2014 ' + evt.data.count + ' sensor(s) connected', 'green');
+      const btn = document.getElementById('btn-connect');
+      btn.disabled = false;
+      btn.textContent = '\uD83D\uDD0D Connect Sensors';
+      break;
     }
+    case 'Error':
+      addBootstrapLine('ERROR: ' + evt.data, 'red');
+      const btn2 = document.getElementById('btn-connect');
+      btn2.disabled = false;
+      btn2.textContent = '\uD83D\uDD0D Connect Sensors';
+      break;
+  }
+}
 
-    try {
-      await init();
-      set('loadStatus', '✓ WASM bundle loaded and initialised', 'ok');
+function addBootstrapLine(text, cls) {
+  const el = document.getElementById('bootstrap-log');
+  const line = document.createElement('div');
+  line.className = 'bs-line' + (cls ? ' ' + cls : '');
+  line.textContent = text;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
 
-      // 1. Version string
-      set('versionOut', r2_version());
+// ── WASM hive bootstrap + WebSocket /ws/raw ────────────────────────────────
+//
+// This viewer is the browser-side R2 hive. It receives raw R2-WIRE frames
+// (with src_addr envelope) over WSS, decodes them in WebAssembly via the
+// vendored r2-wasm bundle, and drives the existing Live + Devices UI by
+// synthesising the same {event, source_addr, payload, ...} message shape
+// the legacy JSON-pushing dashboard used. Existing handlers below stay
+// unchanged.
+import init, {
+  fnv1a_32 as wasmFnv1a32,
+  decode_compact_frame as wasmDecodeFrame,
+  r2_version as wasmVersion,
+} from './pkg/r2_wasm.js';
 
-      // 2. FNV-1a — must match the firmware's EVT_SENSOR_ACCELERATION constant
-      const accelHash = fnv1a_32(new TextEncoder().encode('r2.sensor.acceleration'));
-      set('fnvOut', '0x' + accelHash.toString(16).padStart(8, '0').toUpperCase());
+let ws;
+let HASH_TO_NAME = new Map();           // u32 event_hash → friendly name
+const LSB_PER_G_AT_2G = 256000;         // ADXL355 scale at ±2 g
+const TEXT_DECODER = new TextDecoder('utf-8');
 
-      // 3. Round-trip: encode a synthetic frame, decode it back, verify event_hash.
-      // R2-WIRE compact: msg_type=0 (Event), ttl=5, k=3, msg_id=0x1234,
-      // event_hash=fnv1a("r2.sensor.acceleration"), target=0 (broadcast),
-      // payload empty.
-      const synthFrame = encode_compact_frame(
-        0, 5, 3, 0x1234, accelHash >>> 0, 0, new Uint8Array([])
-      );
-      const decoded = decode_compact_frame(synthFrame);
-      set('decodeOut',
-        'frame bytes: ' + hex(synthFrame) + '\n\n' +
-        'decoded:     ' + JSON.stringify(decoded, null, 2));
+const KNOWN_EVENT_NAMES = [
+  'r2.sensor.announce',
+  'r2.sensor.acceleration',
+  'r2.sensor.acceleration.batch',
+  'r2.sensor.battery',
+  'r2.sensor.status',
+  'r2.sensor.event.log',
+  'r2.sensor.cal.sample.resp',
+  'r2.sensor.sync_pong',
+  // Legacy M10 names retained for mixed-deployment compat.
+  'acceleration',
+  'battery_status',
+  'run_state',
+];
 
-      // 4. Generate a fresh device keypair (this is what the browser does on
-      // first-run during Phase 5d-enrol, before submitting its public key
-      // to the onsite KeyHolder along with the QR/link join token).
-      const kp = generate_device_keypair();
-      set('keypairOut',
-        'public_key  (32 B): ' + hex(kp.public_key) + '\n' +
-        'secret_key  (32 B): ' + hex(kp.secret_key).slice(0, 32) + '… (truncated)');
+async function bootstrapHive() {
+  await init();
+  console.log('[hive] r2-wasm loaded:', wasmVersion());
+  for (const name of KNOWN_EVENT_NAMES) {
+    const hash = wasmFnv1a32(new TextEncoder().encode(name)) >>> 0;
+    HASH_TO_NAME.set(hash, name);
+  }
+  connectRaw();
+}
 
-    } catch (e) {
-      set('loadStatus', '✗ ' + (e?.message || e), 'fail');
-      console.error(e);
+function connectRaw() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws/raw`);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => {
+    document.getElementById('wsDot').className = 'status-dot connected';
+    document.getElementById('wsStatus').textContent = 'Connected';
+  };
+  ws.onclose = () => {
+    document.getElementById('wsDot').className = 'status-dot';
+    document.getElementById('wsStatus').textContent = 'Disconnected';
+    setTimeout(connectRaw, 2000);
+  };
+  ws.onerror = (e) => console.warn('[hive] ws error', e);
+  ws.onmessage = (e) => {
+    if (typeof e.data === 'string') return; // shouldn't happen on /ws/raw
+    onRawFrame(new Uint8Array(e.data));
+  };
+}
+
+// Envelope from dashboard's /ws/raw (Phase 5d step 3):
+//   [u16 BE: src_addr_len][src_addr utf-8]
+//   [u32 BE: ts_ms_low32]
+//   [u16 BE: frame_len][frame bytes]
+function onRawFrame(buf) {
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  let off = 0;
+  const srcLen = dv.getUint16(off); off += 2;
+  const src = TEXT_DECODER.decode(buf.subarray(off, off + srcLen));
+  off += srcLen;
+  const tsMs = dv.getUint32(off); off += 4;
+  const frameLen = dv.getUint16(off); off += 2;
+  const frame = buf.subarray(off, off + frameLen);
+
+  let decoded;
+  try {
+    decoded = wasmDecodeFrame(frame);
+  } catch (err) {
+    console.warn('[hive] decode_compact_frame failed:', err);
+    return;
+  }
+
+  const eventHash = decoded.event_hash >>> 0;
+  const eventName = HASH_TO_NAME.get(eventHash) || 'unknown';
+  const payload = decoded.payload && decoded.payload.length
+    ? remapPayload(eventName, decodeCbor(decoded.payload))
+    : null;
+
+  const msg = {
+    event: eventName,
+    hash: '0x' + eventHash.toString(16).padStart(8, '0').toUpperCase(),
+    source_addr: src,
+    timestamp_ms: tsMs,
+    payload,
+    device_name: payload && payload.hostname,
+  };
+  handleEvent(msg);
+}
+
+// Minimal CBOR decoder — covers exactly the major types our SPEC uses.
+// uint, negint, bytes, text, array, map, bool, null. RFC 8949 §3.
+function decodeCbor(bytes) {
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let pos = 0;
+  function readHead() {
+    const ib = dv.getUint8(pos++);
+    const major = ib >> 5;
+    const ai = ib & 0x1f;
+    let len;
+    if (ai < 24) len = ai;
+    else if (ai === 24) { len = dv.getUint8(pos); pos += 1; }
+    else if (ai === 25) { len = dv.getUint16(pos); pos += 2; }
+    else if (ai === 26) { len = dv.getUint32(pos); pos += 4; }
+    else if (ai === 27) {
+      const hi = dv.getUint32(pos); const lo = dv.getUint32(pos + 4);
+      pos += 8;
+      len = hi * 0x100000000 + lo;
+    } else throw new Error('cbor head ai=' + ai + ' unsupported');
+    return { major, len };
+  }
+  function readValue() {
+    const { major, len } = readHead();
+    switch (major) {
+      case 0: return len;
+      case 1: return -1 - len;
+      case 2: { const b = bytes.subarray(pos, pos + len); pos += len; return b; }
+      case 3: { const s = TEXT_DECODER.decode(bytes.subarray(pos, pos + len)); pos += len; return s; }
+      case 4: { const arr = []; for (let i = 0; i < len; i++) arr.push(readValue()); return arr; }
+      case 5: { const obj = {}; for (let i = 0; i < len; i++) { const k = readValue(); const v = readValue(); obj[String(k)] = v; } return obj; }
+      case 7:
+        if (len === 20) return false;
+        if (len === 21) return true;
+        if (len === 22) return null;
+        throw new Error('cbor simple ' + len + ' unsupported');
+      default:
+        throw new Error('cbor major=' + major + ' unsupported');
     }
-  </script>
+  }
+  return readValue();
+}
+
+// Port of the dashboard's server-side remap_payload — turns int-keyed CBOR
+// maps into named-key JS objects, and scales raw ADXL355 LSB to g for
+// acceleration. Browser-side equivalent of dashboard/src/main.rs.
+function remapPayload(eventName, raw) {
+  if (!raw || typeof raw !== 'object') return raw;
+  function bytesToHex(v) {
+    if (v instanceof Uint8Array) {
+      return Array.from(v).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+    return v;
+  }
+  if (eventName === 'r2.sensor.acceleration') {
+    return {
+      seq:   raw['0'],
+      ts_ms: raw['1'],
+      x: typeof raw['2'] === 'number' ? raw['2'] / LSB_PER_G_AT_2G : null,
+      y: typeof raw['3'] === 'number' ? raw['3'] / LSB_PER_G_AT_2G : null,
+      z: typeof raw['4'] === 'number' ? raw['4'] / LSB_PER_G_AT_2G : null,
+      range: raw['10'],
+    };
+  }
+  const SCHEMA = {
+    'r2.sensor.battery':     [['0','voltage_mv'],['1','percent'],['2','charging'],['3','ts_ms'],['10','temp_c']],
+    'r2.sensor.announce':    [['0','device_pk'],['1','hostname'],['2','fw_ver'],['3','last_seq'],['4','boot_ts_ms'],['5','nonce'],['6','sig'],['10','mounting_role']],
+    'r2.sensor.status':      [['0','state'],['1','uptime_ms'],['2','samples_total'],['3','samples_acked'],['4','sd_pct_used'],['5','rate_hz_active'],['6','range_active'],['10','error_code']],
+  };
+  const map = SCHEMA[eventName];
+  if (!map) return raw;
+  const out = {};
+  for (const [intKey, name] of map) {
+    if (intKey in raw) out[name] = raw[intKey];
+  }
+  // bytes fields → hex (matches what the legacy server-side remap produced)
+  for (const k of ['device_pk','nonce','sig']) {
+    if (out[k] instanceof Uint8Array) out[k] = bytesToHex(out[k]);
+  }
+  return out;
+}
+
+bootstrapHive();
+
+function handleEvent(msg) {
+  totalEvents++;
+  const sensor = msg.source_addr ? getOrCreateSensor(msg.source_addr) : null;
+
+  switch (msg.event) {
+    case 'r2.sensor.acceleration':
+    case 'acceleration': // legacy M10 schema
+      if (sensor) {
+        if (msg.device_name) setDeviceName(sensor, msg.device_name);
+        handleAcceleration(msg, sensor);
+      }
+      return;  // don't log raw acceleration frames — too noisy at 10Hz
+    case 'run_state':
+      if (sensor) {
+        handleRunState(msg);
+        // Log the state name (payload.state is a number from the sensor)
+        if (msg.payload && msg.payload.state != null) {
+          const stateLabel = decodeStateNum(msg.payload.state);
+          addSensorLog(sensor, 'state → ' + stateLabel);
+        }
+      }
+      break;
+    case 'r2.sensor.announce':
+      if (sensor && msg.payload && msg.payload.name) {
+        setDeviceName(sensor, msg.payload.name);
+        addSensorLog(sensor, 'announced: ' + msg.payload.name);
+      }
+      return;
+    case 'sensor.connected':
+      if (sensor) {
+        if (msg.device_name) setDeviceName(sensor, msg.device_name);
+        addSensorLog(sensor, 'connected');
+        // Capture announce metadata for the Devices view (Phase 8a).
+        if (msg.payload) {
+          if (msg.payload.fw_ver)    sensor.fwVer    = msg.payload.fw_ver;
+          if (msg.payload.device_pk) sensor.devicePk = msg.payload.device_pk;
+          if (msg.payload.boot_ts_ms != null) sensor.bootTsMs = msg.payload.boot_ts_ms;
+        }
+        sensor.online = true;
+        sensor.lastSeen = Date.now();
+        renderDevicesIfVisible();
+        // Do NOT call applyState here. The sensor.connected event fires for
+        // three different cases that need different treatment:
+        //   1. First connect: sensor is idle → handled by run_state broadcast
+        //   2. Reconnect: sensor reset to idle → handled by run_state broadcast
+        //   3. New browser joining existing session: WS replay — must NOT reset
+        //      a live session already in rocking state for an existing browser.
+        //
+        // State sync is driven by the sensor's run_state broadcast (sent by
+        // the sensor immediately after connect). This decouples the TCP
+        // event (which fires for all three cases) from FSM transitions.
+      }
+      addLog(msg);
+      return;
+    case 'r2.sensor.battery':
+    case 'battery_status':
+      if (sensor && msg.payload) {
+        sensor.battery = {
+          voltage_mv: msg.payload.voltage_mv ?? null,
+          percent:    msg.payload.percent    ?? null,
+          charging:   msg.payload.charging   ?? false,
+          ts:         Date.now(),
+        };
+        sensor.lastSeen = Date.now();
+        sensor.online = true;
+        renderDevicesIfVisible();
+      }
+      addLog(msg);
+      return;
+    case 'r2.sensor.status':
+      if (sensor && msg.payload) {
+        // Capture FSM state for the virtual LED (lights up once Phase 5L
+        // sends real state values).
+        if (msg.payload.state != null) sensor.fsmState = msg.payload.state;
+        sensor.lastSeen = Date.now();
+        sensor.online = true;
+        renderDevicesIfVisible();
+      }
+      addLog(msg);
+      return;
+  }
+  // Any event we didn't return early from updates lastSeen too — useful
+  // for the Devices view's online/stale/offline classification.
+  if (sensor) {
+    sensor.lastSeen = Date.now();
+    sensor.online = true;
+  }
+  addLog(msg);
+}
+
+function handleAcceleration(msg, sensor) {
+  if (!msg.payload) return;
+  const rawX = msg.payload.x ?? 0;
+  const rawY = msg.payload.y ?? 0;
+  const rawZ = msg.payload.z ?? 0;
+
+  if (runState === 'calibrating') {
+    sensor.calibrationSamples.push({ x: rawX, y: rawY, z: rawZ });
+    const n = sensors.size > 0
+      ? Math.min(...[...sensors.values()].map(s => s.calibrationSamples.length))
+      : 0;
+    document.getElementById('calStatus').textContent =
+      `Calibrating\u2026 ${n} sample${n !== 1 ? 's' : ''}`;
+    document.getElementById('btnMark').disabled = (n < CALIBRATION_MIN);
+  }
+
+  const x = rawX - sensor.calibrationOffset.x;
+  const y = rawY - sensor.calibrationOffset.y;
+  const z = rawZ - sensor.calibrationOffset.z;
+  const mag = Math.sqrt(x*x + y*y + z*z);
+
+  const unit = runState === 'rocking' ? ' \u0394g' : ' g';
+  const sk = sensor.key.replace(/\./g, '-');
+  const setText = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  setText('vx-' + sk, x.toFixed(3) + unit);
+  setText('vy-' + sk, y.toFixed(3) + unit);
+  setText('vz-' + sk, z.toFixed(3) + unit);
+  setText('vmag-' + sk, mag.toFixed(3));
+
+  const now = Date.now();
+  sensor.sampleTimes.push(now);
+  if (sensor.sampleTimes.length > 50) sensor.sampleTimes.shift();
+  if (sensor.sampleTimes.length > 1) {
+    const dt = (sensor.sampleTimes[sensor.sampleTimes.length-1] - sensor.sampleTimes[0])
+               / (sensor.sampleTimes.length - 1);
+    setText('rate-' + sk, (1000/dt).toFixed(1) + ' Hz');
+  }
+
+  if (runState !== 'rocking') return;
+
+  const label = new Date(msg.timestamp_ms).toLocaleTimeString('en-NZ', {
+    hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit'
+  });
+  sensor.chart.data.labels.push(label);
+  sensor.chart.data.datasets[0].data.push(x);
+  sensor.chart.data.datasets[1].data.push(y);
+  sensor.chart.data.datasets[2].data.push(z);
+  if (sensor.chart.data.labels.length > MAX_POINTS) {
+    sensor.chart.data.labels.shift();
+    sensor.chart.data.datasets[0].data.shift();
+    sensor.chart.data.datasets[1].data.shift();
+    sensor.chart.data.datasets[2].data.shift();
+  }
+  sensor.chart.update('none'); // skip animation on streaming updates — 10Hz * 2 sensors = too slow otherwise
+}
+
+const ORDER = { idle: 0, calibrating: 1, rocking: 2 };
+const STATE_NAMES = ['idle', 'calibrating', 'rocking'];
+
+// Sensor sends state as a float (0.0=idle, 1.0=calibrating, 2.0=rocking).
+// Map it back to a string name; fall back to 'idle' for unknown values.
+function decodeStateNum(raw) {
+  if (typeof raw === 'string' && ORDER[raw] !== undefined) return raw;
+  const idx = typeof raw === 'number' ? Math.round(raw) : -1;
+  return STATE_NAMES[idx] ?? 'idle';
+}
+
+function handleRunState(msg) {
+  if (!msg.payload) return;
+  // Decode numeric state (0/1/2) OR accept string if somehow already decoded
+  const s = decodeStateNum(msg.payload.state ?? 0);
+  // Rule: idle always resets; any other state only applies if it advances the FSM.
+  if (s !== 'idle' && ORDER[s] <= ORDER[runState]) return;
+  applyState(s);
+}
+
+function applyState(s) {
+  runState = s;
+  const el = document.getElementById('stateIndicator');
+  el.textContent = s.toUpperCase();
+  el.className = 'state-indicator state-' + s;
+  document.getElementById('btnStart').disabled = (s !== 'idle');
+  document.getElementById('btnStop').disabled = (s === 'idle');
+  if (s !== 'calibrating') document.getElementById('btnMark').disabled = true;
+}
+
+function sendCmd(cmd) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ command: cmd }));
+
+  switch (cmd) {
+    case 'start':
+      sensors.forEach(s => {
+        s.calibrationSamples = [];
+        s.calibrationOffset = { x: 0, y: 0, z: 0 };
+        s.chart.data.labels.length = 0;
+        s.chart.data.datasets.forEach(ds => { ds.data.length = 0; });
+        s.chart.update();
+      });
+      document.getElementById('calStatus').textContent = 'Calibrating\u2026';
+      applyState('calibrating');
+      break;
+
+    case 'mark':
+      let calSummary = [];
+      sensors.forEach(s => {
+        const samps = s.calibrationSamples;
+        if (samps.length >= CALIBRATION_MIN) {
+          const n = samps.length;
+          s.calibrationOffset.x = samps.reduce((a, v) => a + v.x, 0) / n;
+          s.calibrationOffset.y = samps.reduce((a, v) => a + v.y, 0) / n;
+          s.calibrationOffset.z = samps.reduce((a, v) => a + v.z, 0) / n;
+          calSummary.push(`${s.key}: z=${s.calibrationOffset.z.toFixed(3)}`);
+        }
+        s.calibrationSamples = [];
+      });
+      document.getElementById('calStatus').textContent =
+        calSummary.length ? 'Cal: ' + calSummary.join(' | ') : '\u2014';
+      applyState('rocking');
+      break;
+
+    case 'stop':
+      applyState('idle');
+      break;
+  }
+}
+
+function addLog(msg) {
+  const el = document.getElementById('logEntries');
+  const time = new Date(msg.timestamp_ms).toLocaleTimeString('en-NZ', {
+    hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit',
+    fractionalSecondDigits: 1
+  });
+  const src = msg.source_addr ? getSensorKey(msg.source_addr) : '?';
+  let valueStr = '';
+  if (msg.event === 'sensor.connected' && msg.device_name) {
+    valueStr = msg.device_name;
+  } else if (msg.payload && (msg.event === 'r2.sensor.acceleration' || msg.event === 'acceleration')) {
+    const x = msg.payload.x ?? 0, y = msg.payload.y ?? 0, z = msg.payload.z ?? 0;
+    valueStr = `x=${x.toFixed(3)} y=${y.toFixed(3)} z=${z.toFixed(3)}`;
+  } else if (msg.payload) {
+    valueStr = JSON.stringify(msg.payload);
+  }
+  const entry = document.createElement('div');
+  entry.className = 'log-entry';
+  entry.innerHTML = `<span class="time">${time}</span> <span class="src">[${src}]</span> <span class="event">${msg.event}</span> <span class="value">${valueStr}</span>`;
+  el.insertBefore(entry, el.firstChild);
+  while (el.children.length > 100) el.removeChild(el.lastChild);
+}
+
+// ── Phase 8a — Devices view ────────────────────────────────────────────
+//
+// "Live" shows charts; "Devices" shows fleet status (one card per peer
+// with battery / fw_ver / last-seen / virtual LED / Update-Firmware
+// stub). Both views consume the same `sensors` Map; the per-event
+// handlers above update battery / fwVer / lastSeen on each sensor
+// object and call renderDevicesIfVisible().
+
+let currentView = 'live';
+const STALE_MS    = 10_000;   // last_seen older than 10 s = stale
+const OFFLINE_MS  = 30_000;   // last_seen older than 30 s = offline
+
+function setView(name) {
+  currentView = name;
+  document.getElementById('liveMain').hidden    = (name !== 'live');
+  document.getElementById('devicesMain').hidden = (name !== 'devices');
+  document.getElementById('viewLive').classList.toggle('active',    name === 'live');
+  document.getElementById('viewDevices').classList.toggle('active', name === 'devices');
+  if (name === 'devices') renderDevices();
+}
+
+function renderDevicesIfVisible() {
+  if (currentView === 'devices') renderDevices();
+}
+
+function fmtAge(ms) {
+  if (ms < 1500)   return 'just now';
+  if (ms < 60_000) return `${Math.round(ms/1000)} s ago`;
+  if (ms < 3600_000) return `${Math.round(ms/60_000)} min ago`;
+  return `${Math.round(ms/3600_000)} h ago`;
+}
+
+function classifyOnline(s) {
+  const age = Date.now() - (s.lastSeen ?? 0);
+  if (!s.online || age > OFFLINE_MS) return 'offline';
+  if (age > STALE_MS) return 'stale';
+  return 'online';
+}
+
+// Map firmware FSM-state numbers (Phase 5L will define these) to the
+// CSS class that drives the virtual-LED colour + animation. Until
+// firmware sends real state values, fsmState is null and the LED
+// stays the inert grey placeholder.
+function ledClassFor(s) {
+  if (s.fsmState == null) return '';
+  switch (s.fsmState) {
+    case 0:  return 'tg-boot';         // BOOT
+    case 1:  return 'tg-advertising';  // ADVERTISING
+    case 2:  return 'tg-ble';          // BLE_CONNECTED
+    case 3:  return 'tg-ble';          // WIFI_CONNECTING
+    case 4:  return 'tg-streaming';    // STREAMING
+    case 5:  return 'tg-catchup';      // STREAMING_CATCHUP
+    case 6:  return 'tg-cal';          // CALIBRATING
+    case 7:  return 'tg-low';          // LOW_BATTERY
+    case 8:  return 'tg-ota';          // OTA
+    case 9:  return 'tg-error';        // ERROR
+    default: return '';
+  }
+}
+
+function renderDevices() {
+  const area = document.getElementById('devicesArea');
+  const peers = [...sensors.values()];
+  if (peers.length === 0) {
+    area.innerHTML = '<div class="card" id="devicesPlaceholder" style="color:#475569;text-align:center;padding:40px;">No sensors known yet — wait for an announce or click <em>Connect Sensors</em>.</div>';
+    updateDevicesSummary(peers);
+    return;
+  }
+
+  // Stable sort by hostname/key so cards don't jump around.
+  peers.sort((a, b) => (a.deviceName ?? a.key).localeCompare(b.deviceName ?? b.key));
+
+  area.innerHTML = peers.map(s => {
+    const status   = classifyOnline(s);
+    const name     = s.deviceName ?? s.key;
+    const ip       = s.key;
+    const fwShort  = s.fwVer ? s.fwVer.replace(/\s+sim$/, '') : '—';
+    const battMv   = s.battery?.voltage_mv ?? null;
+    const battPct  = s.battery?.percent ?? null;
+    const battCharging = s.battery?.charging ?? false;
+    const battClass = battPct == null ? ''
+                     : battPct < 10 ? 'crit'
+                     : battPct < 25 ? 'low' : '';
+    const lastSeen = s.lastSeen ? fmtAge(Date.now() - s.lastSeen) : '—';
+    const led      = ledClassFor(s);
+
+    return `
+      <div class="device-card ${status}" data-key="${escapeAttr(s.key)}">
+        <div class="device-header">
+          <div class="online-dot"></div>
+          <div class="virt-led ${led}" title="virtual LED${s.fsmState == null ? ' — awaiting Phase 5L FSM state' : ''}"></div>
+          <div style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeText(name)}</div>
+        </div>
+        <div class="device-row"><span class="label">addr</span><span class="value">${escapeText(ip)}</span></div>
+        <div class="device-row"><span class="label">firmware</span><span class="value" title="${escapeAttr(s.fwVer ?? '—')}">${escapeText(fwShort)}</span></div>
+        <div class="device-row"><span class="label">last seen</span><span class="value">${lastSeen}</span></div>
+        <div class="device-row">
+          <span class="label">battery</span>
+          <span class="value">${battMv != null ? (battMv + ' mV') : '—'}${battPct != null ? ` (${battPct}%)` : ''}${battCharging ? ' ⚡' : ''}</span>
+        </div>
+        ${battPct != null ? `<div class="battery-bar"><div class="${battClass}" style="width:${Math.max(2, Math.min(100, battPct))}%;"></div></div>` : ''}
+        <div class="device-actions">
+          <button class="btn-update" onclick="requestFirmwareUpdate('${escapeAttr(s.key)}')">⬆ Update Firmware</button>
+        </div>
+      </div>`;
+  }).join('');
+
+  updateDevicesSummary(peers);
+}
+
+function updateDevicesSummary(peers) {
+  const counts = { online: 0, stale: 0, offline: 0, needsUpdate: 0 };
+  for (const s of peers) {
+    counts[classifyOnline(s)]++;
+    // Update flagging is a stub until Phase 9 ships a real "current
+    // version" for the dashboard to compare against.
+    if (s._needsUpdate) counts.needsUpdate++;
+  }
+  document.getElementById('dsTotal').textContent       = peers.length;
+  document.getElementById('dsOnline').textContent      = counts.online;
+  document.getElementById('dsStale').textContent       = counts.stale;
+  document.getElementById('dsOffline').textContent     = counts.offline;
+  document.getElementById('dsNeedsUpdate').textContent = counts.needsUpdate;
+}
+
+function requestFirmwareUpdate(addr) {
+  // Phase 9 will turn this into a real `r2.dash.fw.update` push (server
+  // pushes binary URL + sha256 + tg_sig, sensor fetches + verifies +
+  // swaps partition). For now: visual feedback only.
+  console.log('[stub] firmware update requested for', addr);
+  const btn = document.querySelector(`.device-card[data-key="${addr}"] .btn-update`);
+  if (btn) {
+    btn.textContent = '✓ queued (stub)';
+    btn.disabled = true;
+    setTimeout(() => {
+      btn.textContent = '⬆ Update Firmware';
+      btn.disabled = false;
+    }, 2500);
+  }
+}
+
+function escapeText(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function escapeAttr(s) { return escapeText(s).replace(/"/g, '&quot;'); }
+
+// Keep online/stale/offline classification fresh even when no events
+// arrive for a while — re-render once a second when Devices is visible.
+setInterval(() => {
+  if (currentView === 'devices') renderDevices();
+}, 1000);
+
+// Module scripts isolate names; expose the inline-onclick handlers on
+// `window` so the existing onclick="..." attributes in the HTML still
+// resolve. (Cleaner long-term: addEventListener bindings, but this
+// keeps the diff vs the legacy dashboard minimal.)
+Object.assign(window, {
+  setView,
+  startBootstrap,
+  sendCmd,
+  closeBootstrapPanel,
+  requestFirmwareUpdate,
+});
+</script>
 </body>
 </html>
