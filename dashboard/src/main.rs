@@ -610,6 +610,16 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
     let read_handle = tokio::spawn(async move {
         let mut buf = vec![0u8; 4096];
         let mut frame_buf = Vec::new();
+        // Decimate live acceleration to ~10 Hz for the browser per
+        // SPEC-R2-ROCKER-DASHBOARD §5.2 ("at most 10 samples/sec per
+        // peer per browser tab on the live wire, with the rest
+        // decimated"). Source rate is 100 Hz from the firmware, so
+        // we push every 10th. The full stream lands in the SD ring
+        // when Phase 3 is implemented; until then dropped samples
+        // are simply not displayed (gaps are harmless for a sine
+        // wave demo).
+        const ACCEL_DECIMATION: u32 = 10;
+        let mut accel_n: u32 = 0;
 
         loop {
             match reader.read(&mut buf).await {
@@ -690,11 +700,26 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
                                     event.device_name = peer.name.clone();
                                 }
                             }
-                            eprintln!(
-                                "[events] {} from {}: {:?}",
-                                event.event, addr, event.payload
-                            );
-                            let _ = read_state.event_tx.send(event);
+
+                            // Decimate live acceleration before broadcasting
+                            // and before logging — high-rate events (100 Hz)
+                            // would otherwise overrun the browser's render
+                            // budget AND spam the console.
+                            let is_accel = event.event == "r2.sensor.acceleration";
+                            let emit_live = if is_accel {
+                                let due = accel_n == 0;
+                                accel_n = (accel_n + 1) % ACCEL_DECIMATION;
+                                due
+                            } else {
+                                true
+                            };
+                            if emit_live {
+                                eprintln!(
+                                    "[events] {} from {}: {:?}",
+                                    event.event, addr, event.payload
+                                );
+                                let _ = read_state.event_tx.send(event);
+                            }
                         }
                     }
                 }
