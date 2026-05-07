@@ -1,0 +1,797 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>R2 Rocker Rig — Live Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #0a0e17;
+    color: #e0e0e0;
+    min-height: 100vh;
+  }
+  .header {
+    background: linear-gradient(135deg, #1a1f35 0%, #0d1220 100%);
+    border-bottom: 1px solid #2a3050;
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .header h1 { font-size: 20px; font-weight: 600; color: #fff; }
+  .header h1 span { color: #4a9eff; }
+  .header-controls {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .connection-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+  }
+  .status-dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: #ff4444;
+    transition: background 0.3s;
+  }
+  .status-dot.connected { background: #44ff88; }
+
+  .btn-connect {
+    padding: 8px 16px;
+    border: 1px solid #3b82f6;
+    border-radius: 8px;
+    background: #1e3a5f;
+    color: #93c5fd;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .btn-connect:hover:not(:disabled) { background: #2563eb; color: white; }
+  .btn-connect:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  /* ── Bootstrap log panel ── */
+  .bootstrap-panel {
+    display: none;
+    max-width: 1600px;
+    margin: 0 auto;
+    padding: 0 16px;
+  }
+  .bootstrap-panel.visible { display: block; }
+  .bootstrap-log-card {
+    background: #0c1017;
+    border: 1px solid #1e293b;
+    border-radius: 12px;
+    padding: 16px 20px;
+    position: relative;
+    margin-top: 12px;
+  }
+  .bootstrap-log-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+  }
+  .bootstrap-log-header h2 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #64748b;
+    margin: 0;
+  }
+  .bootstrap-close {
+    background: none;
+    border: none;
+    color: #64748b;
+    font-size: 18px;
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+  .bootstrap-close:hover { color: #e0e0e0; background: #1e293b; }
+  .bootstrap-log-entries {
+    max-height: 200px;
+    overflow-y: auto;
+    font-family: 'SF Mono', Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.7;
+    background: #080b10;
+    border-radius: 6px;
+    padding: 10px 14px;
+  }
+  .bootstrap-log-entries::-webkit-scrollbar { width: 6px; }
+  .bootstrap-log-entries::-webkit-scrollbar-track { background: transparent; }
+  .bootstrap-log-entries::-webkit-scrollbar-thumb { background: #2a3050; border-radius: 3px; }
+  .bs-line { color: #94a3b8; }
+  .bs-line.amber { color: #fbbf24; }
+  .bs-line.green { color: #34d399; }
+  .bs-line.red { color: #f87171; }
+
+  /* ── Main layout ── */
+  .main {
+    display: grid;
+    grid-template-columns: 1fr 280px;
+    gap: 16px;
+    padding: 16px;
+    max-width: 1600px;
+    margin: 0 auto;
+  }
+
+  /* Sensor charts area — always 2-col; lone sensor spans both */
+  .sensors-area {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  .sensor-card:only-child {
+    grid-column: 1 / -1;
+  }
+
+  /* Right sidebar */
+  .sidebar {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .card {
+    background: #111827;
+    border: 1px solid #1e293b;
+    border-radius: 12px;
+    padding: 20px;
+  }
+  .card h2 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #64748b;
+    margin-bottom: 14px;
+  }
+
+  /* Sensor chart card */
+  .sensor-card { position: relative; min-width: 0; }
+  .sensor-label {
+    font-size: 16px;
+    font-weight: 700;
+    color: #fff;
+    margin-bottom: 4px;
+  }
+  .sensor-label .sensor-addr {
+    font-size: 11px;
+    font-weight: 400;
+    color: #4a9eff;
+    font-family: 'SF Mono', monospace;
+    margin-left: 8px;
+  }
+  .sensor-stats {
+    display: flex;
+    gap: 16px;
+    margin-top: 8px;
+    font-family: 'SF Mono', monospace;
+    font-size: 12px;
+  }
+  .sensor-stats span { opacity: 0.7; }
+  .sensor-stats .vx { color: #ff6384; }
+  .sensor-stats .vy { color: #36a2eb; }
+  .sensor-stats .vz { color: #4bc0c0; }
+  .sensor-stats .vmag { color: #f59e0b; }
+  .chart-container { position: relative; height: 260px; }
+
+  /* Per-sensor event log */
+  .sensor-event-log {
+    max-height: 80px;
+    overflow-y: auto;
+    font-family: 'SF Mono', Consolas, monospace;
+    font-size: 0.75rem;
+    line-height: 1.5;
+    background: #111827;
+    border-radius: 6px;
+    padding: 6px 10px;
+    margin-top: 8px;
+  }
+  .sensor-event-log::-webkit-scrollbar { width: 5px; }
+  .sensor-event-log::-webkit-scrollbar-track { background: transparent; }
+  .sensor-event-log::-webkit-scrollbar-thumb { background: #2a3050; border-radius: 3px; }
+  .sensor-event-line { color: #64748b; }
+  .sensor-event-line .sel-time { color: #4a9eff; }
+  .sensor-event-line .sel-text { color: #94a3b8; }
+  .sensors-area.dual .chart-container { height: 260px; }
+
+  /* Controls */
+  .state-indicator {
+    text-align: center;
+    padding: 14px;
+    border-radius: 8px;
+    margin-bottom: 14px;
+    font-size: 16px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+  }
+  .state-idle { background: #1e293b; color: #64748b; }
+  .state-calibrating { background: #2d1f00; color: #fbbf24; }
+  .state-rocking { background: #002d1a; color: #34d399; }
+
+  .btn-group { display: flex; flex-direction: column; gap: 8px; }
+  .btn {
+    padding: 12px 16px;
+    border: none;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+  .btn:hover { transform: translateY(-1px); }
+  .btn:active { transform: translateY(0); }
+  .btn:disabled { opacity: 0.3; cursor: not-allowed; transform: none; }
+  .btn-start { background: #059669; color: white; }
+  .btn-start:hover:not(:disabled) { background: #047857; }
+  .btn-mark { background: #d97706; color: white; }
+  .btn-mark:hover:not(:disabled) { background: #b45309; }
+  .btn-stop { background: #dc2626; color: white; }
+  .btn-stop:hover:not(:disabled) { background: #b91c1c; }
+
+  .cal-status {
+    margin-top: 10px;
+    font-size: 11px;
+    color: #64748b;
+    font-family: 'SF Mono', monospace;
+    min-height: 16px;
+  }
+
+  /* Event log */
+  .log-card { grid-column: 1 / -1; }
+  .log-entries {
+    max-height: 120px;
+    overflow-y: auto;
+    font-family: 'SF Mono', Consolas, monospace;
+    font-size: 11px;
+    line-height: 1.6;
+  }
+  .log-entry { color: #64748b; }
+  .log-entry .time { color: #4a9eff; }
+  .log-entry .src  { color: #a78bfa; }
+  .log-entry .event { color: #34d399; }
+  .log-entry .value { color: #fbbf24; }
+
+  /* Log row below main grid */
+  .log-row {
+    padding: 0 16px 16px;
+    max-width: 1600px;
+    margin: 0 auto;
+  }
+
+  @media (max-width: 900px) {
+    .main { grid-template-columns: 1fr; }
+    .sensors-area.dual { grid-template-columns: 1fr; }
+    .chart-container { height: 220px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1><span>R2</span> Rocker Rig — Live Dashboard</h1>
+  <div class="header-controls">
+    <button class="btn-connect" id="btn-connect" onclick="startBootstrap()">&#x1F50D; Connect Sensors</button>
+    <div class="connection-status">
+      <div class="status-dot" id="wsDot"></div>
+      <span id="wsStatus">Connecting...</span>
+      <span style="margin-left:14px; color:#64748b;">Sensors:</span>
+      <span id="sensorCount" style="font-weight:600; color:#4a9eff;">0</span>
+    </div>
+  </div>
+</div>
+
+<div class="main">
+  <!-- Sensor charts (populated dynamically) -->
+  <div class="sensors-area" id="sensorsArea">
+    <div class="card" id="sensorPlaceholder" style="color:#475569; text-align:center; padding:60px;">
+      Waiting for sensors…
+    </div>
+  </div>
+
+  <!-- Sidebar: controls -->
+  <div class="sidebar">
+    <div class="card">
+      <h2>Run Control</h2>
+      <div class="state-indicator state-idle" id="stateIndicator">IDLE</div>
+      <div class="btn-group">
+        <button class="btn btn-start" id="btnStart" onclick="sendCmd('start')">&#x25B6; Start</button>
+        <button class="btn btn-mark" id="btnMark" onclick="sendCmd('mark')" disabled>&#x2691; Mark</button>
+        <button class="btn btn-stop" id="btnStop" onclick="sendCmd('stop')" disabled>&#x25A0; Stop</button>
+      </div>
+      <div class="cal-status" id="calStatus">&mdash;</div>
+    </div>
+
+    <div class="card">
+      <h2>Connected Sensors</h2>
+      <div id="sensorList" style="font-family:'SF Mono',monospace; font-size:12px; color:#64748b;">
+        None
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Bootstrap log panel (between graphs and event log) -->
+<div class="bootstrap-panel" id="bootstrap-panel">
+  <div class="bootstrap-log-card">
+    <div class="bootstrap-log-header">
+      <h2>Bootstrap Log</h2>
+      <button class="bootstrap-close" onclick="closeBootstrapPanel()">&times;</button>
+    </div>
+    <div class="bootstrap-log-entries" id="bootstrap-log"></div>
+  </div>
+</div>
+
+<!-- Event log -->
+<div class="log-row">
+  <div class="card log-card">
+    <h2>Event Log</h2>
+    <div class="log-entries" id="logEntries"></div>
+  </div>
+</div>
+
+<script>
+const MAX_POINTS = 200;
+const CALIBRATION_MIN = 10;
+
+// ── Global state ──
+let runState = 'idle';
+let totalEvents = 0;
+
+// ── Per-sensor state ── keyed by source_addr (IP:port)
+const sensors = new Map();
+
+function getSensorKey(addr) {
+  return addr ? addr.split(':')[0] : addr;
+}
+
+function getOrCreateSensor(addr) {
+  const key = getSensorKey(addr);
+  if (sensors.has(key)) return sensors.get(key);
+
+  const area = document.getElementById('sensorsArea');
+  const placeholder = document.getElementById('sensorPlaceholder');
+  if (placeholder) placeholder.remove();
+
+  const safeKey = key.replace(/\./g, '-');
+  const card = document.createElement('div');
+  card.className = 'card sensor-card';
+  card.id = 'sensor-' + safeKey;
+
+  card.innerHTML = `
+    <div class="sensor-label" id="slabel-${safeKey}">${key}<span class="sensor-addr">${key}</span></div>
+    <div class="chart-container">
+      <canvas id="chart-${safeKey}"></canvas>
+    </div>
+    <div class="sensor-stats">
+      <span>x: <span class="vx" id="vx-${safeKey}">&mdash;</span></span>
+      <span>y: <span class="vy" id="vy-${safeKey}">&mdash;</span></span>
+      <span>z: <span class="vz" id="vz-${safeKey}">&mdash;</span></span>
+      <span>|A|: <span class="vmag" id="vmag-${safeKey}">&mdash;</span></span>
+      <span style="margin-left:auto; color:#475569;" id="rate-${safeKey}">&mdash; Hz</span>
+    </div>
+    <div class="sensor-event-log" id="slog-${safeKey}"></div>
+  `;
+  area.appendChild(card);
+  setTimeout(() => sensors.forEach(s => s.chart.resize()), 50);
+
+  const ctx = document.getElementById('chart-' + safeKey).getContext('2d');
+  const chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: [
+        { label: 'x (g)', data: [], borderColor: '#ff6384', borderWidth: 1.5, pointRadius: 0, tension: 0.2 },
+        { label: 'y (g)', data: [], borderColor: '#36a2eb', borderWidth: 1.5, pointRadius: 0, tension: 0.2 },
+        { label: 'z (g)', data: [], borderColor: '#4bc0c0', borderWidth: 1.5, pointRadius: 0, tension: 0.2 },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      scales: {
+        x: { display: true, grid: { color: '#1e293b' }, ticks: { color: '#475569', maxTicksLimit: 8 } },
+        y: { display: true, grid: { color: '#1e293b' }, ticks: { color: '#475569' }, title: { display: true, text: 'Acceleration (g)', color: '#64748b' }, suggestedMin: -2, suggestedMax: 2 },
+      },
+      plugins: { legend: { labels: { color: '#94a3b8', usePointStyle: true } } },
+    },
+  });
+
+  const sensor = {
+    key,
+    deviceName: null,
+    chart,
+    calibrationSamples: [],
+    calibrationOffset: { x: 0, y: 0, z: 0 },
+    sampleTimes: [],
+    logCount: 0,
+  };
+  sensors.set(key, sensor);
+  addSensorLog(sensor, 'connected');
+  updateSensorList();
+  return sensor;
+}
+
+function setDeviceName(sensor, name) {
+  if (!name) return;
+
+  // Deduplicate: if another sensor card already has this name (same physical device,
+  // different IP — e.g. after DHCP renewal or reconnect), destroy the stale card.
+  for (const [key, existing] of sensors) {
+    if (existing !== sensor && existing.deviceName === name) {
+      // Destroy the stale duplicate card
+      const staleKey = key.replace(/\./g, '-');
+      const staleCard = document.getElementById('sensor-' + staleKey);
+      if (staleCard) {
+        if (existing.chart) { existing.chart.destroy(); }
+        staleCard.remove();
+      }
+      sensors.delete(key);
+      break;
+    }
+  }
+
+  if (sensor.deviceName === name) return;
+  sensor.deviceName = name;
+  const sk = sensor.key.replace(/\./g, '-');
+  const labelEl = document.getElementById('slabel-' + sk);
+  if (labelEl) labelEl.innerHTML = name + '<span class="sensor-addr">' + sensor.key + '</span>';
+  updateSensorList();
+}
+
+function updateSensorList() {
+  const el = document.getElementById('sensorList');
+  document.getElementById('sensorCount').textContent = sensors.size;
+  if (sensors.size === 0) { el.textContent = 'None'; return; }
+  el.innerHTML = [...sensors.values()].map(s => {
+    const label = s.deviceName ? `${s.deviceName} <span style="color:#475569;">(${s.key})</span>` : s.key;
+    return `<div style="padding:4px 0; border-bottom:1px solid #1e293b; color:#94a3b8;">\u25CF ${label}</div>`;
+  }).join('');
+}
+
+function addSensorLog(sensor, text) {
+  const sk = sensor.key.replace(/\./g, '-');
+  const el = document.getElementById('slog-' + sk);
+  if (!el) return;
+  const now = new Date();
+  const ts = now.toLocaleTimeString('en-NZ', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const line = document.createElement('div');
+  line.className = 'sensor-event-line';
+  line.innerHTML = `<span class="sel-time">[${ts}]</span> <span class="sel-text">${text}</span>`;
+  el.appendChild(line);
+  sensor.logCount++;
+  while (sensor.logCount > 20) {
+    el.removeChild(el.firstChild);
+    sensor.logCount--;
+  }
+  el.scrollTop = el.scrollHeight;
+}
+
+// ── Bootstrap ──
+function startBootstrap() {
+  const btn = document.getElementById('btn-connect');
+  btn.disabled = true;
+  btn.textContent = 'Scanning...';
+
+  const panel = document.getElementById('bootstrap-panel');
+  panel.classList.add('visible');
+  document.getElementById('bootstrap-log').innerHTML = '';
+
+  fetch('/api/bootstrap', { method: 'POST' })
+    .then(r => {
+      if (r.status === 409) {
+        addBootstrapLine('Bootstrap already in progress', 'amber');
+        btn.disabled = false;
+        btn.textContent = '\uD83D\uDD0D Connect Sensors';
+      } else if (!r.ok) {
+        r.text().then(t => addBootstrapLine('Error: ' + t, 'red'));
+        btn.disabled = false;
+        btn.textContent = '\uD83D\uDD0D Connect Sensors';
+      }
+    })
+    .catch(e => {
+      addBootstrapLine('Fetch error: ' + e.message, 'red');
+      btn.disabled = false;
+      btn.textContent = '\uD83D\uDD0D Connect Sensors';
+    });
+}
+
+function closeBootstrapPanel() {
+  document.getElementById('bootstrap-panel').classList.remove('visible');
+}
+
+function handleBootstrapEvent(msg) {
+  const evt = msg.event;
+  if (!evt) return;
+
+  // Reset event clears the log panel and all sensor cards for a fresh bootstrap run
+  if (evt === null || 'Reset' in msg.event) {
+    document.getElementById('bootstrap-log').innerHTML = '';
+    document.getElementById('bootstrap-panel').classList.add('visible');
+    addBootstrapLine('↺ Restarting bootstrap…', 'amber');
+    // Destroy all sensor cards and chart instances
+    sensors.forEach(s => { try { s.chart.destroy(); } catch(e) {} });
+    sensors.clear();
+    const area = document.getElementById('sensorsArea');
+    area.innerHTML = '<div id="sensorPlaceholder" style="color:#475569; text-align:center; padding:40px;">Waiting for sensors…</div>';
+    document.getElementById('sensorCount').textContent = '0';
+    document.getElementById('sensorList').textContent = 'None';
+    return;
+  }
+
+  switch (evt.kind) {
+    case 'Log':
+      addBootstrapLine(evt.data, '');
+      break;
+    case 'SensorFound':
+      addBootstrapLine('Found sensor: ' + evt.data.addr, 'amber');
+      break;
+    case 'SensorConnected':
+      addBootstrapLine('\u2713 ' + evt.data.name + ' connected (' + evt.data.ip + ')', 'green');
+      break;
+    case 'Done': {
+      addBootstrapLine('Bootstrap complete \u2014 ' + evt.data.count + ' sensor(s) connected', 'green');
+      const btn = document.getElementById('btn-connect');
+      btn.disabled = false;
+      btn.textContent = '\uD83D\uDD0D Connect Sensors';
+      break;
+    }
+    case 'Error':
+      addBootstrapLine('ERROR: ' + evt.data, 'red');
+      const btn2 = document.getElementById('btn-connect');
+      btn2.disabled = false;
+      btn2.textContent = '\uD83D\uDD0D Connect Sensors';
+      break;
+  }
+}
+
+function addBootstrapLine(text, cls) {
+  const el = document.getElementById('bootstrap-log');
+  const line = document.createElement('div');
+  line.className = 'bs-line' + (cls ? ' ' + cls : '');
+  line.textContent = text;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+// ── WebSocket ──
+let ws;
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+  ws.onopen = () => {
+    document.getElementById('wsDot').className = 'status-dot connected';
+    document.getElementById('wsStatus').textContent = 'Connected';
+  };
+  ws.onclose = () => {
+    document.getElementById('wsDot').className = 'status-dot';
+    document.getElementById('wsStatus').textContent = 'Disconnected';
+    setTimeout(connect, 2000);
+  };
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'bootstrap') {
+      // Show the panel if not visible (e.g. replayed log on reconnect)
+      const panel = document.getElementById('bootstrap-panel');
+      if (!panel.classList.contains('visible')) panel.classList.add('visible');
+      handleBootstrapEvent(msg);
+    } else {
+      handleEvent(msg);
+    }
+  };
+}
+connect();
+
+function handleEvent(msg) {
+  totalEvents++;
+  const sensor = msg.source_addr ? getOrCreateSensor(msg.source_addr) : null;
+
+  switch (msg.event) {
+    case 'acceleration':
+      if (sensor) {
+        if (msg.device_name) setDeviceName(sensor, msg.device_name);
+        handleAcceleration(msg, sensor);
+      }
+      return;  // don't log raw acceleration frames — too noisy at 10Hz
+    case 'run_state':
+      if (sensor) {
+        handleRunState(msg);
+        // Log the state name (payload.state is a number from the sensor)
+        if (msg.payload && msg.payload.state != null) {
+          const stateLabel = decodeStateNum(msg.payload.state);
+          addSensorLog(sensor, 'state → ' + stateLabel);
+        }
+      }
+      break;
+    case 'r2.sensor.announce':
+      if (sensor && msg.payload && msg.payload.name) {
+        setDeviceName(sensor, msg.payload.name);
+        addSensorLog(sensor, 'announced: ' + msg.payload.name);
+      }
+      return;
+    case 'sensor.connected':
+      if (sensor) {
+        if (msg.device_name) setDeviceName(sensor, msg.device_name);
+        addSensorLog(sensor, 'connected');
+        // Do NOT call applyState here. The sensor.connected event fires for
+        // three different cases that need different treatment:
+        //   1. First connect: sensor is idle → handled by run_state broadcast
+        //   2. Reconnect: sensor reset to idle → handled by run_state broadcast
+        //   3. New browser joining existing session: WS replay — must NOT reset
+        //      a live session already in rocking state for an existing browser.
+        //
+        // State sync is driven by the sensor's run_state broadcast (sent by
+        // the sensor immediately after connect). This decouples the TCP
+        // event (which fires for all three cases) from FSM transitions.
+      }
+      addLog(msg);
+      return;
+  }
+  addLog(msg);
+}
+
+function handleAcceleration(msg, sensor) {
+  if (!msg.payload) return;
+  const rawX = msg.payload.x ?? 0;
+  const rawY = msg.payload.y ?? 0;
+  const rawZ = msg.payload.z ?? 0;
+
+  if (runState === 'calibrating') {
+    sensor.calibrationSamples.push({ x: rawX, y: rawY, z: rawZ });
+    const n = sensors.size > 0
+      ? Math.min(...[...sensors.values()].map(s => s.calibrationSamples.length))
+      : 0;
+    document.getElementById('calStatus').textContent =
+      `Calibrating\u2026 ${n} sample${n !== 1 ? 's' : ''}`;
+    document.getElementById('btnMark').disabled = (n < CALIBRATION_MIN);
+  }
+
+  const x = rawX - sensor.calibrationOffset.x;
+  const y = rawY - sensor.calibrationOffset.y;
+  const z = rawZ - sensor.calibrationOffset.z;
+  const mag = Math.sqrt(x*x + y*y + z*z);
+
+  const unit = runState === 'rocking' ? ' \u0394g' : ' g';
+  const sk = sensor.key.replace(/\./g, '-');
+  const setText = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  setText('vx-' + sk, x.toFixed(3) + unit);
+  setText('vy-' + sk, y.toFixed(3) + unit);
+  setText('vz-' + sk, z.toFixed(3) + unit);
+  setText('vmag-' + sk, mag.toFixed(3));
+
+  const now = Date.now();
+  sensor.sampleTimes.push(now);
+  if (sensor.sampleTimes.length > 50) sensor.sampleTimes.shift();
+  if (sensor.sampleTimes.length > 1) {
+    const dt = (sensor.sampleTimes[sensor.sampleTimes.length-1] - sensor.sampleTimes[0])
+               / (sensor.sampleTimes.length - 1);
+    setText('rate-' + sk, (1000/dt).toFixed(1) + ' Hz');
+  }
+
+  if (runState !== 'rocking') return;
+
+  const label = new Date(msg.timestamp_ms).toLocaleTimeString('en-NZ', {
+    hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit'
+  });
+  sensor.chart.data.labels.push(label);
+  sensor.chart.data.datasets[0].data.push(x);
+  sensor.chart.data.datasets[1].data.push(y);
+  sensor.chart.data.datasets[2].data.push(z);
+  if (sensor.chart.data.labels.length > MAX_POINTS) {
+    sensor.chart.data.labels.shift();
+    sensor.chart.data.datasets[0].data.shift();
+    sensor.chart.data.datasets[1].data.shift();
+    sensor.chart.data.datasets[2].data.shift();
+  }
+  sensor.chart.update('none'); // skip animation on streaming updates — 10Hz * 2 sensors = too slow otherwise
+}
+
+const ORDER = { idle: 0, calibrating: 1, rocking: 2 };
+const STATE_NAMES = ['idle', 'calibrating', 'rocking'];
+
+// Sensor sends state as a float (0.0=idle, 1.0=calibrating, 2.0=rocking).
+// Map it back to a string name; fall back to 'idle' for unknown values.
+function decodeStateNum(raw) {
+  if (typeof raw === 'string' && ORDER[raw] !== undefined) return raw;
+  const idx = typeof raw === 'number' ? Math.round(raw) : -1;
+  return STATE_NAMES[idx] ?? 'idle';
+}
+
+function handleRunState(msg) {
+  if (!msg.payload) return;
+  // Decode numeric state (0/1/2) OR accept string if somehow already decoded
+  const s = decodeStateNum(msg.payload.state ?? 0);
+  // Rule: idle always resets; any other state only applies if it advances the FSM.
+  if (s !== 'idle' && ORDER[s] <= ORDER[runState]) return;
+  applyState(s);
+}
+
+function applyState(s) {
+  runState = s;
+  const el = document.getElementById('stateIndicator');
+  el.textContent = s.toUpperCase();
+  el.className = 'state-indicator state-' + s;
+  document.getElementById('btnStart').disabled = (s !== 'idle');
+  document.getElementById('btnStop').disabled = (s === 'idle');
+  if (s !== 'calibrating') document.getElementById('btnMark').disabled = true;
+}
+
+function sendCmd(cmd) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ command: cmd }));
+
+  switch (cmd) {
+    case 'start':
+      sensors.forEach(s => {
+        s.calibrationSamples = [];
+        s.calibrationOffset = { x: 0, y: 0, z: 0 };
+        s.chart.data.labels.length = 0;
+        s.chart.data.datasets.forEach(ds => { ds.data.length = 0; });
+        s.chart.update();
+      });
+      document.getElementById('calStatus').textContent = 'Calibrating\u2026';
+      applyState('calibrating');
+      break;
+
+    case 'mark':
+      let calSummary = [];
+      sensors.forEach(s => {
+        const samps = s.calibrationSamples;
+        if (samps.length >= CALIBRATION_MIN) {
+          const n = samps.length;
+          s.calibrationOffset.x = samps.reduce((a, v) => a + v.x, 0) / n;
+          s.calibrationOffset.y = samps.reduce((a, v) => a + v.y, 0) / n;
+          s.calibrationOffset.z = samps.reduce((a, v) => a + v.z, 0) / n;
+          calSummary.push(`${s.key}: z=${s.calibrationOffset.z.toFixed(3)}`);
+        }
+        s.calibrationSamples = [];
+      });
+      document.getElementById('calStatus').textContent =
+        calSummary.length ? 'Cal: ' + calSummary.join(' | ') : '\u2014';
+      applyState('rocking');
+      break;
+
+    case 'stop':
+      applyState('idle');
+      break;
+  }
+}
+
+function addLog(msg) {
+  const el = document.getElementById('logEntries');
+  const time = new Date(msg.timestamp_ms).toLocaleTimeString('en-NZ', {
+    hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit',
+    fractionalSecondDigits: 1
+  });
+  const src = msg.source_addr ? getSensorKey(msg.source_addr) : '?';
+  let valueStr = '';
+  if (msg.event === 'sensor.connected' && msg.device_name) {
+    valueStr = msg.device_name;
+  } else if (msg.payload && msg.event === 'acceleration') {
+    const x = msg.payload.x ?? 0, y = msg.payload.y ?? 0, z = msg.payload.z ?? 0;
+    valueStr = `x=${x.toFixed(3)} y=${y.toFixed(3)} z=${z.toFixed(3)}`;
+  } else if (msg.payload) {
+    valueStr = JSON.stringify(msg.payload);
+  }
+  const entry = document.createElement('div');
+  entry.className = 'log-entry';
+  entry.innerHTML = `<span class="time">${time}</span> <span class="src">[${src}]</span> <span class="event">${msg.event}</span> <span class="value">${valueStr}</span>`;
+  el.insertBefore(entry, el.firstChild);
+  while (el.children.length > 100) el.removeChild(el.lastChild);
+}
+</script>
+</body>
+</html>

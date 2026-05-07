@@ -1,0 +1,18 @@
+[package]
+name = "r2-dashboard"
+version = "0.1.0"
+edition = "2021"
+description = "R2 sensor dashboard — receives R2-WIRE events and serves a live web UI"
+
+[dependencies]
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+r2-fnv = { path = "../crates/r2-fnv" }
+r2-cbor = { path = "../crates/r2-cbor" }
+r2-wire = { path = "../crates/r2-wire" }
+clap = { version = "4", features = ["derive"] }
+r2-bootstrap = { path = "../crates/r2-bootstrap" }
+socket2 = { version = "0.6.3", features = ["all"] }

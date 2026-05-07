@@ -1,0 +1,812 @@
+//! R2 Dashboard Gateway
+//!
+//! Receives R2-WIRE event frames over TCP from sensor nodes,
+//! serves a live web dashboard, and pushes data to browsers via WebSocket.
+//! Integrates r2-bootstrap to trigger sensor discovery from the browser.
+//!
+//! Architecture:
+//!   Sensor (M10/ESP32) --TCP:21042--> Gateway --WebSocket--> Browser
+//!   Browser --WebSocket--> Gateway --TCP--> Sensor (commands)
+//!   Browser --POST /api/bootstrap--> Gateway --BLE--> Sensor discovery
+
+use axum::{
+    extract::ws::{Message, WebSocket, WebSocketUpgrade},
+    extract::State,
+    response::{Html, IntoResponse, Json},
+    routing::{get, post},
+    Router,
+};
+use clap::Parser;
+use r2_bootstrap::{BootstrapConfig, BootstrapEvent};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{broadcast, Mutex, RwLock};
+
+// ── r2-rocker event hashes ────────────────────────────────────────────────
+//
+// Per `SPEC-R2-ROCKER-WIRE.md` §2. Forked from the M10 demo dashboard's
+// flat names ("acceleration", "battery_status") to the `r2.sensor.*`
+// namespace defined in our wire spec, so multiple R2 applications can
+// coexist on a hub without hash collisions.
+
+const ACCELERATION:        u32 = r2_fnv::fnv1a_32(b"r2.sensor.acceleration");
+const ACCELERATION_BATCH:  u32 = r2_fnv::fnv1a_32(b"r2.sensor.acceleration.batch");
+const BATTERY:             u32 = r2_fnv::fnv1a_32(b"r2.sensor.battery");
+const SENSOR_STATUS:       u32 = r2_fnv::fnv1a_32(b"r2.sensor.status");
+const SENSOR_EVENT_LOG:    u32 = r2_fnv::fnv1a_32(b"r2.sensor.event.log");
+const SENSOR_CAL_RESP:     u32 = r2_fnv::fnv1a_32(b"r2.sensor.cal.sample.resp");
+const SENSOR_SYNC_PONG:    u32 = r2_fnv::fnv1a_32(b"r2.sensor.sync_pong");
+const SENSOR_ANNOUNCE:     u32 = r2_fnv::fnv1a_32(b"r2.sensor.announce");
+
+// Legacy M10-demo names retained so a mixed deployment with prior-gen
+// sensors still parses. Remove when M10 sensors retire.
+const LEGACY_ACCELERATION: u32 = r2_fnv::fnv1a_32(b"acceleration");
+const LEGACY_BATTERY:      u32 = r2_fnv::fnv1a_32(b"battery_status");
+const LEGACY_RUN_STATE:    u32 = r2_fnv::fnv1a_32(b"run_state");
+const LEGACY_GYROSCOPE:    u32 = r2_fnv::fnv1a_32(b"gyroscope");
+
+// Browser → sensor command hashes (kept for backward compat).
+const CMD_START:     u32 = r2_fnv::fnv1a_32(b"cmd_start");
+const CMD_STOP:      u32 = r2_fnv::fnv1a_32(b"cmd_stop");
+const CMD_MARK:      u32 = r2_fnv::fnv1a_32(b"cmd_mark");
+const CMD_CALIBRATE: u32 = r2_fnv::fnv1a_32(b"cmd_calibrate");
+const SHUTDOWN:      u32 = r2_fnv::fnv1a_32(b"shutdown");
+
+/// Map hash → human-readable name shipped to the browser.
+fn event_name(hash: u32) -> &'static str {
+    match hash {
+        ACCELERATION              => "r2.sensor.acceleration",
+        ACCELERATION_BATCH        => "r2.sensor.acceleration.batch",
+        BATTERY                   => "r2.sensor.battery",
+        SENSOR_STATUS             => "r2.sensor.status",
+        SENSOR_EVENT_LOG          => "r2.sensor.event.log",
+        SENSOR_CAL_RESP           => "r2.sensor.cal.sample.resp",
+        SENSOR_SYNC_PONG          => "r2.sensor.sync_pong",
+        SENSOR_ANNOUNCE           => "r2.sensor.announce",
+        LEGACY_ACCELERATION       => "acceleration",
+        LEGACY_BATTERY            => "battery_status",
+        LEGACY_RUN_STATE          => "run_state",
+        LEGACY_GYROSCOPE          => "gyroscope",
+        CMD_START                 => "cmd_start",
+        CMD_STOP                  => "cmd_stop",
+        CMD_MARK                  => "cmd_mark",
+        CMD_CALIBRATE             => "cmd_calibrate",
+        SHUTDOWN                  => "shutdown",
+        _                         => "unknown",
+    }
+}
+
+/// Server-side remap of integer-keyed CBOR payloads into named-key JSON
+/// per `SPEC-R2-ROCKER-WIRE.md`. The browser expects friendly key names
+/// ({"x":42}) rather than {"2":42} so this is where the per-event
+/// schema knowledge lives.
+fn remap_payload(event_hash: u32, raw: serde_json::Value) -> serde_json::Value {
+    use serde_json::{Map, Value};
+    let obj = match raw {
+        Value::Object(m) => m,
+        other => return other, // not a map — pass through
+    };
+    let take = |m: &Map<String, Value>, k: &str| -> Option<Value> { m.get(k).cloned() };
+    let mut out = Map::new();
+    let map_keys: &[(&str, &str)] = match event_hash {
+        ACCELERATION => &[("0", "seq"), ("1", "ts_ms"), ("2", "x"), ("3", "y"), ("4", "z")],
+        BATTERY      => &[("0", "voltage_mv"), ("1", "percent"), ("2", "charging"), ("3", "ts_ms"), ("10", "temp_c")],
+        SENSOR_ANNOUNCE => &[
+            ("0", "device_pk"),
+            ("1", "hostname"),
+            ("2", "fw_ver"),
+            ("3", "last_seq"),
+            ("4", "boot_ts_ms"),
+            ("5", "nonce"),
+            ("6", "sig"),
+            ("10", "mounting_role"),
+        ],
+        SENSOR_STATUS => &[
+            ("0", "state"),
+            ("1", "uptime_ms"),
+            ("2", "samples_total"),
+            ("3", "samples_acked"),
+            ("4", "sd_pct_used"),
+            ("5", "rate_hz_active"),
+            ("6", "range_active"),
+            ("10", "error_code"),
+        ],
+        _ => {
+            // Unknown event — return the raw map as-is.
+            return Value::Object(obj);
+        }
+    };
+    for (k_int, k_named) in map_keys {
+        if let Some(v) = take(&obj, k_int) {
+            out.insert((*k_named).to_string(), v);
+        }
+    }
+    // Preserve any unmapped keys (forwards-compat per WIRE §1.3).
+    for (k, v) in obj {
+        if !out.contains_key(&k) {
+            out.insert(k, v);
+        }
+    }
+    Value::Object(out)
+}
+
+#[derive(Parser)]
+#[command(name = "r2-dashboard", about = "R2 sensor dashboard gateway")]
+struct Args {
+    /// HTTP port for the web dashboard
+    #[arg(long, default_value = "8080")]
+    http_port: u16,
+
+    /// TCP port to listen for R2-WIRE events from sensors
+    #[arg(long, default_value = "21042")]
+    event_port: u16,
+
+    /// Bind address
+    #[arg(long, default_value = "0.0.0.0")]
+    bind: String,
+}
+
+/// Build-stamped version string. Reported via /api/version, the startup
+/// banner, and used by sensors / OTA logic to decide if an update is
+/// needed (compare against `r2.sensor.announce.fw_ver`).
+const DASHBOARD_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "+",
+    env!("R2_GIT_SHA"),
+);
+
+/// JSON for /api/version.
+#[derive(Serialize)]
+struct VersionInfo {
+    version:   &'static str,
+    git_sha:   &'static str,
+    built_at:  &'static str,
+    component: &'static str,
+}
+
+async fn version_handler() -> axum::Json<VersionInfo> {
+    axum::Json(VersionInfo {
+        version:   env!("CARGO_PKG_VERSION"),
+        git_sha:   env!("R2_GIT_SHA"),
+        built_at:  env!("R2_BUILD_TIMESTAMP"),
+        component: "r2-rocker-dashboard",
+    })
+}
+
+/// JSON message sent to browser via WebSocket
+#[derive(Serialize, Clone, Debug)]
+struct DashboardEvent {
+    event: String,
+    hash: String,
+    timestamp_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    payload: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_addr: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    device_name: Option<String>,
+}
+
+/// JSON command received from browser via WebSocket
+#[derive(Deserialize, Debug)]
+struct DashboardCommand {
+    command: String,
+    /// Calibration offset (only for "calibrate" command)
+    offset: Option<CalibrationOffset>,
+}
+
+#[derive(Deserialize, Debug)]
+struct CalibrationOffset {
+    x: f32,
+    y: f32,
+    z: f32,
+}
+
+/// Encode a CBOR map of text→float32 pairs for the calibrate command
+fn encode_cbor_offset(x: f32, y: f32, z: f32) -> Vec<u8> {
+    let mut buf = vec![0xA3u8];
+    for (key, val) in [("x", x), ("y", y), ("z", z)] {
+        buf.push(0x60 | key.len() as u8);
+        buf.extend_from_slice(key.as_bytes());
+        buf.push(0xFA);
+        buf.extend_from_slice(&val.to_be_bytes());
+    }
+    buf
+}
+
+/// Connected sensor peer
+#[derive(Debug)]
+struct SensorPeer {
+    #[allow(dead_code)]
+    addr: SocketAddr,
+    tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    name: Option<String>,
+}
+
+/// Shared application state
+struct AppState {
+    /// Broadcast channel for dashboard events → all WebSocket clients
+    event_tx: broadcast::Sender<DashboardEvent>,
+    /// Connected sensor peers (for sending commands back)
+    peers: RwLock<HashMap<SocketAddr, SensorPeer>>,
+    /// Broadcast channel for raw JSON strings (used for bootstrap events → WS)
+    ws_broadcast_tx: broadcast::Sender<String>,
+    /// Bootstrap state
+    bootstrap_running: Arc<AtomicBool>,
+    bootstrap_log: Arc<Mutex<Vec<String>>>,
+    /// Handle to the running bootstrap task — aborted on re-press
+    bootstrap_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+#[tokio::main]
+async fn main() {
+    let args = Args::parse();
+
+    let (event_tx, _) = broadcast::channel::<DashboardEvent>(256);
+    let (ws_broadcast_tx, _) = broadcast::channel::<String>(256);
+    let state = Arc::new(AppState {
+        event_tx: event_tx.clone(),
+        peers: RwLock::new(HashMap::new()),
+        ws_broadcast_tx,
+        bootstrap_running: Arc::new(AtomicBool::new(false)),
+        bootstrap_log: Arc::new(Mutex::new(Vec::new())),
+        bootstrap_task: Mutex::new(None),
+    });
+
+    // Spawn TCP listener for R2-WIRE events
+    let event_state = state.clone();
+    let event_bind = format!("{}:{}", args.bind, args.event_port);
+    tokio::spawn(async move {
+        run_event_listener(&event_bind, event_state).await;
+    });
+
+    // HTTP server with dashboard + WebSocket + bootstrap API
+    let app = Router::new()
+        .route("/", get(dashboard_handler))
+        .route("/ws", get({
+            let ws_state = state.clone();
+            move |ws| ws_handler(ws, ws_state)
+        }))
+        .route("/api/bootstrap", post(bootstrap_handler))
+        .route("/api/bootstrap/status", get(bootstrap_status_handler))
+        .route("/api/version", get(version_handler))
+        .with_state(state.clone());
+
+    let http_addr: SocketAddr = format!("{}:{}", args.bind, args.http_port)
+        .parse()
+        .expect("valid bind address");
+
+    eprintln!("╔══════════════════════════════════════════════════════════════╗");
+    eprintln!("║              r2-rocker dashboard                              ║");
+    eprintln!("╠══════════════════════════════════════════════════════════════╣");
+    eprintln!("║  version:    {:<48}║", DASHBOARD_VERSION);
+    eprintln!("║  built:      {:<48}║", env!("R2_BUILD_TIMESTAMP"));
+    eprintln!("║  dashboard:  http://{:<41}║", http_addr.to_string());
+    eprintln!("║  events:     tcp/{:<44}║", args.event_port);
+    eprintln!("╚══════════════════════════════════════════════════════════════╝");
+
+    let listener = tokio::net::TcpListener::bind(http_addr).await
+        .unwrap_or_else(|e| {
+            eprintln!("ERROR: Cannot bind HTTP port {} — {}", http_addr, e);
+            eprintln!("Is another r2-dashboard already running? Kill it first: pkill r2-dashboard");
+            std::process::exit(1);
+        });
+    axum::serve(listener, app).await.unwrap();
+}
+
+/// Serve the embedded HTML dashboard
+async fn dashboard_handler() -> impl IntoResponse {
+    Html(include_str!("dashboard.html"))
+}
+
+/// POST /api/bootstrap — trigger sensor bootstrap (re-pressing cancels and restarts)
+async fn bootstrap_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // Abort any existing bootstrap task and wait for it to clean up
+    {
+        let mut task = state.bootstrap_task.lock().await;
+        if let Some(handle) = task.take() {
+            handle.abort();
+            // Small delay so the task drops cleanly before we restart
+            tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+        }
+    }
+
+    state.bootstrap_running.store(true, Ordering::SeqCst);
+
+    // Clear previous log and broadcast a reset event so the browser clears its panel
+    {
+        let mut log = state.bootstrap_log.lock().await;
+        log.clear();
+    }
+    let reset_msg = serde_json::json!({ "type": "bootstrap", "event": { "Reset": null } }).to_string();
+    let _ = state.ws_broadcast_tx.send(reset_msg);
+
+    let config = BootstrapConfig {
+        ssid: None,
+        psk: None,
+        scan_secs: 10,
+        target_class: "ai.reality2.device.sensor".to_string(),
+    };
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<BootstrapEvent>(64);
+    let ws_tx = state.ws_broadcast_tx.clone();
+    let log_store = state.bootstrap_log.clone();
+    let running_flag = state.bootstrap_running.clone();
+
+    // Spawn the event relay task
+    tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            // Build WS message
+            let ws_msg = serde_json::json!({
+                "type": "bootstrap",
+                "event": event,
+            });
+            let json_str = serde_json::to_string(&ws_msg).unwrap_or_default();
+
+            // Append to log
+            {
+                let mut log = log_store.lock().await;
+                log.push(json_str.clone());
+            }
+
+            // Broadcast to all WS clients
+            let _ = ws_tx.send(json_str);
+        }
+
+        running_flag.store(false, Ordering::SeqCst);
+    });
+
+    // Spawn the bootstrap task and store the handle for cancellation
+    let bootstrap_handle = tokio::spawn(async move {
+        if let Err(e) = r2_bootstrap::run_bootstrap(config, tx.clone()).await {
+            let _ = tx.send(BootstrapEvent::Error(format!("{}", e))).await;
+        }
+        // Drop tx to signal the relay task to finish
+    });
+    *state.bootstrap_task.lock().await = Some(bootstrap_handle);
+
+    (
+        axum::http::StatusCode::OK,
+        Json(serde_json::json!({ "status": "started" })),
+    )
+}
+
+/// GET /api/bootstrap/status — return bootstrap state
+async fn bootstrap_status_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let running = state.bootstrap_running.load(Ordering::SeqCst);
+    let log = state.bootstrap_log.lock().await;
+    Json(serde_json::json!({
+        "running": running,
+        "log": *log,
+    }))
+}
+
+/// WebSocket handler — pushes events to browser, receives commands
+async fn ws_handler(ws: WebSocketUpgrade, state: Arc<AppState>) -> impl IntoResponse {
+    ws.on_upgrade(|socket| handle_ws_connection(socket, state))
+}
+
+async fn handle_ws_connection(mut socket: WebSocket, state: Arc<AppState>) {
+    // Replay current sensor state to the newly connected browser
+    {
+        let peers = state.peers.read().await;
+        for (addr, peer) in peers.iter() {
+            let event = DashboardEvent {
+                event: "sensor.connected".to_string(),
+                hash: String::new(),
+                timestamp_ms: 0,
+                payload: None,
+                source_addr: Some(addr.to_string()),
+                device_name: peer.name.clone(),
+            };
+            let json = serde_json::to_string(&event).unwrap();
+            if socket.send(Message::Text(json.into())).await.is_err() {
+                return;
+            }
+        }
+    }
+
+    // Replay bootstrap log to late-joining browsers
+    {
+        let log = state.bootstrap_log.lock().await;
+        for entry in log.iter() {
+            if socket.send(Message::Text(entry.clone().into())).await.is_err() {
+                return;
+            }
+        }
+    }
+
+    let mut event_rx = state.event_tx.subscribe();
+    let mut ws_broadcast_rx = state.ws_broadcast_tx.subscribe();
+
+    loop {
+        tokio::select! {
+            // Forward dashboard events to browser
+            Ok(event) = event_rx.recv() => {
+                let json = serde_json::to_string(&event).unwrap();
+                if socket.send(Message::Text(json.into())).await.is_err() {
+                    break;
+                }
+            }
+            // Forward bootstrap/raw WS broadcasts to browser
+            Ok(msg) = ws_broadcast_rx.recv() => {
+                if socket.send(Message::Text(msg.into())).await.is_err() {
+                    break;
+                }
+            }
+            // Receive commands from browser
+            Some(Ok(msg)) = socket.recv() => {
+                if let Message::Text(text) = msg {
+                    if let Ok(cmd) = serde_json::from_str::<DashboardCommand>(&text) {
+                        handle_command(&cmd, &state).await;
+                    }
+                }
+            }
+            else => break,
+        }
+    }
+}
+
+/// Handle a command from the browser dashboard
+async fn handle_command(cmd: &DashboardCommand, state: &AppState) {
+    let (event_hash, payload) = match cmd.command.as_str() {
+        "start" => (CMD_START, vec![]),
+        "stop" => (CMD_STOP, vec![]),
+        "mark" => (CMD_MARK, vec![]),
+        "shutdown" => (SHUTDOWN, vec![]),
+        "calibrate" => {
+            if let Some(off) = &cmd.offset {
+                (CMD_CALIBRATE, encode_cbor_offset(off.x, off.y, off.z))
+            } else {
+                eprintln!("[cmd] calibrate missing offset");
+                return;
+            }
+        }
+        _ => {
+            eprintln!("[cmd] unknown command: {}", cmd.command);
+            return;
+        }
+    };
+
+    eprintln!("[cmd] sending {} (0x{:08X}) to all peers", cmd.command, event_hash);
+
+    let frame = build_r2_wire_frame(event_hash, &payload);
+
+    // Collect the senders first (release the lock before awaiting).
+    // Holding an async RwLock read guard across an `await` point blocks any
+    // concurrent write-lock acquisition (e.g. a sensor connecting while a
+    // command is in-flight on a full channel), which can cause deadlocks.
+    let senders: Vec<(SocketAddr, tokio::sync::mpsc::Sender<Vec<u8>>)> = {
+        let peers = state.peers.read().await;
+        peers.iter().map(|(addr, peer)| (*addr, peer.tx.clone())).collect()
+    };
+
+    for (addr, tx) in senders {
+        if let Err(e) = tx.send(frame.clone()).await {
+            eprintln!("[cmd] failed to send to {}: {}", addr, e);
+        }
+    }
+}
+
+/// Build a minimal R2-WIRE frame
+fn build_r2_wire_frame(event_hash: u32, payload: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::new();
+    let body_len = 1 + 2 + 4 + payload.len();
+
+    frame.push((body_len >> 8) as u8);
+    frame.push(body_len as u8);
+
+    frame.push(0x01);
+
+    frame.push(0x00);
+    frame.push(0x00);
+
+    frame.push((event_hash >> 24) as u8);
+    frame.push((event_hash >> 16) as u8);
+    frame.push((event_hash >> 8) as u8);
+    frame.push(event_hash as u8);
+
+    frame.extend_from_slice(payload);
+
+    frame
+}
+
+/// Listen for TCP connections from sensor nodes
+async fn run_event_listener(bind: &str, state: Arc<AppState>) {
+    let listener = TcpListener::bind(bind).await.unwrap_or_else(|e| {
+        eprintln!("ERROR: Cannot bind event port {} — {}", bind, e);
+        eprintln!("Is another r2-dashboard already running? Kill it first: pkill r2-dashboard");
+        std::process::exit(1);
+    });
+    eprintln!("[events] listening on {}", bind);
+
+    loop {
+        match listener.accept().await {
+            Ok((stream, addr)) => {
+                eprintln!("[events] sensor connected: {}", addr);
+                // Enable TCP keepalive so zombie connections (sensor dropped without
+                // FIN) are detected within ~60s rather than the 2-hour OS default.
+                let stream = {
+                    let std_stream = match stream.into_std() {
+                        Ok(s) => s,
+                        Err(_) => { continue; }
+                    };
+                    let sock = socket2::Socket::from(std_stream);
+                    sock.set_keepalive(true).ok();
+                    let ka = socket2::TcpKeepalive::new()
+                        .with_time(std::time::Duration::from_secs(15))
+                        .with_interval(std::time::Duration::from_secs(5));
+                    sock.set_tcp_keepalive(&ka).ok();
+                    let std_stream: std::net::TcpStream = sock.into();
+                    std_stream.set_nonblocking(true).ok();
+                    match tokio::net::TcpStream::from_std(std_stream) {
+                        Ok(s) => s,
+                        Err(_) => { continue; }
+                    }
+                };
+                let peer_state = state.clone();
+                tokio::spawn(async move {
+                    handle_sensor_connection(stream, addr, peer_state).await;
+                });
+            }
+            Err(e) => eprintln!("[events] accept error: {}", e),
+        }
+    }
+}
+
+/// Handle a single sensor TCP connection
+async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Arc<AppState>) {
+    let (mut reader, mut writer) = stream.into_split();
+
+    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
+
+    {
+        let mut peers = state.peers.write().await;
+        peers.insert(addr, SensorPeer {
+            addr,
+            tx: cmd_tx,
+            name: None,
+        });
+    }
+
+    let _timestamp_start = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+
+    let read_state = state.clone();
+    let read_handle = tokio::spawn(async move {
+        let mut buf = vec![0u8; 4096];
+        let mut frame_buf = Vec::new();
+
+        loop {
+            match reader.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    frame_buf.extend_from_slice(&buf[..n]);
+
+                    while frame_buf.len() >= 2 {
+                        let frame_len = ((frame_buf[0] as usize) << 8) | (frame_buf[1] as usize);
+                        if frame_buf.len() < 2 + frame_len {
+                            break;
+                        }
+
+                        let frame = frame_buf[2..2 + frame_len].to_vec();
+                        frame_buf.drain(..2 + frame_len);
+
+                        let event_hash = if frame.len() >= 7 {
+                            Some(((frame[3] as u32) << 24)
+                                | ((frame[4] as u32) << 16)
+                                | ((frame[5] as u32) << 8)
+                                | (frame[6] as u32))
+                        } else {
+                            None
+                        };
+
+                        if event_hash == Some(SENSOR_ANNOUNCE) {
+                            let payload = if frame.len() > 7 {
+                                decode_cbor_payload(&frame[7..])
+                            } else {
+                                None
+                            };
+                            let device_name = payload.as_ref()
+                                .and_then(|p| p.get("name"))
+                                .and_then(|n| n.as_str())
+                                .map(|s| s.to_string());
+
+                            eprintln!("[events] sensor.announce from {}: {:?}", addr, device_name);
+
+                            if let Some(ref name_str) = device_name {
+                                let mut peers = read_state.peers.write().await;
+                                if let Some(peer) = peers.get_mut(&addr) {
+                                    peer.name = Some(name_str.clone());
+                                }
+                            }
+
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap()
+                                .as_millis() as u64;
+                            let event = DashboardEvent {
+                                event: "sensor.connected".to_string(),
+                                hash: format!("0x{:08X}", SENSOR_ANNOUNCE),
+                                timestamp_ms: now,
+                                payload: None,
+                                source_addr: Some(addr.to_string()),
+                                device_name,
+                            };
+                            let _ = read_state.event_tx.send(event);
+                        } else if let Some(mut event) = decode_event_frame(&frame, &addr) {
+                            {
+                                let peers = read_state.peers.read().await;
+                                if let Some(peer) = peers.get(&addr) {
+                                    event.device_name = peer.name.clone();
+                                }
+                            }
+                            eprintln!(
+                                "[events] {} from {}: {:?}",
+                                event.event, addr, event.payload
+                            );
+                            let _ = read_state.event_tx.send(event);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[events] read error from {}: {}", addr, e);
+                    break;
+                }
+            }
+        }
+    });
+
+    let write_handle = tokio::spawn(async move {
+        while let Some(frame) = cmd_rx.recv().await {
+            if writer.write_all(&frame).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    tokio::select! {
+        _ = read_handle => {}
+        _ = write_handle => {}
+    }
+
+    {
+        let mut peers = state.peers.write().await;
+        peers.remove(&addr);
+    }
+    eprintln!("[events] sensor disconnected: {}", addr);
+}
+
+/// Decode an R2-WIRE event frame into a DashboardEvent
+fn decode_event_frame(frame: &[u8], addr: &SocketAddr) -> Option<DashboardEvent> {
+    if frame.len() < 7 {
+        return None;
+    }
+
+    let _msg_type = frame[0];
+    let _msg_id = ((frame[1] as u16) << 8) | (frame[2] as u16);
+    let event_hash = ((frame[3] as u32) << 24)
+        | ((frame[4] as u32) << 16)
+        | ((frame[5] as u32) << 8)
+        | (frame[6] as u32);
+
+    let payload_bytes = &frame[7..];
+
+    let payload = if !payload_bytes.is_empty() {
+        decode_cbor_payload(payload_bytes).map(|p| remap_payload(event_hash, p))
+    } else {
+        None
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+
+    Some(DashboardEvent {
+        event: event_name(event_hash).to_string(),
+        hash: format!("0x{:08X}", event_hash),
+        timestamp_ms: now,
+        payload,
+        source_addr: Some(addr.to_string()),
+        device_name: None,
+    })
+}
+
+/// Decode CBOR payload into JSON
+fn decode_cbor_payload(data: &[u8]) -> Option<serde_json::Value> {
+    let mut decoder = r2_cbor::Decoder::new(data);
+    cbor_to_json(&mut decoder).ok()
+}
+
+/// Recursively convert CBOR items to serde_json::Value
+fn cbor_to_json(decoder: &mut r2_cbor::Decoder) -> Result<serde_json::Value, ()> {
+    match decoder.next().map_err(|_| ())? {
+        r2_cbor::Item::UInt(v) => Ok(serde_json::Value::Number(v.into())),
+        r2_cbor::Item::NegInt(v) => Ok(serde_json::Value::Number(v.into())),
+        r2_cbor::Item::Bytes(b) => {
+            Ok(serde_json::Value::String(hex::encode(b)))
+        }
+        r2_cbor::Item::Text(s) => {
+            Ok(serde_json::Value::String(String::from_utf8_lossy(s).into_owned()))
+        }
+        r2_cbor::Item::Array(n) => {
+            let mut arr = Vec::new();
+            for _ in 0..n {
+                arr.push(cbor_to_json(decoder)?);
+            }
+            Ok(serde_json::Value::Array(arr))
+        }
+        r2_cbor::Item::Map(n) => {
+            let mut map = serde_json::Map::new();
+            for _ in 0..n {
+                let key = cbor_to_json(decoder)?;
+                let val = cbor_to_json(decoder)?;
+                let key_str = match key {
+                    serde_json::Value::String(s) => s,
+                    serde_json::Value::Number(n) => n.to_string(),
+                    other => other.to_string(),
+                };
+                map.insert(key_str, val);
+            }
+            Ok(serde_json::Value::Object(map))
+        }
+        r2_cbor::Item::Bool(b) => Ok(serde_json::Value::Bool(b)),
+        r2_cbor::Item::Null => Ok(serde_json::Value::Null),
+        r2_cbor::Item::Float16Raw(bits) => {
+            let f = f32::from_bits(half_to_f32_bits(bits)) as f64;
+            Ok(serde_json::Number::from_f64(f)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null))
+        }
+        r2_cbor::Item::Float32(f) => {
+            Ok(serde_json::Number::from_f64(f as f64)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null))
+        }
+        r2_cbor::Item::Float64(f) => {
+            Ok(serde_json::Number::from_f64(f)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null))
+        }
+    }
+}
+
+/// Convert IEEE 754 half-precision (16-bit) to single-precision (32-bit) bits
+fn half_to_f32_bits(h: u16) -> u32 {
+    let sign = (h >> 15) as u32;
+    let exp = ((h >> 10) & 0x1F) as u32;
+    let mant = (h & 0x3FF) as u32;
+
+    if exp == 0 {
+        if mant == 0 {
+            sign << 31
+        } else {
+            let mut e = 0u32;
+            let mut m = mant;
+            while (m & 0x400) == 0 {
+                m <<= 1;
+                e += 1;
+            }
+            (sign << 31) | ((127 - 15 - e) << 23) | ((m & 0x3FF) << 13)
+        }
+    } else if exp == 31 {
+        (sign << 31) | (0xFF << 23) | (mant << 13)
+    } else {
+        (sign << 31) | ((exp + 112) << 23) | (mant << 13)
+    }
+}
+
+/// Hex encoding helper (no external crate needed)
+mod hex {
+    pub fn encode(data: &[u8]) -> String {
+        data.iter().map(|b| format!("{:02x}", b)).collect()
+    }
+}

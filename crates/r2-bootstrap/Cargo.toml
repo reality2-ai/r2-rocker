@@ -1,0 +1,24 @@
+[package]
+name = "r2-bootstrap"
+version = "0.1.0"
+edition = "2021"
+description = "R2 bootstrap tool — discovers sensors via BLE, offers WiFi, validates TCP R2-WIRE session"
+
+[lib]
+name = "r2_bootstrap"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+r2-core = { path = "../r2-core", features = ["alloc"] }
+r2-wire = { path = "../r2-wire" }
+r2-fnv = { path = "../r2-fnv" }
+r2-cbor = { path = "../r2-cbor" }
+bluer = { version = "0.17", features = ["full"] }
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"

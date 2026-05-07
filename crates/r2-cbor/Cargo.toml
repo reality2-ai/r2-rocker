@@ -1,0 +1,17 @@
+[package]
+name = "r2-cbor"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "R2-CBOR: Constrained CBOR encoding for Reality2 (no_std, zero-allocation)"
+readme = "SPEC.md"
+repository = "https://github.com/reality2-ai/r2-core"
+keywords = ["cbor", "encoding", "iot", "mesh", "no-std"]
+categories = ["no-std", "embedded", "encoding"]
+
+[features]
+default = []
+std = []
+
+[dev-dependencies]
+serde_json = "1.0"

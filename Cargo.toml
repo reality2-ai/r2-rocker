@@ -1,0 +1,28 @@
+# r2-rocker workspace.
+# firmware/esp32-s3 is excluded — it has its own xtensa target and
+# rust-toolchain (esp), and integrating it into the host workspace
+# breaks `cargo build` for non-firmware crates.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/r2-fnv",
+    "crates/r2-cbor",
+    "crates/r2-wire",
+    "crates/r2-core",
+    "crates/r2-bootstrap",
+    "dashboard",
+    "tools/r2-rocker-tg",
+]
+exclude = [
+    "firmware/esp32-s3",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/reality2-roycdavies/r2-rocker"
+
+[profile.release]
+strip = true
+lto = true

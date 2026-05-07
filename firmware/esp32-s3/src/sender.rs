@@ -29,7 +29,17 @@ const RECONNECT_BACKOFF_MS_INIT: u64 = 1_000;
 const RECONNECT_BACKOFF_MS_MAX: u64 = 30_000;
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-const FW_VER: &str = concat!(env!("CARGO_PKG_VERSION"), " (sim)");
+/// Identifies this exact build on the wire — semver + git short SHA
+/// (+ "-dirty" if uncommitted) + " sim" tag while we're not driving a
+/// real ADXL355 yet. Per `SPEC-R2-ROCKER-WIRE` §3.1, this string is
+/// what the dashboard sees in `r2.sensor.announce`'s `fw_ver` field
+/// and uses to decide whether an OTA update is needed.
+const FW_VER: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "+",
+    env!("R2_GIT_SHA"),
+    " sim"
+);
 
 pub struct Sender {
     pub gateway: SocketAddr,
