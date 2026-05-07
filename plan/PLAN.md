@@ -84,7 +84,9 @@ Status: ✅ done · 🔄 in progress · ⏳ pending · ⏸ blocked
 | 5L | RGB LED state machine | ⏳ | WS2812 RMT driver + animator task. Per `HARDWARE-WIRING.md` §5 colour map. **OTA-active gets a distinct colour** (e.g. magenta cycle) to differentiate from boot's brief white flash. |
 | 6 | BLE bootstrap FSM | ⏳ | Port `tools/r2-sensor`'s FSM to ESP32-S3 with NimBLE; sensor advertises R2-BEACON, receives signed `#wifi_offer`, persists in NVS. **Retires `wifi_config.toml`.** Calm-tech endpoint. |
 | 7 | Per-sensor calibration | ⏳ | Two-position cal protocol + dashboard-side rotation matrix |
-| 8 | Multi-sensor dashboard UI | ⏳ | Grid, canvas, joint groups, pairwise differential, stress indicator, trend |
+| 8a | Devices view (fleet status) | ⏳ | Alternative dashboard view (tab/toggle vs the live charts). One card per known peer showing: hostname, online indicator, battery (mV + percent + bar), `fw_ver`, last-seen timestamp, FSM state, **virtual LED** (small DOM element animated to mirror the physical RGB LED's colour + pattern via the colour map in `HARDWARE-WIRING.md` §5; depends on Phase 5L sending FSM state in `r2.sensor.status`). Each card has a **"Update Firmware" button** that triggers `r2.dash.fw.update` (stub until Phase 9). Useful for at-a-glance operator awareness with dozens of sensors. |
+| 8b | Live charts grid + canvas | ⏳ | CSS-grid auto-fit per-peer cards; Canvas-based mini-charts (replace per-peer Plotly) so 30-sensor displays don't jank. |
+| 8c | Joint groups + pairwise differential + stress indicator + trend | ⏳ | The diagnostic view per `SPEC-R2-ROCKER-DASHBOARD` §10–§11. Joint-group editor, `Δa_lateral` plot per joint, sliding-window RMS, daily-summary trend chart. |
 | 9 | OTA + TG-signed images | ⏳ | `r2-build` push, signed binaries, SD-backed rollback |
 
 Phases 0e–0h block all coding (PROCESS rule 1 — spec before code).

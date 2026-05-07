@@ -130,6 +130,21 @@ charts updating in Chart.js. Hardware: ESP32-S3-DevKitC-1-N8R8 MAC
   sensors (each sensor has its own keypair + TG cert), just on a
   different platform.
 
+## Dashboard UX direction (Phase 8 captured intent)
+
+The dashboard grows three views (operator picks via a tab/toggle):
+
+| View | Purpose | Phase |
+|---|---|---|
+| **Live charts** | Real-time x/y/z per sensor — what we have today | (delivered in 0L) |
+| **Devices** | Fleet-status overview: per-sensor online state, battery, fw_ver, last-seen, FSM state, **virtual LED** mirroring the hardware RGB LED (colour + animation per `HARDWARE-WIRING.md` §5), and an **"Update Firmware"** button per card (stub → real OTA in Phase 9) | 8a |
+| **Joints** | Diagnostic view: pairwise differential lateral motion, stress indicator per joint, long-term trend chart | 8c |
+
+The virtual-LED is a one-line addition once Phase 5L is in: firmware
+already tracks FSM state internally for the physical LED; just include
+the state in `r2.sensor.status`. The browser's CSS animations
+(solid / pulse / heartbeat / strobe) match the physical LED 1:1.
+
 ## Lessons learned the hard way (carry these forward)
 
 * **esp-idf-sys + custom partition table**: ESP-IDF resolves
