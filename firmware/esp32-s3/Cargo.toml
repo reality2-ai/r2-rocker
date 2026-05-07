@@ -33,5 +33,12 @@ esp-idf-svc   = { version = "0.51", default-features = false, features = ["binst
 # for cross-component compat.
 ed25519-dalek = { version = "=2.1.1", default-features = false }
 
+# Phase 6: shared ESP-IDF substrate from r2-core — beacon + L2CAP +
+# wifi_prov + wifi_sta + hive_id. Excluded from the host workspace
+# (xtensa-only); built only by this firmware crate.
+r2-esp        = { path = "../../crates/r2-esp", default-features = true }
+r2-core       = { path = "../../crates/r2-core", default-features = false, features = ["alloc"] }
+r2-wire       = { path = "../../crates/r2-wire", default-features = false, features = ["alloc"] }
+
 [build-dependencies]
 embuild = { version = "0.32", features = ["espidf"] }

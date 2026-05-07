@@ -92,7 +92,28 @@ the corresponding error code (§13.1):
 12. Scan SD ring tail to determine `tail_seq` (§6.5); set the in-RAM
     `seq` counter to `tail_seq + 1`.
 13. Initialise BLE stack (NimBLE) and WiFi STA (esp-idf-svc).
-14. Decide initial state per §4.2 transition rules and enter that state.
+14. Determine the WiFi-credential source per the boot-priority order
+    in §2.1.1 below and enter the initial FSM state per §4.2.
+
+### 2.1.1 WiFi-credential boot priority
+
+On every boot the firmware SHALL resolve WiFi credentials in this order
+(matching `r2-esp::wifi_prov::load_credentials`):
+
+1. **NVS-stored credentials** (namespace `r2-rocker`, keys `wifi_ssid` +
+   `wifi_psk`). Written by a successful BLE bootstrap (§4) and persisted
+   across reboots and firmware updates. Cleared by factory reset (§3.1).
+2. **Compile-time fallback** from `wifi_config.toml`, if present at
+   build time. Dev-only; production builds SHALL omit the file (or
+   leave SSID empty), in which case this path returns `None`.
+3. **No credentials** → enter `ADVERTISING` and wait for a BLE
+   `#wifi_offer`.
+
+The presence of `wifi_config.toml` in a release build SHALL produce a
+build-time warning so the dev fallback cannot ship to deployment by
+accident. Phase 6 makes BLE the canonical path; the file is retained
+only as a workshop debugging escape hatch and SHALL be removed before
+the university handoff.
 
 ### 2.2 Self-test acceptance
 
@@ -142,7 +163,22 @@ const TG_PUB_KEY: [u8; 32] = *include_bytes!("../trust_keys/tg_pub.bin");
 (Path relative to the firmware crate root.) The TG cert (if used) is
 embedded similarly. Build fails if `trust_keys/tg_pub.bin` is missing.
 
-### 3.3 Announce signature
+### 3.3 R2-BEACON class identifier
+
+The firmware SHALL advertise the canonical class string
+
+```
+nz.ac.auckland.rocker.sensor   →   FNV-1a-32 hash 0x6A3B0860
+```
+
+in its R2-BEACON legacy AD payload (R2-BEACON §7.3). The hash is what
+the dashboard's bootstrap loop matches against (cross-ref
+`SPEC-R2-ROCKER-DASHBOARD.md` §6.3). Both ends MUST agree on the same
+string; the FNV-1a-32 derivation is deterministic and verifiable per
+R2-FNV. Changing this string is a wire-breaking change and requires a
+synchronised update of firmware + dashboard + any vendored r2-bootstrap.
+
+### 3.4 Announce signature
 
 On TCP connect to the dashboard, the firmware shall transmit
 `r2.sensor.announce` (per WIRE §3.1) with `sig` computed as:
@@ -195,33 +231,50 @@ underlying state but do not change the underlying state.
 ### 4.2 Transitions
 
 ```
-                  POWER ON
-                     │
-                     ▼
-                  ┌───────┐
-                  │ IDLE  │
-                  └───┬───┘
-       ┌─────────────┴─────────────┐
-       │ last_acked > 0 &&         │ otherwise
-       │ gateway reachable in 3 s  │
-       ▼                           ▼
-  ┌─────────────┐              ┌──────────────┐
-  │ STREAMING_  │              │ ADVERTISING  │
-  │ LIVE        │              └──────┬───────┘
-  └─────────────┘                     │ L2CAP connect
-       ▲                              ▼
-       │                       ┌──────────────┐
-       │                       │ BLE_CONNECTED│
-       │                       └──────┬───────┘
-       │                              │ valid #wifi_offer
-       │                              ▼
-       │                       ┌──────────────────┐
-       │       TCP up + announce│ WIFI_CONNECTING │
-       └──────────────────────── └────────┬───────┘
-                                          │ timeout / fail
-                                          ▼
-                                   (back to ADVERTISING)
+                            POWER ON
+                               │
+                               ▼
+                          ┌──────────┐
+                          │   IDLE   │   (boot complete; §2.1)
+                          └────┬─────┘
+                               │ resolve creds per §2.1.1
+              ┌────────────────┼────────────────┐
+              │                │                │
+       creds in NVS    wifi_config.toml      no creds
+              │                │                │
+              ▼                ▼                ▼
+        try the resolved creds          ┌──────────────┐
+        with a 3 s timeout              │ ADVERTISING  │
+              │                          └──────┬───────┘
+       ┌──────┴─────┐                           │ L2CAP connect
+       │            │                           ▼
+   success       fail                    ┌──────────────┐
+       │            │                    │ BLE_CONNECTED│
+       │            └────────────────►   └──────┬───────┘
+       │                                        │ valid #wifi_offer
+       ▼                                        ▼
+  ┌─────────────┐                       ┌──────────────────┐
+  │ STREAMING_  │ ◄──────────────────── │ WIFI_CONNECTING  │
+  │ LIVE        │  TCP up + announce    │ (persists to NVS │
+  └─────────────┘                       │  on success)     │
+       ▲                                └────────┬─────────┘
+       │                                         │ timeout / fail
+       │                                         ▼
+       └────────────────────────────► (back to ADVERTISING)
 ```
+
+Persistence rules:
+
+* `WIFI_CONNECTING` SHALL write the accepted SSID + PSK to NVS keys
+  `wifi_ssid` + `wifi_psk` (namespace `r2-rocker`) on the **first**
+  successful TCP+announce round-trip — not before. This avoids
+  persisting a working WiFi association that happens to be unable to
+  reach a dashboard.
+* On any subsequent boot, those NVS creds become the §2.1.1 first-tier
+  candidate; ADVERTISING is skipped unless they fail.
+* A factory reset (§3.1, via `r2.dash.reset {factory: true}` OR a long
+  RESET button hold) clears `wifi_ssid` + `wifi_psk` along with the
+  device key, forcing a fresh BLE bootstrap on the next boot.
 
 Additional transitions:
 

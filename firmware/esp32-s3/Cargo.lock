@@ -421,6 +421,7 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer",
  "crypto-common",
+ "subtle",
 ]
 
 [[package]]
@@ -702,6 +703,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "esp32-nimble"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "053db9052cf401761b4b42af928e83bbe86542941c82a9ec4622813be53759b8"
+dependencies = [
+ "anyhow",
+ "bitflags 2.11.1",
+ "bstr",
+ "cfg-if",
+ "embassy-sync",
+ "embuild 0.33.1",
+ "esp-idf-svc",
+ "heapless",
+ "log",
+ "num_enum",
+ "once_cell",
+ "uuid",
+ "zerocopy",
+ "zerocopy-derive",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -890,6 +913,24 @@ name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
+
+[[package]]
+name = "hkdf"
+version = "0.12.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b5f8eb2ad728638ea2c7d47a21db23b7b58a72ed6a38256b8a1849f15fbbdf7"
+dependencies = [
+ "hmac",
+]
+
+[[package]]
+name = "hmac"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+dependencies = [
+ "digest",
+]
 
 [[package]]
 name = "home"
@@ -1237,6 +1278,40 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
+name = "r2-cbor"
+version = "0.1.0"
+
+[[package]]
+name = "r2-core"
+version = "0.1.0"
+dependencies = [
+ "hmac",
+ "r2-cbor",
+ "r2-fnv",
+ "r2-wire",
+ "sha2",
+]
+
+[[package]]
+name = "r2-esp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "esp-idf-svc",
+ "esp32-nimble",
+ "hkdf",
+ "hmac",
+ "log",
+ "r2-core",
+ "r2-wire",
+ "sha2",
+]
+
+[[package]]
+name = "r2-fnv"
+version = "0.1.0"
+
+[[package]]
 name = "r2-rocker-firmware"
 version = "0.1.0"
 dependencies = [
@@ -1246,7 +1321,14 @@ dependencies = [
  "esp-idf-svc",
  "libm",
  "log",
+ "r2-core",
+ "r2-esp",
+ "r2-wire",
 ]
+
+[[package]]
+name = "r2-wire"
+version = "0.1.0"
 
 [[package]]
 name = "redox_syscall"
@@ -1625,6 +1707,12 @@ name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
+
+[[package]]
+name = "uuid"
+version = "1.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ddd74a9687298c6858e9b88ec8935ec45d22e8fd5e6394fa1bd4e99a87789c76"
 
 [[package]]
 name = "version_check"
@@ -2017,6 +2105,26 @@ dependencies = [
  "serde_json",
  "unicode-xid",
  "wasmparser",
+]
+
+[[package]]
+name = "zerocopy"
+version = "0.8.48"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eed437bf9d6692032087e337407a86f04cd8d6a16a37199ed57949d415bd68e9"
+dependencies = [
+ "zerocopy-derive",
+]
+
+[[package]]
+name = "zerocopy-derive"
+version = "0.8.48"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70e3cd084b1788766f53af483dd21f93881ff30d7320490ec3ef7526d203bad4"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]

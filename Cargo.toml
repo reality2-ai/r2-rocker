@@ -25,6 +25,9 @@ members = [
 exclude = [
     "firmware/esp32-s3",
     "crates/r2-wasm",
+    # r2-esp depends on esp-idf-svc + esp32-nimble — both
+    # xtensa-esp32*-espidf only. Built by firmware/esp32-s3 via path dep.
+    "crates/r2-esp",
 ]
 
 [workspace.package]

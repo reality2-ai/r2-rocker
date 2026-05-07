@@ -1,0 +1,30 @@
+[package]
+name = "r2-esp"
+version = "0.1.0"
+edition = "2021"
+description = "Shared ESP-IDF modules for R2 firmware — OTA, WiFi, provisioning, identity, BLE L2CAP"
+
+[dependencies]
+# R2 protocol crates (no_std compatible)
+r2-core = { path = "../r2-core", features = ["alloc"] }
+r2-wire = { path = "../r2-wire", features = ["alloc"] }
+
+# ESP-IDF framework
+esp-idf-svc = { version = "0.51", features = ["binstart"] }
+
+# BLE (optional — only needed for L2CAP provisioning)
+esp32-nimble = { version = "0.11", optional = true }
+
+# Crypto: SHA-2 for OTA + R2-WIRE §6.2.1 hive_id derivation;
+# HMAC + HKDF for the §6.2.1 derivation itself.
+sha2 = { version = "0.10", default-features = false }
+hmac = { version = "0.12", default-features = false }
+hkdf = { version = "0.12", default-features = false }
+
+# Logging + errors
+log = "0.4"
+anyhow = "1"
+
+[features]
+default = ["ble"]
+ble = ["dep:esp32-nimble"]
