@@ -85,10 +85,21 @@ charts updating in Chart.js. Hardware: ESP32-S3-DevKitC-1-N8R8 MAC
   box, no TG provisioning at the OS level.
 
   When we hit Phase 5d, vendor `r2-wasm` into `wasm-viewer/` (or
-  similar), build it via `wasm-pack`, serve the static page from the
-  relay or the onsite dashboard. The current onsite dashboard
-  (Axum + JS) stays — it's the privileged producer that knows the
-  TG signing key. Remote consumers are pure browser+WASM viewers.
+  similar), build via `wasm-pack`. **The webapp itself is served from
+  static hosting (most likely GitHub Pages on this repo), NOT from
+  the relay.** The relay's only job is encrypted-frame forwarding —
+  it doesn't host the app. Three separate hosts:
+
+  | Host | Role |
+  |---|---|
+  | GitHub Pages (or CDN) | Serves the static `wasm-viewer/` bundle (HTML + JS + .wasm). Public, cacheable, updated via repo pushes. |
+  | r2-relay (e.g. $5 VPS) | Forwards TG-encrypted R2-WIRE frames between members over WSS. Sees no plaintext. |
+  | Onsite dashboard | Axum + JS, privileged producer (holds TG signing key + KeyHolder cert); receives sensor TCP locally + publishes encrypted events to relay. |
+
+  The remote browser loads the page from GitHub, then opens a WSS to
+  the relay using its enrolled TG cert. Updates to the viewer are a
+  `git push`; updates to the protocol stack are an `r2-wasm` rebuild
+  + push.
 
   **Layering inside the browser**: WASM = protocol + crypto core
   (frame decode, HMAC verify, TG key derivation, cert
