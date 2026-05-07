@@ -326,6 +326,13 @@ async fn main() {
             let ws_state = state.clone();
             move |ws| ws_raw_handler(ws, ws_state)
         }))
+        // Phase 5d: text-JSON status channel — bootstrap progress, hotspot
+        // lifecycle, server warnings. WASM viewers open this alongside
+        // /ws/raw (per SPEC-R2-ROCKER-DASHBOARD §5.3).
+        .route("/ws/status", get({
+            let ws_state = state.clone();
+            move |ws| ws_status_handler(ws, ws_state)
+        }))
         // Phase 5d: TG public key + KeyHolder enrolment endpoints.
         .route("/api/keyholder/tg-pub", get(tg_pub_handler))
         .route("/api/enrol-init", post(enrol_init_handler))
@@ -403,7 +410,10 @@ async fn bootstrap_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
         ssid: None,
         psk: None,
         scan_secs: 10,
-        target_class: "ai.reality2.device.sensor".to_string(),
+        // Reverse-DNS class identifier (R2-BEACON §4); FNV-1a-32 hashed
+        // on the wire to 0x6A3B0860. Sensor firmware (Phase 6) MUST
+        // advertise the same string. See SPEC-R2-ROCKER-DASHBOARD §6.3.
+        target_class: "nz.ac.auckland.rocker.sensor".to_string(),
     };
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<BootstrapEvent>(64);
@@ -1135,6 +1145,59 @@ async fn handle_ws_raw(mut socket: WebSocket, state: Arc<AppState>) {
         }
     }
     eprintln!("[ws/raw] viewer disconnected");
+}
+
+/// `/ws/status` — text JSON status channel for the WASM viewer.
+///
+/// Carries non-frame events: bootstrap progress (BLE scan / `#wifi_offer`
+/// send / sensor online / completion), hotspot lifecycle, server warnings.
+/// Frame data is on `/ws/raw` (binary). Per SPEC-R2-ROCKER-DASHBOARD §5.3.
+async fn ws_status_handler(
+    ws: WebSocketUpgrade,
+    state: Arc<AppState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_ws_status(socket, state))
+}
+
+async fn handle_ws_status(mut socket: WebSocket, state: Arc<AppState>) {
+    eprintln!("[ws/status] viewer connected");
+
+    // Replay the persisted bootstrap log so a late-joining viewer sees
+    // the in-flight discovery progress immediately, rather than waiting
+    // for the next event.
+    {
+        let log = state.bootstrap_log.lock().await;
+        for entry in log.iter() {
+            if socket.send(Message::Text(entry.clone().into())).await.is_err() {
+                return;
+            }
+        }
+    }
+
+    let mut rx = state.ws_broadcast_tx.subscribe();
+    loop {
+        tokio::select! {
+            inbound = socket.recv() => {
+                match inbound {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Err(_)) => break,
+                    _ => {} // browser → server reserved for future use
+                }
+            }
+            msg = rx.recv() => {
+                match msg {
+                    Ok(text) => {
+                        if socket.send(Message::Text(text.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    }
+    eprintln!("[ws/status] viewer disconnected");
 }
 
 fn encode_raw_frame_envelope(rf: &RawFrame) -> Vec<u8> {

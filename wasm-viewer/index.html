@@ -764,13 +764,46 @@ const KNOWN_EVENT_NAMES = [
 ];
 
 async function bootstrapHive() {
-  await init();
+  try {
+    await init();
+  } catch (err) {
+    console.error('[hive] WASM init FAILED:', err);
+    document.getElementById('wsStatus').textContent = 'WASM init failed (see console)';
+    return;
+  }
   console.log('[hive] r2-wasm loaded:', wasmVersion());
+  console.log('[hive] hash table:');
   for (const name of KNOWN_EVENT_NAMES) {
     const hash = wasmFnv1a32(new TextEncoder().encode(name)) >>> 0;
     HASH_TO_NAME.set(hash, name);
+    console.log('  0x' + hash.toString(16).padStart(8, '0'), name);
   }
+  console.log('[hive] connecting to /ws/raw …');
   connectRaw();
+  console.log('[hive] connecting to /ws/status …');
+  connectStatus();
+}
+
+let statusWs;
+function connectStatus() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  statusWs = new WebSocket(`${proto}//${location.host}/ws/status`);
+  statusWs.onopen = () => console.log('[hive] /ws/status open');
+  statusWs.onclose = () => {
+    console.log('[hive] /ws/status closed; retry in 2 s');
+    setTimeout(connectStatus, 2000);
+  };
+  statusWs.onerror = (e) => console.warn('[hive] /ws/status error', e);
+  statusWs.onmessage = (e) => {
+    if (typeof e.data !== 'string') return;
+    let msg;
+    try { msg = JSON.parse(e.data); }
+    catch (err) { console.warn('[hive] bad status JSON:', e.data); return; }
+    if (msg.type === 'bootstrap') {
+      handleBootstrapEvent(msg);
+    }
+    // Future: hotspot, server_error, etc. (SPEC-R2-ROCKER-DASHBOARD §5.3)
+  };
 }
 
 function connectRaw() {
@@ -817,9 +850,20 @@ function onRawFrame(buf) {
 
   const eventHash = decoded.event_hash >>> 0;
   const eventName = HASH_TO_NAME.get(eventHash) || 'unknown';
-  const payload = decoded.payload && decoded.payload.length
-    ? remapPayload(eventName, decodeCbor(decoded.payload))
+  // serde-wasm-bindgen serialises Vec<u8> as a JS Array (not Uint8Array)
+  // — coerce so our CBOR decoder's DataView/subarray calls work.
+  let payloadBytes = decoded.payload;
+  if (payloadBytes && !(payloadBytes instanceof Uint8Array)) {
+    payloadBytes = new Uint8Array(payloadBytes);
+  }
+  const payload = payloadBytes && payloadBytes.length
+    ? remapPayload(eventName, decodeCbor(payloadBytes))
     : null;
+  if (window.__r2_debug_frames) {
+    console.log('[hive frame]', src, eventName,
+                '0x' + eventHash.toString(16),
+                'payload:', payload);
+  }
 
   const msg = {
     event: eventName,
@@ -1044,6 +1088,8 @@ function handleAcceleration(msg, sensor) {
   }
 
   if (runState !== 'rocking') return;
+  // Chart is hidden on the Devices tab — skip all chart work when not Live.
+  if (currentView !== 'live') return;
 
   const label = new Date(msg.timestamp_ms).toLocaleTimeString('en-NZ', {
     hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit'

@@ -311,7 +311,8 @@ whichever occurs first (per WIRE §4.1).
 
 | Route | Method | Purpose |
 |---|---|---|
-| `/` | GET | Serve the SPA (HTML + JS + CSS bundle) |
+| `/` | GET | Legacy SPA bundle (server-decoded; deprecated, see §5.5) |
+| `/v/*` | GET | WASM viewer bundle — `wasm-viewer/` static tree (HTML + JS + `pkg/` WASM); the canonical browser frontend per Phase 5d |
 | `/api/peers` | GET | Current peers (snapshot) |
 | `/api/peers/:pk` | PATCH | Update label/role/joint assignment |
 | `/api/joints` | GET, POST, PATCH, DELETE | Manage joint definitions |
@@ -320,46 +321,77 @@ whichever occurs first (per WIRE §4.1).
 | `/api/calibration/:pk/compute` | POST | Compute R from stored g_A/g_B |
 | `/api/stream/:pk/start` | POST `{rate_hz, range}` | Forward to sensor |
 | `/api/stream/:pk/stop` | POST | Forward to sensor |
-| `/api/discover` | POST | Trigger BLE discovery (§6) |
+| `/api/bootstrap` | POST | Trigger BLE discovery + bootstrap loop (§6); re-press cancels and restarts |
+| `/api/bootstrap/status` | GET | `{running: bool, log: [...]}` snapshot |
 | `/api/ota` | POST `{pk, url, sha256}` | Trigger OTA (§13) |
 | `/api/reset/:pk` | POST `{factory: bool}` | Forward to sensor |
-| `/ws` | WebSocket | Live event stream to browser |
+| `/ws` | WebSocket | Legacy server-decoded event stream (deprecated, see §5.5) |
+| `/ws/raw` | WebSocket | **Binary** R2-WIRE frames forwarded verbatim from sensors (canonical Phase-5d transport) |
+| `/ws/status` | WebSocket | **Text JSON** status events: bootstrap progress, hotspot up/down, server-side errors |
 
 Auth: v0.1 has no auth — the dashboard is bound to localhost-or-LAN
 on a private hotspot. Future versions SHOULD add a session cookie or
 token if exposed beyond the lab network.
 
-### 5.2 WebSocket events (server → browser)
+### 5.2 `/ws/raw` — binary frame transport
 
-A single bidirectional WebSocket per browser tab. Server-pushed
-messages are JSON of the form `{type: "...", ...}`:
+The canonical Phase-5d browser data path. Each WS message is a single
+binary envelope wrapping one verbatim R2-WIRE frame from one sensor:
+
+```
+[u16 BE  src_addr_len ][src_addr  utf-8       ]
+[u32 BE  ts_ms_low32  ][u16 BE  frame_len    ][frame  raw bytes]
+```
+
+* `src_addr` is the sensor's TCP socket address (`ip:port`) as observed
+  by the dashboard — used by the browser to key per-peer state.
+* `ts_ms_low32` is the dashboard wall-clock time of receipt, low 32 bits
+  of `unix_epoch_ms`. The full upper bits are reconstructed
+  client-side from local clock context.
+* `frame` is the unmodified R2-WIRE compact frame as defined in
+  `SPEC-R2-ROCKER-WIRE` §3 — header + signed CBOR payload.
+
+Frames are forwarded **without decode, decimation, or filtering** at the
+server. The browser's vendored `r2-wasm` performs decode, signature
+verification, and rate decimation per `SPEC-R2-ROCKER-WIRE` §4.1.
+
+Browser → server: messages on `/ws/raw` are dropped silently in v0.1
+(out-of-band control will move to `/ws/status` or a dedicated channel).
+
+### 5.3 `/ws/status` — text JSON status channel
+
+Status events that are **not** R2-WIRE frames — primarily the bootstrap
+loop's progress, plus server-side conditions the operator should see.
+Each WS message is a UTF-8 JSON object of the form `{type: "...", ...}`:
 
 | Type | Payload | Description |
 |---|---|---|
-| `peer_state` | full peer snapshot | On connect, on peer add/remove, on metadata change |
-| `acceleration` | `{pk, seq, ts_ms_local, x_g, y_g, z_g, sideways_g, main_g, vertical_g}` | One sample, scaled and rotated (when calibrated) |
-| `battery` | `{pk, voltage_mv, percent, charging, ts_ms_local}` | |
-| `status` | `{pk, state, sd_pct_used, rate_hz_active, ...}` | |
-| `event_log` | `{pk, level, code, msg, ts_ms_local}` | |
-| `joint_metric` | `{joint_id, rms_g, peak_g, ts_ms_local}` | Stress indicator update |
-| `bootstrap_log` | `{stage, sensor_id, message}` | During discovery |
-| `sync_status` | `{pk, offset_ms, rtt_ms, age_s}` | Time-sync state |
+| `bootstrap` | `{event: <BootstrapEvent>}` | One step in the discovery loop; payload mirrors `r2_bootstrap::BootstrapEvent` serialised as `{kind, data}` (Log / SensorFound / SensorConnected / Done / Error), plus the synthetic `{Reset: null}` shape emitted by the dashboard on operator-triggered restart. See §6.5. |
+| `hotspot` | `{state: "up" \| "down" \| "creating", ssid?: str}` | NetworkManager hotspot lifecycle |
+| `server_error` | `{level: "warn"\|"error", message: str}` | Operator-visible server condition |
 
-`ts_ms_local` is the **dashboard's wall-clock** (not the sensor's),
-already adjusted via the per-device offset (§8). Browser plots all
-time series on the same axis.
+Browser → server messages on `/ws/status` are reserved for future
+use (subscribe / viewport_hint per §5.4); v0.1 ignores them.
 
-The dashboard SHALL apply rate limiting on WebSocket pushes for
-`acceleration` events: at most 10 samples/sec per peer per browser tab
-on the live wire, with the rest decimated. Catch-up replay is
-delivered as `acceleration_batch` events for the chart to back-fill.
+### 5.4 Browser → server messages
 
-### 5.3 Browser → server messages
+The browser does not currently send messages on `/ws/raw` or `/ws/status`.
+Future versions will use `/ws/status` for:
 
 | Type | Payload | Description |
 |---|---|---|
 | `subscribe` | `{peers: [...] \| "all"}` | Filter pushes |
 | `viewport_hint` | `{visible_peers: [...]}` | Server prioritises these |
+
+### 5.5 Legacy `/ws` (deprecated)
+
+The original dashboard.html (pre-Phase-5d) consumed a single bidirectional
+JSON WebSocket on which the **server** decoded R2-WIRE frames and pushed
+typed events (`peer_state`, `acceleration`, `battery`, `status`,
+`event_log`, `joint_metric`, `bootstrap_log`, `sync_status`). This channel
+remains live for transitional compatibility while the WASM viewer at
+`/v/` is hardened, and SHALL be removed once `/v/` reaches feature parity
+(tracked in PLAN row 5d). New consumers MUST use `/ws/raw` + `/ws/status`.
 
 ---
 
@@ -367,9 +399,12 @@ delivered as `acceleration_batch` events for the chart to back-fill.
 
 ### 6.1 Trigger
 
-Bootstrap runs on demand: the user clicks "Discover" in the UI, hitting
-`POST /api/discover`. The dashboard shall NOT auto-discover on start;
-discovery is operator-controlled.
+Bootstrap runs on demand: the user clicks "Connect Sensors" in the UI,
+hitting `POST /api/bootstrap`. The dashboard shall NOT auto-discover on
+start; discovery is operator-controlled. Re-pressing the button while a
+bootstrap loop is active SHALL cancel the in-flight task and start a
+fresh one (a `Reset` `bootstrap` event is emitted on `/ws/status` to
+signal this to viewers).
 
 ### 6.2 WiFi hotspot
 
@@ -390,10 +425,18 @@ the value embedded in `#wifi_offer.gateway_ip`.
 ### 6.3 BLE scan
 
 The dashboard shall scan for BLE advertisements matching R2-BEACON
-(per R2-BEACON spec; class hash for r2-rocker = TBD, computed at build
-time). For each unique RBID found, spawn a per-sensor bootstrap task.
+(per R2-BEACON spec). The canonical r2-rocker sensor class string is:
 
-Scan duration: 10 s; if zero matches, return an empty result to the UI.
+```
+nz.ac.auckland.rocker.sensor   →   FNV-1a-32 hash 0x6A3B0860
+```
+
+(Reverse-DNS per R2-BEACON §4 recommendation; institutional + project
+scope so a stray r2-notekeeper or generic R2 device on the air doesn't
+get pulled into the rig's bootstrap loop.) For each unique RBID found,
+spawn a per-sensor bootstrap task.
+
+Scan duration: 10 s; if zero matches, the loop sleeps 20 s and retries.
 
 ### 6.4 Per-sensor bootstrap
 
@@ -416,9 +459,22 @@ demo's lesson; each sensor filters by its own RBID).
 
 ### 6.5 Bootstrap log
 
-Every bootstrap event (BLE found, L2CAP connect, offer sent, presence
-seen, announce verified, or failure) emits a `bootstrap_log` WS message
-so the operator can watch progress.
+Every bootstrap step emits a `bootstrap` event on `/ws/status` (per §5.3)
+so the operator can watch progress. The event's inner `event` field
+serialises `r2_bootstrap::BootstrapEvent` as `{kind: <variant>, data: <payload>}`:
+
+| `kind` | `data` | When |
+|---|---|---|
+| `Log` | `"<free-text status line>"` | Generic progress (BLE adapter init, retry counters, hotspot up, etc.) |
+| `SensorFound` | `{addr: str, name: str}` | BLE beacon matched; about to connect L2CAP |
+| `SensorConnected` | `{addr: str, name: str, ip: str}` | Sensor passed TCP ping/pong validation |
+| `Done` | `{count: int}` | Scan window closed; loop continues with next retry interval |
+| `Error` | `"<message>"` | Recoverable per-sensor failure |
+
+Additionally the dashboard emits a synthetic `{Reset: null}` event (note:
+not in the `{kind, data}` shape) when the operator re-presses *Connect
+Sensors*; viewers SHOULD treat this as a signal to clear their bootstrap
+log panel before further events arrive.
 
 ---
 
