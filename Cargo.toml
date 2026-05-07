@@ -15,6 +15,8 @@ members = [
     "crates/r2-transport",
     "crates/r2-route",
     "crates/r2-engine",
+    "dashboard",
+    "tools/r2-rocker-tg",
     # r2-wasm has cdylib + wasm32-only deps (wasm-bindgen, getrandom/js).
     # It is built with `wasm-pack` from the wasm-viewer/ package, NOT
     # by the host workspace. Excluded so `cargo check --workspace` on

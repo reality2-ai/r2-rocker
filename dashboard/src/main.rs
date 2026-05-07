@@ -255,10 +255,30 @@ struct SensorPeer {
     name: Option<String>,
 }
 
+/// One R2-WIRE frame as it arrived on the TCP listener, plus metadata
+/// needed by the WASM viewer to know which peer it came from. This is
+/// the message shape pushed on the `/ws/raw` WebSocket — the WASM hive
+/// in the browser parses the envelope, then hands the inner frame to
+/// `decode_compact_frame()`.
+#[derive(Clone)]
+struct RawFrame {
+    /// Source socket address (e.g. "10.42.0.103:57768"), UTF-8.
+    src: String,
+    /// Wall-clock arrival time at the controller (ms since epoch).
+    ts_ms: u64,
+    /// The R2-WIRE compact frame bytes — same bytes the existing
+    /// JSON-decoding path is fed (no length prefix).
+    frame: Vec<u8>,
+}
+
 /// Shared application state
 struct AppState {
-    /// Broadcast channel for dashboard events → all WebSocket clients
+    /// Broadcast channel for dashboard events → all (legacy) WebSocket clients
     event_tx: broadcast::Sender<DashboardEvent>,
+    /// Phase 5d: broadcast channel for RAW R2-WIRE frames → WASM viewers.
+    /// Same source frames, different output: raw bytes wrapped in a small
+    /// envelope so the browser's WASM hive can decode in-process.
+    raw_frame_tx: broadcast::Sender<RawFrame>,
     /// Connected sensor peers (for sending commands back)
     peers: RwLock<HashMap<SocketAddr, SensorPeer>>,
     /// Broadcast channel for raw JSON strings (used for bootstrap events → WS)
@@ -275,9 +295,11 @@ async fn main() {
     let args = Args::parse();
 
     let (event_tx, _) = broadcast::channel::<DashboardEvent>(256);
+    let (raw_frame_tx, _) = broadcast::channel::<RawFrame>(1024);
     let (ws_broadcast_tx, _) = broadcast::channel::<String>(256);
     let state = Arc::new(AppState {
         event_tx: event_tx.clone(),
+        raw_frame_tx: raw_frame_tx.clone(),
         peers: RwLock::new(HashMap::new()),
         ws_broadcast_tx,
         bootstrap_running: Arc::new(AtomicBool::new(false)),
@@ -293,16 +315,40 @@ async fn main() {
     });
 
     // HTTP server with dashboard + WebSocket + bootstrap API
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/", get(dashboard_handler))
         .route("/ws", get({
             let ws_state = state.clone();
             move |ws| ws_handler(ws, ws_state)
         }))
+        // Phase 5d: raw R2-WIRE frame forwarder for WASM viewers.
+        .route("/ws/raw", get({
+            let ws_state = state.clone();
+            move |ws| ws_raw_handler(ws, ws_state)
+        }))
+        // Phase 5d: TG public key + KeyHolder enrolment endpoints.
+        .route("/api/keyholder/tg-pub", get(tg_pub_handler))
+        .route("/api/enrol-init", post(enrol_init_handler))
+        .route("/api/enrol-complete", post(enrol_complete_handler))
+        // Existing routes (legacy dashboard.html consumes /ws JSON).
         .route("/api/bootstrap", post(bootstrap_handler))
         .route("/api/bootstrap/status", get(bootstrap_status_handler))
-        .route("/api/version", get(version_handler))
-        .with_state(state.clone());
+        .route("/api/version", get(version_handler));
+
+    // Phase 5d: serve the WASM viewer (wasm-viewer/) at /v/ if the
+    // directory exists. Same-origin with the dashboard's WS endpoints
+    // means no CORS dance for the browser.
+    let viewer_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(|p| p.join("wasm-viewer"));
+    if let Some(dir) = viewer_dir.as_ref().filter(|d| d.is_dir()) {
+        app = app.nest_service("/v", tower_http::services::ServeDir::new(dir));
+        eprintln!("[viewer] mounted wasm-viewer/ at /v/  ({})", dir.display());
+    } else {
+        eprintln!("[viewer] wasm-viewer/ not found — /v/ disabled");
+    }
+
+    let app = app.with_state(state.clone());
 
     let http_addr: SocketAddr = format!("{}:{}", args.bind, args.http_port)
         .parse()
@@ -635,6 +681,21 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
 
                         let frame = frame_buf[2..2 + frame_len].to_vec();
                         frame_buf.drain(..2 + frame_len);
+
+                        // Phase 5d: broadcast the raw frame to any connected
+                        // WASM viewers BEFORE we decimate, so they get the
+                        // full stream and decimate themselves if they want
+                        // (the WASM hive owns its own throttling). The
+                        // legacy JSON path below still decimates per
+                        // ACCEL_DECIMATION.
+                        let _ = read_state.raw_frame_tx.send(RawFrame {
+                            src: addr.to_string(),
+                            ts_ms: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as u64)
+                                .unwrap_or(0),
+                            frame: frame.clone(),
+                        });
 
                         // R2-WIRE compact frame (SPEC-R2-ROCKER-WIRE §1.4):
                         // byte 0:    version|msg_type|flags
@@ -1013,4 +1074,132 @@ mod hex {
         }
         Ok(out)
     }
+}
+
+// ── Phase 5d — endpoints for the WASM viewer ──────────────────────────────
+
+/// `/ws/raw` — push raw R2-WIRE frame bytes to a connected WASM viewer.
+///
+/// Each WS binary message is one frame, wrapped in a small TLV envelope:
+///
+/// ```
+///   [u16 BE: src_addr length n]
+///   [n bytes UTF-8: src_addr]
+///   [u32 BE: ts_ms_low32]
+///   [u16 BE: frame length m]
+///   [m bytes:  R2-WIRE compact frame]
+/// ```
+///
+/// Source addr lets the browser key per-peer state. ts_ms is the
+/// controller's wall-clock arrival time (low 32 bits — wraps every
+/// ~49 days, matches the firmware's ts_ms field width). Frame is the
+/// raw R2-WIRE compact frame: header + payload, no transport prefix.
+async fn ws_raw_handler(
+    ws: WebSocketUpgrade,
+    state: Arc<AppState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_ws_raw(socket, state))
+}
+
+async fn handle_ws_raw(mut socket: WebSocket, state: Arc<AppState>) {
+    let mut rx = state.raw_frame_tx.subscribe();
+    eprintln!("[ws/raw] viewer connected");
+
+    loop {
+        tokio::select! {
+            // Inbound: viewer might send pings or commands later. For
+            // now we just drain and discard; close on close-frame.
+            inbound = socket.recv() => {
+                match inbound {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Err(_)) => break,
+                    _ => {} // ignore other inbound messages for now
+                }
+            }
+            // Outbound: a fresh raw frame from the TCP listener.
+            frame_msg = rx.recv() => {
+                match frame_msg {
+                    Ok(rf) => {
+                        let envelope = encode_raw_frame_envelope(&rf);
+                        if socket.send(Message::Binary(envelope.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    // Lagged — viewer fell behind. Skip the gap; live data
+                    // is preferred over backfill on the live wire (the
+                    // SD ring is the durability layer).
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    }
+    eprintln!("[ws/raw] viewer disconnected");
+}
+
+fn encode_raw_frame_envelope(rf: &RawFrame) -> Vec<u8> {
+    let src = rf.src.as_bytes();
+    let mut out = Vec::with_capacity(2 + src.len() + 4 + 2 + rf.frame.len());
+    out.extend_from_slice(&(src.len() as u16).to_be_bytes());
+    out.extend_from_slice(src);
+    out.extend_from_slice(&(rf.ts_ms as u32).to_be_bytes());
+    out.extend_from_slice(&(rf.frame.len() as u16).to_be_bytes());
+    out.extend_from_slice(&rf.frame);
+    out
+}
+
+/// `/api/keyholder/tg-pub` — return the trust-group public key (hex).
+///
+/// Used by browsers during enrolment to confirm they're talking to the
+/// expected TG (cross-check against the QR-code-encoded TG fingerprint).
+async fn tg_pub_handler() -> impl IntoResponse {
+    // trust_keys/tg_pub.bin sits at the repo root, two levels up from
+    // dashboard/src/main.rs.
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(|p| p.join("trust_keys/tg_pub.bin"));
+    let bytes = match path.and_then(|p| std::fs::read(p).ok()) {
+        Some(b) if b.len() == 32 => b,
+        _ => {
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "tg_pub.bin not found or wrong length",
+                    "hint": "run tools/r2-rocker-tg keygen and copy tg_pub.bin to trust_keys/",
+                })),
+            )
+                .into_response();
+        }
+    };
+    let hex_str: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    Json(serde_json::json!({
+        "tg_public_key_hex": hex_str,
+        "tg_public_key_len": 32,
+    }))
+    .into_response()
+}
+
+/// `/api/enrol-init` — KeyHolder generates a one-time join token.
+/// **Stub** until Phase 5d-enrol; returns 501 NotImplemented for now.
+/// When implemented: returns `{ token, qr_payload, expires_at }`.
+async fn enrol_init_handler() -> impl IntoResponse {
+    (
+        axum::http::StatusCode::NOT_IMPLEMENTED,
+        Json(serde_json::json!({
+            "error": "enrolment not yet implemented",
+            "phase": "5d-enrol",
+        })),
+    )
+}
+
+/// `/api/enrol-complete` — browser submits its public key + token; KeyHolder
+/// verifies, issues a TG-signed device cert. **Stub** until Phase 5d-enrol.
+async fn enrol_complete_handler() -> impl IntoResponse {
+    (
+        axum::http::StatusCode::NOT_IMPLEMENTED,
+        Json(serde_json::json!({
+            "error": "enrolment not yet implemented",
+            "phase": "5d-enrol",
+        })),
+    )
 }

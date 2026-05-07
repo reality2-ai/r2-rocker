@@ -21,27 +21,32 @@ page that confirms the WASM pipeline works end-to-end.
 ## Build
 
 The WASM bundle is built from [`../crates/r2-wasm`](../crates/r2-wasm)
-via `wasm-pack`:
+via `wasm-pack`, with `--out-dir` pointing back here so the viewer
+is a self-contained deployable:
 
 ```bash
-wasm-pack build crates/r2-wasm --target web --release
+wasm-pack build crates/r2-wasm --target web --release --out-dir ../../wasm-viewer/pkg
 ```
 
-Output lands at `crates/r2-wasm/pkg/`. The HTML in this directory
-imports from there directly (`../crates/r2-wasm/pkg/r2_wasm.js`).
+Output lands at `wasm-viewer/pkg/`. The HTML in this directory
+imports from `./pkg/r2_wasm.js`.
 
 ## Run the smoke test
 
 The page must be served over HTTP (browsers refuse to load WASM from
-`file://` URLs by default). Any static-file server in this repo's
-root will do:
+`file://` URLs by default). The onsite-controller dashboard mounts
+this directory at `/v/` (Phase 5d step 3) so once the dashboard is
+running it's reachable at:
+
+```
+http://localhost:8080/v/
+```
+
+For standalone development without the dashboard, any static-file
+server in this directory works:
 
 ```bash
-# Python's built-in works fine for testing:
-python3 -m http.server 8090
-
-# Then open:
-#   http://localhost:8090/wasm-viewer/
+python3 -m http.server 8090   # then http://localhost:8090/
 ```
 
 You should see five rows of green ticks: load status, version,

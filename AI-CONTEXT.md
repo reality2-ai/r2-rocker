@@ -234,6 +234,12 @@ charts updating in Chart.js. Hardware: ESP32-S3-DevKitC-1-N8R8 MAC
   Phase 5d, study notekeeper's enrolment flow + per-device cert
   management; we inherit the proven UX rather than designing fresh.
 
+  **Prior art note.** A generic trust-group management tool was
+  attempted earlier in the R2 project but never completed. We
+  shouldn't try to reinvent it — `r2-notekeeper` is the working
+  reference for joining + revocation + per-device cert state, and
+  that's what to crib from for r2-rocker's Phase 5d-enrol.
+
 * **Each remote browser is its own enrolled TG member** — not a copy
   of the dashboard's keys. Per `r2-trust` SPEC §2, each browser
   generates its own Ed25519 keypair on first run (persisted in
