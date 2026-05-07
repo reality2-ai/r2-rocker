@@ -81,10 +81,17 @@ fn event_name(hash: u32) -> &'static str {
     }
 }
 
+/// ADXL355 raw-LSB → g conversion, per the datasheet at ±2 g range.
+/// Used by the server-side payload remap so the browser sees g-values
+/// directly. When we add per-frame range tagging (WIRE §3.2 key 10),
+/// switch to indexing this by the announced range.
+const LSB_PER_G_AT_2G: f64 = 256_000.0;
+
 /// Server-side remap of integer-keyed CBOR payloads into named-key JSON
 /// per `SPEC-R2-ROCKER-WIRE.md`. The browser expects friendly key names
 /// ({"x":42}) rather than {"2":42} so this is where the per-event
-/// schema knowledge lives.
+/// schema knowledge lives. For acceleration, we also scale raw ADXL355
+/// LSB values to g-units here so the chart code stays simple.
 fn remap_payload(event_hash: u32, raw: serde_json::Value) -> serde_json::Value {
     use serde_json::{Map, Value};
     let obj = match raw {
@@ -93,8 +100,25 @@ fn remap_payload(event_hash: u32, raw: serde_json::Value) -> serde_json::Value {
     };
     let take = |m: &Map<String, Value>, k: &str| -> Option<Value> { m.get(k).cloned() };
     let mut out = Map::new();
+
+    // ── Acceleration: scale + rename ─────────────────────────────────────
+    if event_hash == ACCELERATION {
+        let scale = |v: Option<&Value>| -> Value {
+            v.and_then(|x| x.as_i64())
+                .map(|raw_lsb| (raw_lsb as f64 / LSB_PER_G_AT_2G))
+                .and_then(|g| serde_json::Number::from_f64(g).map(Value::Number))
+                .unwrap_or(Value::Null)
+        };
+        if let Some(v) = take(&obj, "0") { out.insert("seq".into(), v); }
+        if let Some(v) = take(&obj, "1") { out.insert("ts_ms".into(), v); }
+        out.insert("x".into(), scale(obj.get("2")));
+        out.insert("y".into(), scale(obj.get("3")));
+        out.insert("z".into(), scale(obj.get("4")));
+        if let Some(v) = take(&obj, "10") { out.insert("range".into(), v); }
+        return Value::Object(out);
+    }
+
     let map_keys: &[(&str, &str)] = match event_hash {
-        ACCELERATION => &[("0", "seq"), ("1", "ts_ms"), ("2", "x"), ("3", "y"), ("4", "z")],
         BATTERY      => &[("0", "voltage_mv"), ("1", "percent"), ("2", "charging"), ("3", "ts_ms"), ("10", "temp_c")],
         SENSOR_ANNOUNCE => &[
             ("0", "device_pk"),

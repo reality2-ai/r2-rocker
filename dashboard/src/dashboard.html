@@ -600,7 +600,8 @@ function handleEvent(msg) {
   const sensor = msg.source_addr ? getOrCreateSensor(msg.source_addr) : null;
 
   switch (msg.event) {
-    case 'acceleration':
+    case 'r2.sensor.acceleration':
+    case 'acceleration': // legacy M10 schema
       if (sensor) {
         if (msg.device_name) setDeviceName(sensor, msg.device_name);
         handleAcceleration(msg, sensor);
@@ -780,7 +781,7 @@ function addLog(msg) {
   let valueStr = '';
   if (msg.event === 'sensor.connected' && msg.device_name) {
     valueStr = msg.device_name;
-  } else if (msg.payload && msg.event === 'acceleration') {
+  } else if (msg.payload && (msg.event === 'r2.sensor.acceleration' || msg.event === 'acceleration')) {
     const x = msg.payload.x ?? 0, y = msg.payload.y ?? 0, z = msg.payload.z ?? 0;
     valueStr = `x=${x.toFixed(3)} y=${y.toFixed(3)} z=${z.toFixed(3)}`;
   } else if (msg.payload) {
