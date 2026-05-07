@@ -90,6 +90,20 @@ charts updating in Chart.js. Hardware: ESP32-S3-DevKitC-1-N8R8 MAC
   (Axum + JS) stays — it's the privileged producer that knows the
   TG signing key. Remote consumers are pure browser+WASM viewers.
 
+* **Each remote browser is its own enrolled TG member** — not a copy
+  of the dashboard's keys. Per `r2-trust` SPEC §2, each browser
+  generates its own Ed25519 keypair on first run (persisted in
+  IndexedDB), gets a TG-signed device certificate via a one-time
+  enrolment flow (operator presents a join code on the onsite
+  dashboard's UI; the browser submits it back along with its public
+  key; the dashboard's TG KeyHolder issues a cert binding device_pk
+  to the TG with role + expiry). Browser then presents that cert
+  when subscribing to the relay. Cert revocation lives with the TG
+  KeyHolder (onsite). This means: stolen laptop → revoke its cert,
+  no need to re-key the whole TG. Same trust semantics as the
+  sensors (each sensor has its own keypair + TG cert), just on a
+  different platform.
+
 ## Lessons learned the hard way (carry these forward)
 
 * **esp-idf-sys + custom partition table**: ESP-IDF resolves
