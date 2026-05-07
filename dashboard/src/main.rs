@@ -145,14 +145,17 @@ fn remap_payload(event_hash: u32, raw: serde_json::Value) -> serde_json::Value {
             return Value::Object(obj);
         }
     };
+    let mut consumed: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for (k_int, k_named) in map_keys {
         if let Some(v) = take(&obj, k_int) {
             out.insert((*k_named).to_string(), v);
+            consumed.insert(*k_int);
         }
     }
-    // Preserve any unmapped keys (forwards-compat per WIRE §1.3).
+    // Preserve any unmapped keys (forwards-compat per WIRE §1.3) — but
+    // skip the integer keys we already turned into named ones.
     for (k, v) in obj {
-        if !out.contains_key(&k) {
+        if !consumed.contains(k.as_str()) {
             out.insert(k, v);
         }
     }
@@ -623,27 +626,39 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
                         let frame = frame_buf[2..2 + frame_len].to_vec();
                         frame_buf.drain(..2 + frame_len);
 
-                        let event_hash = if frame.len() >= 7 {
-                            Some(((frame[3] as u32) << 24)
-                                | ((frame[4] as u32) << 16)
-                                | ((frame[5] as u32) << 8)
-                                | (frame[6] as u32))
+                        // R2-WIRE compact frame (SPEC-R2-ROCKER-WIRE §1.4):
+                        // byte 0:    version|msg_type|flags
+                        // byte 1:    ttl|k
+                        // bytes 2-3: msg_id (BE u16)
+                        // bytes 4-7: event_hash (BE u32)
+                        // bytes 8-11: target (BE u32)
+                        // bytes 12+: payload
+                        let event_hash = if frame.len() >= 8 {
+                            Some(((frame[4] as u32) << 24)
+                                | ((frame[5] as u32) << 16)
+                                | ((frame[6] as u32) << 8)
+                                | (frame[7] as u32))
                         } else {
                             None
                         };
 
                         if event_hash == Some(SENSOR_ANNOUNCE) {
-                            let payload = if frame.len() > 7 {
-                                decode_cbor_payload(&frame[7..])
+                            let payload = if frame.len() > 12 {
+                                decode_cbor_payload(&frame[12..])
+                                    .map(|p| remap_payload(SENSOR_ANNOUNCE, p))
                             } else {
                                 None
                             };
+                            // Our spec calls the friendly label "hostname" (per
+                            // SPEC-R2-ROCKER-WIRE §3.1 key 1); the legacy M10
+                            // schema used "name". Try both.
                             let device_name = payload.as_ref()
-                                .and_then(|p| p.get("name"))
+                                .and_then(|p| p.get("hostname").or_else(|| p.get("name")))
                                 .and_then(|n| n.as_str())
                                 .map(|s| s.to_string());
 
-                            eprintln!("[events] sensor.announce from {}: {:?}", addr, device_name);
+                            eprintln!("[events] sensor.announce from {}: name={:?} payload={:?}",
+                                      addr, device_name, payload);
 
                             if let Some(ref name_str) = device_name {
                                 let mut peers = read_state.peers.write().await;
@@ -660,7 +675,10 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
                                 event: "sensor.connected".to_string(),
                                 hash: format!("0x{:08X}", SENSOR_ANNOUNCE),
                                 timestamp_ms: now,
-                                payload: None,
+                                // Pass the announce payload through so the browser
+                                // can display fw_ver / device_pk / boot_ts_ms.
+                                // Required for OTA decision logic later.
+                                payload: payload.clone(),
                                 source_addr: Some(addr.to_string()),
                                 device_name,
                             };
@@ -714,14 +732,26 @@ fn decode_event_frame(frame: &[u8], addr: &SocketAddr) -> Option<DashboardEvent>
         return None;
     }
 
-    let _msg_type = frame[0];
-    let _msg_id = ((frame[1] as u16) << 8) | (frame[2] as u16);
-    let event_hash = ((frame[3] as u32) << 24)
-        | ((frame[4] as u32) << 16)
-        | ((frame[5] as u32) << 8)
-        | (frame[6] as u32);
+    // R2-WIRE compact frame (12-byte fixed header, SPEC-R2-ROCKER-WIRE §1.4):
+    //   byte 0:    version|msg_type|flags
+    //   byte 1:    ttl|k
+    //   bytes 2-3: msg_id (BE u16)
+    //   bytes 4-7: event_hash (BE u32)
+    //   bytes 8-11: target (BE u32)
+    //   bytes 12+: payload
+    if frame.len() < 12 {
+        return None;
+    }
+    let _byte0 = frame[0];
+    let _byte1 = frame[1];
+    let _msg_id = ((frame[2] as u16) << 8) | (frame[3] as u16);
+    let event_hash = ((frame[4] as u32) << 24)
+        | ((frame[5] as u32) << 16)
+        | ((frame[6] as u32) << 8)
+        | (frame[7] as u32);
+    // bytes 8-11 = target (broadcast 0 for r2-rocker — see firmware/src/wire.rs)
 
-    let payload_bytes = &frame[7..];
+    let payload_bytes = &frame[12..];
 
     let payload = if !payload_bytes.is_empty() {
         decode_cbor_payload(payload_bytes).map(|p| remap_payload(event_hash, p))
