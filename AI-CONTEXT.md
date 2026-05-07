@@ -130,6 +130,23 @@ charts updating in Chart.js. Hardware: ESP32-S3-DevKitC-1-N8R8 MAC
   sensors (each sensor has its own keypair + TG cert), just on a
   different platform.
 
+## Dashboard scaling target (binding)
+
+**1 sensor today, 20+ sensors at full deployment.** Every Phase 8
+deliverable shall stay smooth + readable across that range:
+
+* CSS grid auto-fit (cards reflow from 1 column → 6+ columns).
+* Cards collapse to summary tiles when count > ~8 visible.
+* Canvas-based mini-charts (Plotly per-peer ≠ scalable).
+* Offscreen cards pause their chart loops.
+* Health-summary header shows aggregate state at a glance.
+* Sorting + filtering (by joint, by status, by needs-update).
+* Virtualised list past ~30 peers if browser jank shows.
+
+Confirmed by user 2026-05-07: "in time there could be 20 or so, so
+the dashboard has to expand automatically." Per
+`SPEC-R2-ROCKER-DASHBOARD` §12.1.
+
 ## Dashboard UX direction (Phase 8 captured intent)
 
 The dashboard grows three views (operator picks via a tab/toggle):
