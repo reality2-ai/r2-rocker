@@ -204,13 +204,18 @@ charts updating in Chart.js. Hardware: ESP32-S3-DevKitC-1-N8R8 MAC
   verification is acknowledged as transitional — the same logic
   re-emerges in WASM during 5d, just compiled differently.
 
-  Three hosts at deployment of Phase 5d:
+  Hosts at deployment of Phase 5d:
 
   | Host | Role | Why this host |
   |---|---|---|
-  | GitHub Pages (or any static CDN) | Serves the `wasm-viewer/` bundle (HTML + JS + .wasm). Updated via `git push`. | Static hosting only — no execution, no plaintext, no secrets. |
-  | r2-relay (e.g. $5 VPS) | Forwards TG-encrypted frames between members over WSS. Sees no plaintext. | Public-internet rendezvous so two browsers / a sensor + browser can find each other across NAT. |
-  | Onsite dashboard | Axum + JS bridge between local-radio sensors and the relay. Holds TG signing key + KeyHolder role; signs `#wifi_offer`s; issues device certs to enrolling browsers. | Needs the things a browser can't do: NetworkManager AP, TCP listener for sensors, BLE bootstrap, filesystem. **Stays even when the WASM viewer model is in place** — bridges sensors to relay, but does NOT serve the remote UI. |
+  | GitHub Pages (or any static CDN) | Serves the `wasm-viewer/` bundle (HTML + JS + .wasm). Updated via `git push`. | Static hosting for the **remote** path. Public, cacheable, no execution, no plaintext, no secrets. |
+  | Onsite controller | Hosts its own copy of the same `wasm-viewer/` bundle on its HTTP server (e.g. `http://10.42.0.1:8080/`). Plus: sensor TCP listener + relay-compatible WSS forwarder + TG KeyHolder cert issuance + local data archive (Phase 5f). | Lets onsite browsers get the WebApp **without internet** — open a tablet on the hotspot, browse to the controller's IP, scan the QR from the same dashboard's "Enrol device" UI, join TG. Closed-network deployments work end-to-end. |
+  | r2-relay (e.g. $5 VPS) | Forwards TG-encrypted frames between members over WSS. Sees no plaintext. | Public-internet rendezvous so remote browsers can reach the controller across NAT. Skipped when everything's onsite on the hotspot. |
+
+  Both bundles are byte-identical (same `cargo build --target wasm32`
+  output) — operator-discretion which host the QR/link points at:
+  GitHub URL for remote viewers, controller-local URL for onsite
+  viewers. Same WebApp either way.
 
   The remote browser loads the static page from GitHub, opens a WSS
   to the relay using its enrolled TG cert, and is then an active
