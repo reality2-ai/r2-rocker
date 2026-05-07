@@ -16,3 +16,7 @@ r2-wire = { path = "../crates/r2-wire" }
 clap = { version = "4", features = ["derive"] }
 r2-bootstrap = { path = "../crates/r2-bootstrap" }
 socket2 = { version = "0.6.3", features = ["all"] }
+# Ed25519 for Phase 5b — verify the firmware's announce signature.
+# Pinned to match r2-core / firmware so cross-component compat is exact.
+ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["alloc", "fast"] }
+hex = "0.4"

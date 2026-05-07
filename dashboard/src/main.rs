@@ -667,8 +667,21 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
                                 .and_then(|n| n.as_str())
                                 .map(|s| s.to_string());
 
-                            eprintln!("[events] sensor.announce from {}: name={:?} payload={:?}",
-                                      addr, device_name, payload);
+                            // Phase 5b — Ed25519-verify the announce signature.
+                            // TOFU policy in v0.1: log-only; don't reject yet
+                            // (the legacy M10 sender doesn't sign, so a strict
+                            // policy would lock us out of mixed deployments).
+                            // Migrate to reject-on-bad-sig once all sensors
+                            // are r2-rocker-spec firmware.
+                            let sig_ok = payload
+                                .as_ref()
+                                .map(verify_announce_signature)
+                                .unwrap_or(SigStatus::NoPayload);
+
+                            eprintln!(
+                                "[events] sensor.announce from {}: name={:?} sig={:?} payload={:?}",
+                                addr, device_name, sig_ok, payload
+                            );
 
                             if let Some(ref name_str) = device_name {
                                 let mut peers = read_state.peers.write().await;
@@ -799,6 +812,96 @@ fn decode_event_frame(frame: &[u8], addr: &SocketAddr) -> Option<DashboardEvent>
     })
 }
 
+/// Result of `verify_announce_signature` — `Valid` is the only "good"
+/// state. Other variants log loudly so misconfiguration is visible.
+#[derive(Debug, Clone, Copy)]
+enum SigStatus {
+    Valid,
+    /// Signature bytes don't verify against the announced device_pk.
+    /// Means either the firmware is buggy, the network is forging
+    /// announces, or the canonical CBOR re-encoding doesn't match.
+    BadSignature,
+    /// Required field missing / wrong type. Often a legacy M10 announce
+    /// (no signature field at all) — log-and-accept under TOFU for now.
+    Malformed,
+    /// No payload at all — same as legacy.
+    NoPayload,
+}
+
+/// Phase 5b — re-encode the canonical body (keys 0..5) per
+/// SPEC-R2-ROCKER-WIRE §3.1 and Ed25519-verify the signature at key 6.
+///
+/// The firmware signs over the canonical CBOR encoding of keys 0..5.
+/// Both sides use deterministic CBOR (smallest-form heads, ascending
+/// integer keys), so a fresh encode here MUST match the firmware's
+/// signed bytes exactly.
+fn verify_announce_signature(payload: &serde_json::Value) -> SigStatus {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+    let obj = match payload.as_object() {
+        Some(o) => o,
+        None => return SigStatus::Malformed,
+    };
+
+    let hex_field = |key: &str, len: usize| -> Option<Vec<u8>> {
+        let s = obj.get(key)?.as_str()?;
+        let b = hex::decode(s).ok()?;
+        if b.len() == len { Some(b) } else { None }
+    };
+    let text_field = |key: &str| -> Option<&str> {
+        obj.get(key)?.as_str()
+    };
+    let uint_field = |key: &str| -> Option<u64> {
+        obj.get(key)?.as_u64()
+    };
+
+    let (Some(device_pk), Some(hostname), Some(fw_ver), Some(last_seq), Some(boot_ts_ms), Some(nonce), Some(sig)) = (
+        hex_field("device_pk", 32),
+        text_field("hostname"),
+        text_field("fw_ver"),
+        uint_field("last_seq"),
+        uint_field("boot_ts_ms"),
+        hex_field("nonce", 16),
+        hex_field("sig", 64),
+    ) else {
+        return SigStatus::Malformed;
+    };
+
+    // Refuse the all-zero placeholder sig that pre-Phase-5a firmware emits.
+    if sig.iter().all(|b| *b == 0) {
+        return SigStatus::Malformed;
+    }
+
+    // Re-encode the canonical body bytes. Keys MUST be in ascending order
+    // (we write 0..5 directly) and integer-keyed for byte-identical output
+    // with the firmware's inline encoder.
+    let mut body_buf = vec![0u8; 256 + hostname.len() + fw_ver.len()];
+    let mut enc = r2_cbor::Encoder::new(&mut body_buf);
+    if enc.map(6).is_err()
+        || enc.kv(0, &r2_cbor::Value::Bytes(&device_pk)).is_err()
+        || enc.kv(1, &r2_cbor::Value::Text(hostname)).is_err()
+        || enc.kv(2, &r2_cbor::Value::Text(fw_ver)).is_err()
+        || enc.kv(3, &r2_cbor::Value::UInt(last_seq)).is_err()
+        || enc.kv(4, &r2_cbor::Value::UInt(boot_ts_ms)).is_err()
+        || enc.kv(5, &r2_cbor::Value::Bytes(&nonce)).is_err()
+    {
+        return SigStatus::Malformed;
+    }
+    let body = enc.as_bytes();
+
+    let pk_arr: [u8; 32] = device_pk.as_slice().try_into().unwrap();
+    let sig_arr: [u8; 64] = sig.as_slice().try_into().unwrap();
+    let Ok(verifying_key) = VerifyingKey::from_bytes(&pk_arr) else {
+        return SigStatus::Malformed;
+    };
+    let signature = Signature::from_bytes(&sig_arr);
+    if verifying_key.verify(body, &signature).is_ok() {
+        SigStatus::Valid
+    } else {
+        SigStatus::BadSignature
+    }
+}
+
 /// Decode CBOR payload into JSON
 fn decode_cbor_payload(data: &[u8]) -> Option<serde_json::Value> {
     let mut decoder = r2_cbor::Decoder::new(data);
@@ -883,9 +986,31 @@ fn half_to_f32_bits(h: u16) -> u32 {
     }
 }
 
-/// Hex encoding helper (no external crate needed)
+/// Hex helpers (kept local to avoid pulling in the external crate just
+/// for these two functions; the `hex` 0.4 dep IS in Cargo.toml for
+/// other consumers but this local module shadows it inside main.rs).
 mod hex {
     pub fn encode(data: &[u8]) -> String {
         data.iter().map(|b| format!("{:02x}", b)).collect()
+    }
+
+    /// Decode a hex string to bytes. Accepts lowercase or uppercase. Returns
+    /// `Err(())` on any non-hex character or odd length.
+    pub fn decode(s: &str) -> Result<Vec<u8>, ()> {
+        let bytes = s.as_bytes();
+        if bytes.len() % 2 != 0 { return Err(()); }
+        let nibble = |c: u8| -> Result<u8, ()> {
+            match c {
+                b'0'..=b'9' => Ok(c - b'0'),
+                b'a'..=b'f' => Ok(c - b'a' + 10),
+                b'A'..=b'F' => Ok(c - b'A' + 10),
+                _ => Err(()),
+            }
+        };
+        let mut out = Vec::with_capacity(bytes.len() / 2);
+        for chunk in bytes.chunks_exact(2) {
+            out.push((nibble(chunk[0])? << 4) | nibble(chunk[1])?);
+        }
+        Ok(out)
     }
 }
