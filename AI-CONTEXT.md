@@ -74,47 +74,40 @@ charts updating in Chart.js. Hardware: ESP32-S3-DevKitC-1-N8R8 MAC
 
 ## Architectural commitments worth knowing
 
-* **Browser-side TG via WASM is the calm-tech endpoint** for remote
-  dashboards (Phase 5d) — not a remote Rust dashboard server. The
-  pattern is proven in `r2-notekeeper` and `anthill` (both compile
-  parts of the R2 stack to WASM via `r2-core/crates/r2-wasm/` —
-  exposes FNV, CBOR, R2-WIRE, R2-TRUST, R2-ROUTE, R2-TRANSPORT to
-  JavaScript via `wasm-bindgen`). The browser decrypts and verifies
-  TG-encrypted frames itself; the relay genuinely never sees the
-  data, and a remote site is just a laptop with a browser — no Linux
-  box, no TG provisioning at the OS level.
+* **The remote browser IS a hive — not a thin viewer of a remote
+  server.** This is the architectural model `r2-notekeeper` and
+  `anthill` already use: there is no remote Rust web server serving
+  "data" to the browser. The full R2 stack runs *inside the browser*
+  via WASM (`r2-core/crates/r2-wasm/` exposes FNV, CBOR, R2-WIRE,
+  R2-TRUST, R2-ROUTE, R2-TRANSPORT, R2-ENGINE through `wasm-bindgen`),
+  and the browser is itself a TG member: holds its own keypair +
+  TG-signed cert, decrypts + verifies frames, talks peer-to-peer
+  with other TG members through the relay.
 
-  When we hit Phase 5d, vendor `r2-wasm` into `wasm-viewer/` (or
-  similar), build via `wasm-pack`. **The webapp itself is served from
-  static hosting (most likely GitHub Pages on this repo), NOT from
-  the relay.** The relay's only job is encrypted-frame forwarding —
-  it doesn't host the app. Three separate hosts:
+  Three hosts at deployment of Phase 5d:
 
-  | Host | Role |
+  | Host | Role | Why this host |
+  |---|---|---|
+  | GitHub Pages (or any static CDN) | Serves the `wasm-viewer/` bundle (HTML + JS + .wasm). Updated via `git push`. | Static hosting only — no execution, no plaintext, no secrets. |
+  | r2-relay (e.g. $5 VPS) | Forwards TG-encrypted frames between members over WSS. Sees no plaintext. | Public-internet rendezvous so two browsers / a sensor + browser can find each other across NAT. |
+  | Onsite dashboard | Axum + JS bridge between local-radio sensors and the relay. Holds TG signing key + KeyHolder role; signs `#wifi_offer`s; issues device certs to enrolling browsers. | Needs the things a browser can't do: NetworkManager AP, TCP listener for sensors, BLE bootstrap, filesystem. **Stays even when the WASM viewer model is in place** — bridges sensors to relay, but does NOT serve the remote UI. |
+
+  The remote browser loads the static page from GitHub, opens a WSS
+  to the relay using its enrolled TG cert, and is then an active
+  member of the rocker-rig TG. Updates to the viewer = `git push`;
+  updates to the protocol stack = `r2-wasm` rebuild + push.
+
+  **Layering inside the browser** (same split as the current local
+  dashboard's server/JS split, just relocated):
+
+  | Layer | Purpose |
   |---|---|
-  | GitHub Pages (or CDN) | Serves the static `wasm-viewer/` bundle (HTML + JS + .wasm). Public, cacheable, updated via repo pushes. |
-  | r2-relay (e.g. $5 VPS) | Forwards TG-encrypted R2-WIRE frames between members over WSS. Sees no plaintext. |
-  | Onsite dashboard | Axum + JS, privileged producer (holds TG signing key + KeyHolder cert); receives sensor TCP locally + publishes encrypted events to relay. |
+  | WASM | Protocol + crypto: frame decode/encode, HMAC verify, TG key derivation (HKDF), cert validation, Ed25519 sig checks, R2-WIRE state, per-event dispatch. |
+  | Plain JavaScript | UX: DOM, Chart.js, layout, event handlers, calibration wizard, joint-group editor, the Devices view, the LED animations. |
 
-  The remote browser loads the page from GitHub, then opens a WSS to
-  the relay using its enrolled TG cert. Updates to the viewer are a
-  `git push`; updates to the protocol stack are an `r2-wasm` rebuild
-  + push.
-
-  **This is the same deployment shape as `r2-notekeeper`** — viewer
-  on GitHub Pages, relay on a small VPS, producer device(s) on the
-  user's hardware. When implementing Phase 5d, study how notekeeper
-  wires its enrolment flow and per-device cert management; we
-  inherit the proven UX rather than designing it fresh.
-
-  **Layering inside the browser**: WASM = protocol + crypto core
-  (frame decode, HMAC verify, TG key derivation, cert
-  validation, signature checks); **plain JavaScript = UX layer**
-  (DOM, layout, Chart.js, event handlers, calibration wizard,
-  joint-group editor). Same split as the current local dashboard,
-  same Chart.js + handwritten-JS style — just with WASM
-  intermediating between the WSS connection and the rendering JS
-  instead of a Rust server.
+  **Same deployment shape as `r2-notekeeper`.** When implementing
+  Phase 5d, study notekeeper's enrolment flow + per-device cert
+  management; we inherit the proven UX rather than designing fresh.
 
 * **Each remote browser is its own enrolled TG member** — not a copy
   of the dashboard's keys. Per `r2-trust` SPEC §2, each browser
