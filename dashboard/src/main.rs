@@ -255,6 +255,12 @@ struct SensorPeer {
     addr: SocketAddr,
     tx: tokio::sync::mpsc::Sender<Vec<u8>>,
     name: Option<String>,
+    /// Most-recent `r2.sensor.announce` raw R2-WIRE frame bytes,
+    /// cached so a freshly-connected /ws/raw viewer can be replayed
+    /// the announce — otherwise it never sees `fw_ver`, `device_pk`,
+    /// or `boot_ts_ms` because the announce only fires on TCP
+    /// (re)connect, which already happened before the viewer arrived.
+    last_announce: Option<Vec<u8>>,
 }
 
 /// One R2-WIRE frame as it arrived on the TCP listener, plus metadata
@@ -801,6 +807,7 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
             addr,
             tx: cmd_tx,
             name: None,
+            last_announce: None,
         });
     }
 
@@ -918,10 +925,18 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
                                 addr, device_name, sig_ok, payload
                             );
 
-                            if let Some(ref name_str) = device_name {
+                            // Cache the announce frame bytes per peer so a
+                            // /ws/raw viewer that connects later can be
+                            // replayed — otherwise it misses `fw_ver` /
+                            // `device_pk` / `boot_ts_ms` until the next
+                            // sensor reboot.
+                            {
                                 let mut peers = read_state.peers.write().await;
                                 if let Some(peer) = peers.get_mut(&addr) {
-                                    peer.name = Some(name_str.clone());
+                                    if let Some(ref name_str) = device_name {
+                                        peer.name = Some(name_str.clone());
+                                    }
+                                    peer.last_announce = Some(frame.clone());
                                 }
                             }
 
@@ -1286,6 +1301,32 @@ async fn ws_raw_handler(
 async fn handle_ws_raw(mut socket: WebSocket, state: Arc<AppState>) {
     let mut rx = state.raw_frame_tx.subscribe();
     eprintln!("[ws/raw] viewer connected");
+
+    // Replay cached announce frames per peer so a freshly-connected
+    // viewer sees `fw_ver` / `device_pk` / `boot_ts_ms` immediately,
+    // not "after the next sensor reboot." The announce only fires on
+    // TCP (re)connect, so without replay a viewer that arrives mid-
+    // session never learns these fields. Use the actual reception
+    // timestamp where we have it; fall back to "now" otherwise.
+    {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let peers = state.peers.read().await;
+        for (addr, peer) in peers.iter() {
+            if let Some(ref frame) = peer.last_announce {
+                let envelope = encode_raw_frame_envelope(&RawFrame {
+                    src: addr.to_string(),
+                    ts_ms: now_ms,
+                    frame: frame.clone(),
+                });
+                if socket.send(Message::Binary(envelope.into())).await.is_err() {
+                    return;
+                }
+            }
+        }
+    }
 
     loop {
         tokio::select! {
