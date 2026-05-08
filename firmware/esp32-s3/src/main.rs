@@ -17,11 +17,12 @@ mod sender;
 use anyhow::{anyhow, Context, Result};
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::delay::FreeRtos;
+use esp_idf_svc::hal::modem::Modem;
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::sys::{esp_restart, link_patches};
-use log::{info, warn};
+use log::{error, info, warn};
 use r2_esp::{beacon, l2cap, ota_tcp, wifi_prov, wifi_sta};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
@@ -52,10 +53,40 @@ fn main() -> Result<()> {
     // ── RGB LED (Phase 5L) ───────────────────────────────────────────
     // Onboard WS2812 on GPIO38 (DevKitC-1 v1.1, current production —
     // see HARDWARE-WIRING.md §5). Drives every state transition below.
+    // Bring this up FIRST so any error after this point can show ERROR.
     let led_handle = led::start(peripherals.rmt.channel0, peripherals.pins.gpio38)
         .context("LED init")?;
     led_handle.set(led::LedState::Boot);
 
+    // Pull out the modem for `run()`. Anything else from `peripherals`
+    // is unused right now — extract more if/when needed.
+    let modem = peripherals.modem;
+
+    // Top-level error trap — anything below sets the LED red long
+    // enough for the operator to see, then resets the chip. The
+    // bootloader's rollback partition catches a bad OTA at this
+    // point: a buggy new image whose sender never reaches its first
+    // successful frame round-trip never marks itself valid, and the
+    // next reset rolls back to the previous slot.
+    if let Err(e) = run(led_handle.clone(), modem, sysloop, nvs) {
+        error!("[FATAL] init/runtime error: {e:?}");
+        led_handle.set(led::LedState::Error);
+        FreeRtos::delay_ms(10_000);
+        unsafe { esp_restart(); }
+    }
+    Ok(())
+}
+
+/// Everything between LED-up and the L2CAP poll loop. Returning Err
+/// from any `?` here flips the LED to red and triggers a reset; an
+/// "unrecoverable" condition therefore manifests as a visible red
+/// pulse rather than a silent hang.
+fn run(
+    led_handle: led::LedHandle,
+    modem: Modem,
+    sysloop: EspSystemEventLoop,
+    nvs: EspDefaultNvsPartition,
+) -> Result<()> {
     // ── Identity (§3.1) — Ed25519 keypair, persisted to NVS. ──────────
     let identity = std::sync::Arc::new(
         identity::Identity::load_or_generate(nvs.clone())
@@ -83,7 +114,7 @@ fn main() -> Result<()> {
         Some(c) => {
             info!("[boot] WiFi credentials source: {}", c.source);
             led_handle.set(led::LedState::WifiConnecting);
-            match wifi_sta::connect(peripherals.modem, sysloop.clone(), nvs.clone(),
+            match wifi_sta::connect(modem, sysloop.clone(), nvs.clone(),
                                     &c.ssid, &c.password) {
                 Some(w) => (true, Some(w)),
                 None    => {
