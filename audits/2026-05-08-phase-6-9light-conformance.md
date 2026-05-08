@@ -32,7 +32,7 @@ scope: |
 | **R2-WIRE compact frame** | ✅ pass — 12-byte header layout, encoder + decoder agreement re-confirmed |
 | **R2-WIFI §3.4.2 `#wifi_offer`** | ✅ pass on the wire format; ⚠️ gap on signing (no Ed25519 sig in v0.1; spec requires it) |
 | **R2-BEACON §7.3 Legacy 28-byte AD** | ✅ pass on class-hash derivation; 🔍 **field layout deserves a wire-vector cross-check** when r2-esp::beacon's encoder is exercised against an external scanner |
-| **R2-BOOTSTRAP — L2CAP CoC framing** | 🔍 **spec ambiguity**: the FrameHeader byte. See Finding A below. |
+| **R2-BOOTSTRAP — L2CAP CoC framing** | ✅ pass — spec is clear at R2-BLE §5.2 + §6.4. The audit initially flagged ambiguity here; on re-read the spec text is unambiguous (Finding A walked back; the genuine improvement is library ergonomics — see Finding A revised below). |
 | **TCP OTA push protocol** | ✅ pass — protocol matches `r2-core/platforms/linux/src/ota_tcp_push.rs` byte-for-byte (project-local, not in canonical r2-specifications) |
 | **UDP presence packet** | 📋 **project-local, not in canonical r2-specifications** — recommend lifting into R2-BOOTSTRAP §X (or a new R2-PRESENCE) once the wire format settles |
 | **R2-TRUST §7 entanglement** | ⏳ **not implemented yet** — `SPEC-R2-ROCKER-BRIDGE.md` is normative; conformance gate fires when the bridge crate lands (Phase 5d-bridge.4) |
@@ -136,7 +136,8 @@ unit-tested once the test harness lands.
 
 ### 2.3 R2-BOOTSTRAP — L2CAP CoC framing
 
-**Verdict:** 🔍 **spec ambiguity surfaced — Finding A below**.
+**Verdict:** ✅ pass on the spec; library-ergonomics improvement
+identified — see revised Finding A below.
 
 `r2-bootstrap` (controller side) wraps each `#wifi_offer` frame as:
 
@@ -146,14 +147,25 @@ unit-tested once the test harness lands.
 
 `r2-esp::l2cap` (sensor side) strips the length prefix but pushes the
 *remaining bytes* (FrameHeader byte + frame) up to the application —
-which then has to know to peel off byte 0 before calling `decode_compact`.
+which then has to peel off byte 0 before calling `decode_compact`.
 We discovered this empirically when our firmware's main loop initially
 fed the whole buffer to `decode_compact` and got `event_hash=0x0d01f776`
 instead of `0x01F77656` — exactly one byte's misalignment.
 
-The fix is correct (`firmware/esp32-s3/src/main.rs` now calls
-`r2_wire::FrameHeader::decode(data[0])` then `decode_compact(&data[1..])`),
-but the question is whose responsibility this is per spec.
+The fix in our firmware (`r2_wire::FrameHeader::decode(data[0])` then
+`decode_compact(&data[1..])`) is correct *and matches what the spec
+already mandates at R2-BLE §6.4*. The audit initially read this as
+spec ambiguity — that was a misread. R2-BLE §6.4 explicitly defines
+the L2CAP CoC SDU as `Byte 0 = Fragment flag + sequence; Byte 1+ =
+R2-WIRE compact event payload`, and §5.2 nails down the byte's bit
+layout end-to-end. The spec is unambiguous.
+
+What *did* trip us up was specification topology — R2-BOOTSTRAP says
+"use L2CAP CoC for the offer" but doesn't repeat the framing layer's
+byte 0 (rightly — that's R2-BLE's domain), so a reader who jumps
+straight to the BLE-specific protocol spec without first reading the
+lower transport spec misses the framing. That's an audit-process
+note, not a spec defect.
 
 ### 2.4 UDP presence packet
 
@@ -223,40 +235,71 @@ audit vectors will likely be lifted into `r2-specifications/testing/`.
 
 ## Findings
 
-### Finding A — R2-BOOTSTRAP L2CAP framing: who owns the FrameHeader byte?
+### Finding A (revised) — Library ergonomics: every L2CAP caller hand-rolls the FrameHeader prepend
 
-**Severity:** spec ambiguity. Implementation is correct; documentation
-needs to be unambiguous.
+**Severity:** library-side improvement; **not** a spec gap.
 
-**Detail**: r2-bootstrap on the controller side prepends a one-byte
-R2-WIRE `FrameHeader` (0x00 = Complete, top bit + index = Fragment)
-before each compact frame, INSIDE the L2CAP CoC stream's length-
-prefixed framing. r2-esp::l2cap on the sensor side strips the length
-prefix and forwards the rest verbatim to the application. The
-application then has to peel the FrameHeader byte off before
-`decode_compact` will line up correctly.
+**Earlier framing of this finding was wrong.** R2-BLE §5.2 + §6.4
+already define the L2CAP CoC SDU layout unambiguously:
+`Byte 0 = FrameHeader (Fragment flag + sequence); Byte 1+ = compact
+event payload`, with §5.2 specifying the bit layout. r2-bootstrap's
+prepend pattern is exactly what the spec mandates. A clean-room
+implementer who reads R2-BLE first will get this right; an implementer
+who jumps from R2-BOOTSTRAP straight to writing transport code (which
+is what we did during Phase 6) can miss the cross-reference and
+end up with a one-byte misalignment in their decoder. That misread
+is on the reader, not the spec.
 
-This works, but is implicit:
+**The genuine improvement** is on the library side. Three call sites in
+r2-core hand-roll the same prepend pattern:
 
-* Neither R2-BOOTSTRAP nor the BLE-side spec section in
-  `r2-specifications/specs/r2-core/` makes the FrameHeader byte's
-  presence-in-the-L2CAP-stream explicit.
-* The implementation pair (r2-bootstrap encoder + r2-esp decoder)
-  agrees, but a clean-room implementer following only the public spec
-  would likely produce a decoder that misaligns by exactly one byte
-  — which is exactly what we did during Phase 6 implementation.
+```
+r2-core/tools/r2-bootstrap/src/lib.rs:558
+    let mut l2cap_payload = vec![r2_wire::FrameHeader::Complete.encode()];
+    l2cap_payload.extend_from_slice(&wifi_offer_frame);
 
-**Recommendation**: feedback for r2-specifications:
+r2-core/tools/ota-server/backend/src/ble.rs:230, 362
+    stream.write_all(&[0x00]).await?;            // FrameHeader::Complete
+    // (with a comment: "r2-demo expects [header_byte, wire_data...]")
 
-> R2-BOOTSTRAP (or whichever spec covers L2CAP-on-BLE event framing)
-> should explicitly note the wire format inside an L2CAP CoC SDU as
->
->     `[FrameHeader byte (R2-WIRE §X.Y)][R2-WIRE compact frame]`
->
-> with a note that the FrameHeader byte enables fragmentation across
-> SDU boundaries and is REQUIRED even for `Complete` (single-SDU)
-> messages so the decoder doesn't need to special-case based on
-> message size.
+r2-core/platforms/linux/src/main.rs:562
+    let mut frame = vec![wire::FrameHeader::Complete.encode()];
+    frame.extend_from_slice(&payload);
+```
+
+Each call site re-derives the same wrapper independently, with comments
+saying "the receiver expects this." There's no shared helper inside
+`r2-wire` itself.
+
+**Recommendation**: add a small pair of helpers to `r2_wire::compact`
+(or a new `r2_wire::framing`) that encode/decode the L2CAP-CoC SDU
+form:
+
+```rust
+pub fn encode_compact_for_l2cap(msg: &CompactMessage<'_>, buf: &mut [u8]) -> Result<usize, WireError> {
+    if buf.is_empty() { return Err(WireError::BufferTooSmall); }
+    buf[0] = FrameHeader::Complete.encode();
+    let n = encode_compact(msg, &mut buf[1..])?;
+    Ok(1 + n)
+}
+
+pub fn decode_compact_from_l2cap_sdu(sdu: &[u8]) -> Result<(FrameHeader, CompactMessage<'_>), WireError> {
+    if sdu.is_empty() { return Err(WireError::EmptySdu); }
+    let header = FrameHeader::decode(sdu[0]);
+    let msg = decode_compact(&sdu[1..])?;
+    Ok((header, msg))
+}
+```
+
+The four current call sites + r2-rocker's firmware then funnel through
+one library entry point. New implementations of L2CAP CoC transport
+(future browser hives, MicroPython sensors, whatever) reach for the
+helper instead of re-deriving R2-BLE §6.4. **No spec change needed**;
+the spec already says what the bytes are. The improvement is keeping
+the implementations from diverging when the spec gets re-edited later.
+
+**Tracked separately as code-side r2-wire work**, not a r2-rocker
+deliverable.
 
 ### Finding B — UDP presence is project-local
 
@@ -306,8 +349,10 @@ re-fires** when 5d-bridge.4 lands — wire vectors against R2-TRUST
 
 ## Recommendations
 
-1. **Feed Finding A back to r2-specifications** as a clarification
-   request on R2-BOOTSTRAP / R2-BLE event framing.
+1. **Add `r2_wire::compact::encode_compact_for_l2cap` /
+   `decode_compact_from_l2cap_sdu` helpers** (see revised Finding A).
+   Library-side change in r2-wire, not a spec change. Centralises
+   the four current hand-rolled call sites + future ones.
 2. **Document the UDP presence format** locally
    (`SPEC-R2-ROCKER-WIRE.md`) AND propose upstream.
 3. **Document the `r2.sensor.status` state→u8 mapping** in
