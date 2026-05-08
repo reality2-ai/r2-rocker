@@ -843,6 +843,8 @@ function connectStatus() {
         updateSensorList();
         renderDevicesIfVisible();
       }
+    } else if (msg.type === 'ota') {
+      handleOtaEvent(msg);
     }
     // Future: hotspot, server_error, etc. (SPEC-R2-ROCKER-DASHBOARD §5.3)
   };
@@ -1376,20 +1378,71 @@ function updateDevicesSummary(peers) {
   document.getElementById('dsNeedsUpdate').textContent = counts.needsUpdate;
 }
 
+// OTA progress events from /ws/status (dashboard's /api/ota/{addr} handler
+// broadcasts these). Reuses the Connection Log panel as a generic
+// "activity feed" so the operator sees phase transitions live without
+// needing to read browser console.
+function handleOtaEvent(msg) {
+  // Auto-open the Connection Log on first event so the operator sees it
+  // even if they triggered the OTA from the Devices view.
+  document.getElementById('bootstrap-panel').classList.add('visible');
+  switch (msg.phase) {
+    case 'uploading':
+      addBootstrapLine(`⬆ Pushing firmware to ${msg.target} (${msg.size} bytes)…`, 'amber');
+      break;
+    case 'applied':
+      addBootstrapLine(`✓ ${msg.target} accepted: ${msg.message || 'rebooting'}`, 'green');
+      break;
+    case 'rejected':
+      addBootstrapLine(`✗ ${msg.target} rejected: ${msg.message || 'unknown'}`, 'red');
+      break;
+    case 'error':
+      addBootstrapLine(`✗ ${msg.target}: ${msg.message || 'error'}`, 'red');
+      break;
+  }
+}
+
 function requestFirmwareUpdate(addr) {
-  // Phase 9 will turn this into a real `r2.dash.fw.update` push (server
-  // pushes binary URL + sha256 + tg_sig, sensor fetches + verifies +
-  // swaps partition). For now: visual feedback only.
-  console.log('[stub] firmware update requested for', addr);
+  // Phase 9-light: open a file picker, POST the chosen .bin to the
+  // dashboard's /api/ota/{addr}, watch progress via /ws/status events.
+  // Phase 9-secure (#24) will add Ed25519 signing + verify before swap.
   const btn = document.querySelector(`.device-card[data-key="${addr}"] .btn-update`);
-  if (btn) {
-    btn.textContent = '✓ queued (stub)';
+  if (!btn) return;
+
+  const picker = document.createElement('input');
+  picker.type = 'file';
+  picker.accept = '.bin,application/octet-stream';
+  picker.style.display = 'none';
+  picker.onchange = async () => {
+    const file = picker.files && picker.files[0];
+    if (!file) return;
     btn.disabled = true;
+    btn.textContent = `⬆ Uploading ${(file.size / 1024).toFixed(0)} KB…`;
+    try {
+      const res = await fetch(`/api/ota/${encodeURIComponent(addr)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: file,
+      });
+      const out = await res.json().catch(() => ({}));
+      if (res.ok && out.ok) {
+        btn.textContent = '✓ Updated';
+      } else {
+        btn.textContent = '✗ Update failed';
+        console.warn('[ota] failed:', out);
+      }
+    } catch (err) {
+      btn.textContent = '✗ Network error';
+      console.warn('[ota] fetch error:', err);
+    }
     setTimeout(() => {
       btn.textContent = '⬆ Update Firmware';
       btn.disabled = false;
-    }, 2500);
-  }
+    }, 4000);
+  };
+  document.body.appendChild(picker);
+  picker.click();
+  setTimeout(() => picker.remove(), 60_000);
 }
 
 function escapeText(s) {

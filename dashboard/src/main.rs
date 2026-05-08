@@ -10,12 +10,14 @@
 //!   Browser --POST /api/bootstrap--> Gateway --BLE--> Sensor discovery
 
 use axum::{
+    body::Bytes,
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
-    extract::State,
+    extract::{Path, State},
     response::{Html, IntoResponse, Json},
     routing::{get, post},
     Router,
 };
+use sha2::{Digest, Sha256};
 use clap::Parser;
 use r2_bootstrap::{BootstrapConfig, BootstrapEvent};
 use serde::{Deserialize, Serialize};
@@ -340,6 +342,8 @@ async fn main() {
         // Existing routes (legacy dashboard.html consumes /ws JSON).
         .route("/api/bootstrap", post(bootstrap_handler))
         .route("/api/bootstrap/status", get(bootstrap_status_handler))
+        // Phase 9-light: stream a firmware .bin to a sensor's OTA listener.
+        .route("/api/ota/{addr}", post(ota_push_handler))
         .route("/api/version", get(version_handler));
 
     // Phase 5d: serve the WASM viewer (wasm-viewer/) at /v/ if the
@@ -457,6 +461,149 @@ async fn bootstrap_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
         axum::http::StatusCode::OK,
         Json(serde_json::json!({ "status": "started" })),
     )
+}
+
+/// POST /api/ota/{addr} — Phase 9-light, push a firmware binary to a sensor's
+/// OTA listener (TCP 21043). Body is the raw `.bin`. Returns JSON describing
+/// the result: bytes sent, sha256 hex, the receiver's status code + message.
+///
+/// `addr` may be either an IP ("10.42.0.103") or `ip:port` from the connected-
+/// peers list (the port is replaced with 21043 in either case).
+async fn ota_push_handler(
+    State(state): State<Arc<AppState>>,
+    Path(addr): Path<String>,
+    body: Bytes,
+) -> impl IntoResponse {
+    use std::net::ToSocketAddrs;
+
+    // Strip any sensor TCP port if the caller pasted in `ip:port` from
+    // the peers list — OTA always lands on the well-known port.
+    let ip_only: &str = addr.split(':').next().unwrap_or(&addr);
+    let ota_target = format!("{}:21043", ip_only);
+
+    if body.is_empty() {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"ok": false, "error": "empty body"})),
+        );
+    }
+
+    eprintln!("[ota] push to {} ({} bytes)", ota_target, body.len());
+    let _ = state.ws_broadcast_tx.send(serde_json::json!({
+        "type": "ota",
+        "phase": "uploading",
+        "target": ota_target,
+        "size": body.len(),
+    }).to_string());
+
+    // Resolve so DNS errors fail fast (we expect numeric IPs but be safe).
+    let socket = match ota_target.to_socket_addrs() {
+        Ok(mut it) => match it.next() {
+            Some(a) => a,
+            None    => return ota_err(&state, &ota_target, "no addr resolved"),
+        },
+        Err(e) => return ota_err(&state, &ota_target, &format!("resolve: {e}")),
+    };
+
+    // Pre-compute the SHA-256 over the full firmware blob.
+    let sha: [u8; 32] = {
+        let mut h = Sha256::new();
+        h.update(&body);
+        h.finalize().into()
+    };
+
+    // 60 s should be ample for a ~1.4 MB blob over 802.11 + write into flash.
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        push_firmware(socket, &body, &sha),
+    )
+    .await;
+
+    match result {
+        Ok(Ok((status_byte, msg))) => {
+            let ok = status_byte == 0x00; // STATUS_OK in r2-esp::ota_tcp
+            let phase = if ok { "applied" } else { "rejected" };
+            let _ = state.ws_broadcast_tx.send(serde_json::json!({
+                "type": "ota",
+                "phase": phase,
+                "target": ota_target,
+                "message": msg,
+            }).to_string());
+            (
+                axum::http::StatusCode::OK,
+                Json(serde_json::json!({
+                    "ok": ok,
+                    "size": body.len(),
+                    "sha256": hex::encode(&sha),
+                    "status_byte": status_byte,
+                    "message": msg,
+                })),
+            )
+        }
+        Ok(Err(e))  => ota_err(&state, &ota_target, &format!("push: {e}")),
+        Err(_)      => ota_err(&state, &ota_target, "timed out after 60 s"),
+    }
+}
+
+fn ota_err(state: &Arc<AppState>, target: &str, msg: &str) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+    eprintln!("[ota] {} — {}", target, msg);
+    let _ = state.ws_broadcast_tx.send(serde_json::json!({
+        "type": "ota",
+        "phase": "error",
+        "target": target,
+        "message": msg,
+    }).to_string());
+    (
+        axum::http::StatusCode::BAD_GATEWAY,
+        Json(serde_json::json!({"ok": false, "error": msg})),
+    )
+}
+
+/// Drives the OTA-receive protocol from `r2-esp::ota_tcp` (R2-OTA TCP):
+///   START preamble: cmd(1) + size_le(4) + sha256(32)
+///   firmware bytes
+///   half-close (write shutdown) → receiver flushes + writes partition
+///   response: status(1) + len_le(2) + utf-8 message
+async fn push_firmware(
+    target: SocketAddr,
+    body: &[u8],
+    sha: &[u8; 32],
+) -> std::io::Result<(u8, String)> {
+    const CMD_START: u8 = 0x01;
+    let mut stream = tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        TcpStream::connect(target),
+    )
+    .await
+    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "connect timed out"))??;
+
+    // Preamble
+    let mut preamble = Vec::with_capacity(37);
+    preamble.push(CMD_START);
+    preamble.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    preamble.extend_from_slice(sha);
+    stream.write_all(&preamble).await?;
+
+    // Stream in 64 KiB chunks.
+    for chunk in body.chunks(65536) {
+        stream.write_all(chunk).await?;
+    }
+    stream.flush().await?;
+
+    // Half-close write side; receiver uses this as EOF for the firmware
+    // stream, then writes the partition + sends a response.
+    let _ = stream.shutdown().await;
+
+    // Response: status(1) + len(2 LE) + message
+    let mut hdr = [0u8; 3];
+    stream.read_exact(&mut hdr).await?;
+    let status = hdr[0];
+    let msg_len = u16::from_le_bytes([hdr[1], hdr[2]]) as usize;
+    let mut msg = vec![0u8; msg_len];
+    if msg_len > 0 {
+        stream.read_exact(&mut msg).await?;
+    }
+    Ok((status, String::from_utf8_lossy(&msg).into_owned()))
 }
 
 /// GET /api/bootstrap/status — return bootstrap state

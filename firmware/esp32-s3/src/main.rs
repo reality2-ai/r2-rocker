@@ -24,7 +24,7 @@ use esp_idf_svc::sys::{
     esp_ota_mark_app_valid_cancel_rollback, esp_restart, link_patches, ESP_OK,
 };
 use log::{info, warn};
-use r2_esp::{beacon, l2cap, wifi_prov, wifi_sta};
+use r2_esp::{beacon, l2cap, ota_tcp, wifi_prov, wifi_sta};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 /// Canonical R2-BEACON class string (locked at SPEC-R2-ROCKER-DASHBOARD §6.3
@@ -133,6 +133,15 @@ fn main() -> Result<()> {
         // also wait for first dashboard ACK; WiFi-up is enough for now.
         mark_app_valid();
 
+        // Phase 9-light — OTA receive listener on TCP port 21043. Accepts
+        // CMD_START preamble (sha256 + size) + firmware stream, writes to
+        // the inactive OTA partition, sets it bootable, restarts. Bootloader
+        // rollback (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE) catches a bad
+        // image — if the new firmware can't reach `mark_app_valid`, the
+        // bootloader reverts on the next reset.
+        ota_tcp::start_listener();
+        info!("[OTA] receive listener started on TCP 21043");
+
         // UDP presence — closes the dashboard's bootstrap loop. Spawn a
         // short-lived task that sends ~5 packets at 1 s intervals. UDP
         // is unreliable; one of the burst should reach the dashboard.
@@ -182,6 +191,12 @@ fn main() -> Result<()> {
     let wifi_clear_hash = wifi_prov::wifi_clear_hash();
     info!("[main-loop] L2CAP poll started — wifi_offer hash 0x{:08x}", wifi_offer_hash);
     loop {
+        // Mirror OTA-in-progress into the LED overlay so the physical
+        // and virtual LEDs go to white-strobe while a firmware image
+        // is being received + written. The flag is cleared on completion
+        // (success or error) by the OTA listener's RAII guard.
+        led_handle.set_ota(ota_tcp::ota_in_progress());
+
         for (data, _from_addr) in l2cap::drain_received() {
             // r2-bootstrap (controller) prepends a single R2-WIRE FrameHeader
             // byte before the compact frame so it can fragment large payloads

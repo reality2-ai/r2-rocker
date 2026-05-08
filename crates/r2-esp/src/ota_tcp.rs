@@ -14,6 +14,35 @@ use log::{error, info, warn};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// True while a CMD_START handler is actively receiving / writing /
+/// validating an OTA image. Cleared on completion (success or error).
+/// Polled by callers that want to drive a UI indicator (e.g. the
+/// firmware's RGB LED state machine) while OTA is in progress.
+static OTA_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+/// Whether an OTA receive is currently in progress on this device.
+pub fn ota_in_progress() -> bool {
+    OTA_IN_PROGRESS.load(Ordering::Relaxed)
+}
+
+/// RAII guard — sets the in-progress flag for the lifetime of `handle_start`.
+/// Drop fires on every exit path (success-before-reboot, all error
+/// branches, panic), so the flag stays accurate even if a future change
+/// adds an early `return`.
+struct OtaInProgressGuard;
+impl OtaInProgressGuard {
+    fn enter() -> Self {
+        OTA_IN_PROGRESS.store(true, Ordering::Relaxed);
+        Self
+    }
+}
+impl Drop for OtaInProgressGuard {
+    fn drop(&mut self) {
+        OTA_IN_PROGRESS.store(false, Ordering::Relaxed);
+    }
+}
 
 /// TCP port for OTA firmware transfer and device query.
 /// 0x5233 — R2 ASCII port range + 1 (OTA)
@@ -89,6 +118,7 @@ fn handle_connection(mut stream: TcpStream) {
 // ---------------------------------------------------------------------------
 
 fn handle_start(stream: &mut TcpStream) {
+    let _guard = OtaInProgressGuard::enter();
     // Read preamble: size(4 LE) + sha256(32) = 36 bytes
     let mut preamble = [0u8; 36];
     if let Err(e) = stream.read_exact(&mut preamble) {

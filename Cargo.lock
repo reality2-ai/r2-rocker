@@ -1333,6 +1333,7 @@ dependencies = [
  "r2-wire",
  "serde",
  "serde_json",
+ "sha2",
  "socket2",
  "tokio",
  "tower-http",

@@ -59,6 +59,7 @@ impl LedState {
 pub struct LedHandle {
     state: Arc<AtomicU8>,
     low_battery: Arc<AtomicBool>,
+    ota: Arc<AtomicBool>,
 }
 
 impl LedHandle {
@@ -66,6 +67,9 @@ impl LedHandle {
         self.state.store(state as u8, Ordering::Relaxed);
     }
     pub fn current(&self) -> LedState {
+        // OTA overlay reports as Ota for the dashboard's status event,
+        // so the virtual LED matches the physical one in lockstep.
+        if self.ota.load(Ordering::Relaxed) { return LedState::Ota; }
         LedState::from_u8(self.state.load(Ordering::Relaxed))
     }
     /// Low-battery overrides the underlying state colour while set
@@ -73,6 +77,12 @@ impl LedHandle {
     /// this is purely a presentation overlay per spec §4.1.
     pub fn set_low_battery(&self, on: bool) {
         self.low_battery.store(on, Ordering::Relaxed);
+    }
+    /// OTA overlay — white strobe overrides the underlying state while
+    /// the firmware is receiving + writing an image. Driven from the
+    /// firmware's main loop polling `r2_esp::ota_tcp::ota_in_progress()`.
+    pub fn set_ota(&self, on: bool) {
+        self.ota.store(on, Ordering::Relaxed);
     }
 }
 
@@ -90,9 +100,11 @@ where
 {
     let state = Arc::new(AtomicU8::new(LedState::Boot as u8));
     let low_battery = Arc::new(AtomicBool::new(false));
+    let ota = Arc::new(AtomicBool::new(false));
 
     let state_for_thread = state.clone();
     let low_for_thread = low_battery.clone();
+    let ota_for_thread = ota.clone();
 
     std::thread::Builder::new()
         .stack_size(4096)
@@ -107,11 +119,11 @@ where
                     return;
                 }
             };
-            run_led_loop(&mut led, state_for_thread, low_for_thread);
+            run_led_loop(&mut led, state_for_thread, low_for_thread, ota_for_thread);
         })
         .context("spawn LED thread")?;
 
-    Ok(LedHandle { state, low_battery })
+    Ok(LedHandle { state, low_battery, ota })
 }
 
 const FRAME_MS: u64 = 33; // ~30 Hz tick — smooth pulses at low CPU cost
@@ -125,10 +137,15 @@ fn run_led_loop(
     led: &mut Ws2812Esp32Rmt<'_>,
     state: Arc<AtomicU8>,
     low_battery: Arc<AtomicBool>,
+    ota: Arc<AtomicBool>,
 ) {
     let start = Instant::now();
     loop {
-        let s = LedState::from_u8(state.load(Ordering::Relaxed));
+        let s = if ota.load(Ordering::Relaxed) {
+            LedState::Ota
+        } else {
+            LedState::from_u8(state.load(Ordering::Relaxed))
+        };
         let lb = low_battery.load(Ordering::Relaxed);
         let elapsed = start.elapsed();
         let colour = scale(render(s, lb, elapsed), BRIGHTNESS);

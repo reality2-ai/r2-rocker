@@ -20,3 +20,5 @@ socket2 = { version = "0.6.3", features = ["all"] }
 # Pinned to match r2-core / firmware so cross-component compat is exact.
 ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["alloc", "fast"] }
 hex = "0.4"
+# Phase 9-light: SHA-256 over the firmware blob for the OTA preamble.
+sha2 = "0.10"
