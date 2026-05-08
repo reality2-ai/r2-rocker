@@ -9,6 +9,7 @@
 //!   4. On a valid offer: persist creds to NVS and reboot to apply.
 
 mod identity;
+mod led;
 mod sim;
 mod wire;
 mod sender;
@@ -50,6 +51,13 @@ fn main() -> Result<()> {
     let sysloop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
 
+    // ── RGB LED (Phase 5L) ───────────────────────────────────────────
+    // Onboard WS2812 on GPIO38 (DevKitC-1 v1.1, current production —
+    // see HARDWARE-WIRING.md §5). Drives every state transition below.
+    let led_handle = led::start(peripherals.rmt.channel0, peripherals.pins.gpio38)
+        .context("LED init")?;
+    led_handle.set(led::LedState::Boot);
+
     // ── Identity (§3.1) — Ed25519 keypair, persisted to NVS. ──────────
     let identity = std::sync::Arc::new(
         identity::Identity::load_or_generate(nvs.clone())
@@ -76,6 +84,7 @@ fn main() -> Result<()> {
     let (wifi_up, _wifi) = match &creds {
         Some(c) => {
             info!("[boot] WiFi credentials source: {}", c.source);
+            led_handle.set(led::LedState::WifiConnecting);
             match wifi_sta::connect(peripherals.modem, sysloop.clone(), nvs.clone(),
                                     &c.ssid, &c.password) {
                 Some(w) => (true, Some(w)),
@@ -87,6 +96,7 @@ fn main() -> Result<()> {
         }
         None => {
             warn!("[boot] no WiFi credentials — entering BLE-only ADVERTISING (§4.1)");
+            led_handle.set(led::LedState::Advertising);
             (false, None)
         }
     };
@@ -114,6 +124,11 @@ fn main() -> Result<()> {
 
     // ── Sender path (only if WiFi came up). ──────────────────────────
     if wifi_up {
+        // WiFi up → STREAMING_LIVE (green heartbeat). The dashboard
+        // sees the matching colour on the virtual LED once Phase 5L
+        // status events flow over the wire.
+        led_handle.set(led::LedState::StreamingLive);
+
         // OTA gate: per SPEC-R2-ROCKER-SENSOR §12.2 a robust gate would
         // also wait for first dashboard ACK; WiFi-up is enough for now.
         mark_app_valid();
@@ -147,11 +162,12 @@ fn main() -> Result<()> {
         // Run the sender on its own thread so the main thread can keep
         // draining BLE L2CAP for re-provisioning offers.
         let id_for_sender = identity.clone();
+        let led_for_sender = led_handle.clone();
         std::thread::Builder::new()
             .stack_size(16384)
             .name("sender".into())
             .spawn(move || {
-                let mut s = sender::Sender::new(gateway, hostname, id_for_sender);
+                let mut s = sender::Sender::new(gateway, hostname, id_for_sender, led_for_sender);
                 s.run();
             })
             .context("spawn sender thread")?;

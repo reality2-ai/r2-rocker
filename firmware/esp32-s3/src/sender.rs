@@ -19,14 +19,18 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::identity::Identity;
+use crate::led::LedHandle;
 use crate::sim::{AccelSim, BatterySim};
 use crate::wire::{
     frame_for_tcp, CborWriter, EVT_SENSOR_ACCELERATION, EVT_SENSOR_ANNOUNCE,
-    EVT_SENSOR_BATTERY,
+    EVT_SENSOR_BATTERY, EVT_SENSOR_STATUS,
 };
 
 const SAMPLE_RATE_HZ: u32 = 100;
 const BATTERY_PERIOD_MS: u64 = 30_000;
+/// Status events drive the dashboard's virtual LED; 2 s cadence is
+/// snappy enough to feel live + cheap on the wire (~28 bytes/frame).
+const STATUS_PERIOD_MS: u64 = 2_000;
 const RECONNECT_BACKOFF_MS_INIT: u64 = 1_000;
 const RECONNECT_BACKOFF_MS_MAX: u64 = 30_000;
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -50,17 +54,27 @@ pub struct Sender {
     battery: BatterySim,
     /// Per-device Ed25519 identity, NVS-persisted (Phase 5a).
     identity: Arc<Identity>,
+    /// Read-only handle to the current LED FSM state. Sent on the
+    /// wire as `r2.sensor.status` so the dashboard's virtual LEDs
+    /// mirror the physical RGB LED.
+    led: LedHandle,
     boot_instant: Instant,
 }
 
 impl Sender {
-    pub fn new(gateway: SocketAddr, hostname: String, identity: Arc<Identity>) -> Self {
+    pub fn new(
+        gateway: SocketAddr,
+        hostname: String,
+        identity: Arc<Identity>,
+        led: LedHandle,
+    ) -> Self {
         Self {
             gateway,
             hostname,
             accel: AccelSim::rocker_default(),
             battery: BatterySim::lipo_default(),
             identity,
+            led,
             boot_instant: Instant::now(),
         }
     }
@@ -98,6 +112,7 @@ impl Sender {
         let sample_period_ms = (1000 / SAMPLE_RATE_HZ).max(1) as u64;
         let mut next_sample = Instant::now();
         let mut next_battery = Instant::now() + Duration::from_millis(BATTERY_PERIOD_MS);
+        let mut next_status = Instant::now(); // first status fires immediately
         let mut seq: u32 = 1;
 
         loop {
@@ -111,9 +126,13 @@ impl Sender {
                 self.send_battery(&mut stream).context("send_battery")?;
                 next_battery += Duration::from_millis(BATTERY_PERIOD_MS);
             }
+            if now >= next_status {
+                self.send_status(&mut stream).context("send_status")?;
+                next_status += Duration::from_millis(STATUS_PERIOD_MS);
+            }
 
             // Sleep until the next due event.
-            let next = next_sample.min(next_battery);
+            let next = next_sample.min(next_battery).min(next_status);
             if next > now {
                 let dt = next - now;
                 let dt_ms = dt.as_millis().min(50) as u32;
@@ -206,6 +225,25 @@ impl Sender {
 
         let mut frame = [0u8; 64];
         let n = frame_for_tcp(&mut frame, self.random_msg_id(), EVT_SENSOR_ACCELERATION, &payload[..used]);
+        stream.write_all(&frame[..n])?;
+        Ok(())
+    }
+
+    /// Emit `r2.sensor.status` with the current LED FSM state value.
+    /// Dashboard consumes `payload.0` as `fsmState` and lights the
+    /// virtual LED with the matching tg-* CSS class. SD%, sample-rate,
+    /// uptime fields TBD when those subsystems land.
+    fn send_status(&self, stream: &mut TcpStream) -> Result<()> {
+        let state = self.led.current() as u8;
+        let mut payload = [0u8; 12];
+        let mut w = CborWriter::new(&mut payload);
+        w.map(2);
+        w.key(0); w.u(state as u64);              // FSM state (LedState repr)
+        w.key(1); w.u(self.ts_ms() as u64);       // ts_ms
+        let used = w.pos();
+
+        let mut frame = [0u8; 32];
+        let n = frame_for_tcp(&mut frame, self.random_msg_id(), EVT_SENSOR_STATUS, &payload[..used]);
         stream.write_all(&frame[..n])?;
         Ok(())
     }

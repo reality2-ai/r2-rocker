@@ -371,8 +371,12 @@
   .virt-led.tg-boot       { background: #f8fafc; box-shadow: 0 0 8px #f8fafc; animation: led-flash 1s 1; }
   .virt-led.tg-advertising { background: #3b82f6; box-shadow: 0 0 8px #3b82f6; animation: led-pulse 1.0s ease-in-out infinite; }
   .virt-led.tg-ble        { background: #06b6d4; box-shadow: 0 0 8px #06b6d4; animation: led-pulse 0.4s ease-in-out infinite; }
-  .virt-led.tg-streaming  { background: #22c55e; box-shadow: 0 0 8px #22c55e; animation: led-heartbeat 1.0s ease-in-out infinite; }
-  .virt-led.tg-catchup    { background: #facc15; box-shadow: 0 0 8px #facc15; animation: led-heartbeat 1.0s ease-in-out infinite; }
+  /* Steady (no animation) for resting states — animation is reserved for
+     "needs attention" or "in transition". The physical RGB LED still
+     heartbeats so the rig itself remains glanceable; the dashboard's
+     virtual LED conveys the same colour without the visual chatter. */
+  .virt-led.tg-streaming  { background: #22c55e; box-shadow: 0 0 8px #22c55e; }
+  .virt-led.tg-catchup    { background: #facc15; box-shadow: 0 0 8px #facc15; }
   .virt-led.tg-cal        { background: #a855f7; box-shadow: 0 0 8px #a855f7; }
   .virt-led.tg-low        { background: #f97316; box-shadow: 0 0 8px #f97316; animation: led-pulse 1.5s ease-in-out infinite; }
   .virt-led.tg-ota        { background: #ec4899; box-shadow: 0 0 8px #ec4899; animation: led-strobe 0.18s steps(2) infinite; }
@@ -828,6 +832,17 @@ function connectStatus() {
     catch (err) { console.warn('[hive] bad status JSON:', e.data); return; }
     if (msg.type === 'bootstrap') {
       handleBootstrapEvent(msg);
+    } else if (msg.type === 'peer_disconnected') {
+      // Server detected the sensor's TCP socket close. Flip the virtual
+      // LED to inert grey now rather than waiting for the OFFLINE_MS
+      // timeout to fire on lastSeen ageing.
+      const s = sensors.get(msg.addr);
+      if (s) {
+        s.online = false;
+        s.lastSeen = 0;            // forces classifyOnline → 'offline'
+        updateSensorList();
+        renderDevicesIfVisible();
+      }
     }
     // Future: hotspot, server_error, etc. (SPEC-R2-ROCKER-DASHBOARD §5.3)
   };
@@ -1238,8 +1253,11 @@ function addLog(msg) {
 // object and call renderDevicesIfVisible().
 
 let currentView = 'live';
-const STALE_MS    = 10_000;   // last_seen older than 10 s = stale
-const OFFLINE_MS  = 30_000;   // last_seen older than 30 s = offline
+// Sensors send `r2.sensor.status` every 2 s — these thresholds are
+// counted in "how many status events have we missed?" 4 s = ~1 missed
+// (probably a network blip), 6 s = 3 missed (confident offline).
+const STALE_MS    = 4_000;
+const OFFLINE_MS  = 6_000;
 
 function setView(name) {
   currentView = name;
@@ -1274,6 +1292,11 @@ function classifyOnline(s) {
 // stays the inert grey placeholder.
 function ledClassFor(s) {
   if (s.fsmState == null) return '';
+  // If the sensor's gone offline (no events for OFFLINE_MS), don't
+  // pretend we know its FSM state — fall back to the inert grey
+  // placeholder. classifyOnline() reads s.lastSeen against
+  // OFFLINE_MS / STALE_MS thresholds defined above.
+  if (classifyOnline(s) === 'offline') return '';
   switch (s.fsmState) {
     case 0:  return 'tg-boot';         // BOOT
     case 1:  return 'tg-advertising';  // ADVERTISING
@@ -1376,7 +1399,11 @@ function escapeAttr(s) { return escapeText(s).replace(/"/g, '&quot;'); }
 
 // Keep online/stale/offline classification fresh even when no events
 // arrive for a while — re-render once a second when Devices is visible.
+// Re-render every second so online/stale/offline classification refreshes
+// even without events arriving. Sidebar dot and Devices-view LED both
+// depend on `classifyOnline(s)` against `lastSeen`, so both need a tick.
 setInterval(() => {
+  updateSensorList();
   if (currentView === 'devices') renderDevices();
 }, 1000);
 

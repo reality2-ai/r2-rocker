@@ -798,10 +798,10 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
                                 true
                             };
                             if emit_live {
-                                eprintln!(
-                                    "[events] {} from {}: {:?}",
-                                    event.event, addr, event.payload
-                                );
+                                // Per-frame logging removed — at 10 Hz live + 0.5 Hz status
+                                // it filled the log faster than anyone could read it. Frames
+                                // are still observable via /ws/raw (binary) or /ws (legacy
+                                // JSON). Keep stderr for connection-lifecycle events only.
                                 let _ = read_state.event_tx.send(event);
                             }
                         }
@@ -833,6 +833,14 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
         peers.remove(&addr);
     }
     eprintln!("[events] sensor disconnected: {}", addr);
+    // Push a `peer_disconnected` message on /ws/status so the WASM
+    // viewer can flip the sensor's virtual LED to inert grey instantly,
+    // rather than waiting for its OFFLINE_MS timeout (~6 s) to fire.
+    let msg = serde_json::json!({
+        "type": "peer_disconnected",
+        "addr": addr.to_string(),
+    }).to_string();
+    let _ = state.ws_broadcast_tx.send(msg);
 }
 
 /// Decode an R2-WIRE event frame into a DashboardEvent

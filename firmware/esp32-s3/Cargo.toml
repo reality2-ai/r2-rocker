@@ -40,5 +40,11 @@ r2-esp        = { path = "../../crates/r2-esp", default-features = true }
 r2-core       = { path = "../../crates/r2-core", default-features = false, features = ["alloc"] }
 r2-wire       = { path = "../../crates/r2-wire", default-features = false, features = ["alloc"] }
 
+# Phase 5L — onboard WS2812 RGB LED (DevKitC-1 v1.1 = GPIO38). Driven
+# via the ESP32 RMT peripheral; the driver crate handles the WS2812
+# bit-timing encoder so we stay focused on state→colour mapping.
+ws2812-esp32-rmt-driver = { version = "0.13", default-features = false, features = ["std", "smart-leds-trait"] }
+smart-leds              = "0.4"
+
 [build-dependencies]
 embuild = { version = "0.32", features = ["espidf"] }
