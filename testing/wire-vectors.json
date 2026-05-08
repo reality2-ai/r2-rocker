@@ -1,0 +1,94 @@
+{
+  "_about": "r2-rocker conformance test vectors. Generated 2026-05-08 from the canonical CBOR + R2-WIRE encoders. Consumed by firmware / dashboard / WASM encoder unit tests; all three MUST produce these exact bytes for these inputs.",
+  "fnv_hashes": {
+    "#wifi_offer": "0x01F77656",
+    "#wifi_req": "0xC85B18A8",
+    "#wifi_done": "0x89A70310",
+    "r2.sensor.announce": "0xCEC70C3C",
+    "r2.sensor.acceleration": "0x94FEF38F",
+    "r2.sensor.acceleration.batch": "0x62268125",
+    "r2.sensor.battery": "0xA2751318",
+    "r2.sensor.status": "0x70BD64A5",
+    "r2.sensor.event.log": "0xA60CD779",
+    "nz.ac.auckland.rocker.sensor": "0x6A3B0860"
+  },
+  "vectors": [
+    {
+      "event": "r2.sensor.acceleration",
+      "fnv": "0x94FEF38F",
+      "payload": {
+        "0": 42,
+        "1": 12345,
+        "2": -1024,
+        "3": 512,
+        "4": 0
+      },
+      "cbor_hex": "a500182a01193039023903ff031902000400",
+      "wire_hex": "0153424294fef38f00000000a500182a01193039023903ff031902000400"
+    },
+    {
+      "event": "r2.sensor.battery",
+      "fnv": "0xA2751318",
+      "payload": {
+        "0": 3700,
+        "1": 75,
+        "2": false,
+        "3": 67890
+      },
+      "cbor_hex": "a400190e7401184b02f4031a00010932",
+      "wire_hex": "01534242a275131800000000a400190e7401184b02f4031a00010932"
+    },
+    {
+      "event": "r2.sensor.status",
+      "fnv": "0x70BD64A5",
+      "payload": {
+        "0": 4,
+        "1": 123456
+      },
+      "cbor_hex": "a20004011a0001e240",
+      "wire_hex": "0153424270bd64a500000000a20004011a0001e240"
+    },
+    {
+      "event": "#wifi_offer",
+      "fnv": "0x01F77656",
+      "payload": {
+        "0": "R2-rocker",
+        "1": "r2rocker2026",
+        "2": "10.42.0.1",
+        "3": 21042,
+        "4": 120
+      },
+      "cbor_hex": "a5006952322d726f636b6572016c7232726f636b657232303236026931302e34322e302e3103195232041878",
+      "wire_hex": "0153424201f7765600000000a5006952322d726f636b6572016c7232726f636b657232303236026931302e34322e302e3103195232041878",
+      "note": "Known R2-WIFI \u00a73.4.2 hash: 0x01F77656."
+    },
+    {
+      "event": "udp_presence_packet",
+      "fnv": "(n/a \u2014 UDP payload is bare CBOR, no event-name hashing)",
+      "payload": {
+        "0": "hex:a1b2c3d4e5f60718",
+        "1": "10.42.0.103",
+        "2": "0x6A3B0860",
+        "3": 21042
+      },
+      "cbor_hex": "a40048a1b2c3d4e5f60718016b31302e34322e302e313033021a6a3b086003195232",
+      "wire_hex": "(no R2-WIRE wrapper \u2014 sent verbatim over UDP/21044)",
+      "note": "Per r2-bootstrap::parse_presence_packet. Format is project-local; not in canonical r2-specifications yet."
+    },
+    {
+      "event": "r2_beacon_legacy_ad",
+      "fnv": "(n/a)",
+      "payload": {
+        "version": 1,
+        "rbid_hex": "a1b2c3d4e5f60718",
+        "epoch_id": 1234,
+        "class_string": "nz.ac.auckland.rocker.sensor",
+        "class_hash": "0x6A3B0860",
+        "tx_power_dbm": 0
+      },
+      "cbor_hex": "(n/a \u2014 R2-BEACON is binary, not CBOR)",
+      "wire_hex": "0100ffffa1b2c3d4e5f6071804d26a3b086000000000000000000000",
+      "note": "Approximate field layout \u2014 exact byte assignment depends on the r2-esp::beacon implementation; cross-validate at test time. Class hash 0x6A3B0860 is the load-bearing value the dashboard's bootstrap loop matches against."
+    }
+  ]
+}
