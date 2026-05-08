@@ -825,7 +825,24 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
         let mut accel_n: u32 = 0;
 
         loop {
-            match reader.read(&mut buf).await {
+            // 5 s read deadline. The sensor sends `r2.sensor.status` every
+            // 2 s plus continuous 10 Hz acceleration; if 5 s pass with no
+            // bytes, the peer is gone (chip reset / WiFi drop / hard
+            // crash). Forces the read loop to exit fast so the caller's
+            // `peer_disconnected` broadcast goes out, rather than waiting
+            // for the kernel's 60 s TCP keepalive timeout.
+            let read_result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                reader.read(&mut buf),
+            ).await;
+            let read_outcome = match read_result {
+                Ok(r) => r,
+                Err(_) => {
+                    eprintln!("[events] read timeout from {} (no traffic in 5 s) — closing", addr);
+                    break;
+                }
+            };
+            match read_outcome {
                 Ok(0) => break,
                 Ok(n) => {
                     frame_buf.extend_from_slice(&buf[..n]);

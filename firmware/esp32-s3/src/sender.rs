@@ -11,7 +11,10 @@
 
 use anyhow::{Context, Result};
 use esp_idf_svc::hal::delay::FreeRtos;
-use esp_idf_svc::sys::{esp_mac_type_t_ESP_MAC_WIFI_STA, esp_random, esp_read_mac};
+use esp_idf_svc::sys::{
+    esp_mac_type_t_ESP_MAC_WIFI_STA, esp_ota_mark_app_valid_cancel_rollback,
+    esp_random, esp_read_mac, ESP_OK,
+};
 use log::{info, warn};
 use std::io::Write;
 use std::net::{SocketAddr, TcpStream};
@@ -59,6 +62,12 @@ pub struct Sender {
     /// mirror the physical RGB LED.
     led: LedHandle,
     boot_instant: Instant,
+    /// OTA-rollback gate (SPEC-R2-ROCKER-SENSOR §12.2): cleared until
+    /// the first successful TCP frame round-trip, then we tell the
+    /// bootloader the new image is good. A buggy firmware that joins
+    /// WiFi but can't reach the dashboard never sets this, so the
+    /// bootloader rolls back on the next reset.
+    app_validated: bool,
 }
 
 impl Sender {
@@ -76,6 +85,7 @@ impl Sender {
             identity,
             led,
             boot_instant: Instant::now(),
+            app_validated: false,
         }
     }
 
@@ -119,6 +129,14 @@ impl Sender {
             let now = Instant::now();
             if now >= next_sample {
                 self.send_sample(&mut stream, seq).context("send_sample")?;
+                // First successful frame round-trip → tell the
+                // bootloader this image is good. Calling more than
+                // once is a no-op on subsequent boots, so the flag
+                // just avoids the syscall after we know it's done.
+                if !self.app_validated {
+                    self.mark_app_valid();
+                    self.app_validated = true;
+                }
                 seq = seq.wrapping_add(1);
                 next_sample += Duration::from_millis(sample_period_ms);
             }
@@ -227,6 +245,17 @@ impl Sender {
         let n = frame_for_tcp(&mut frame, self.random_msg_id(), EVT_SENSOR_ACCELERATION, &payload[..used]);
         stream.write_all(&frame[..n])?;
         Ok(())
+    }
+
+    /// OTA-rollback gate. Called once per session lifetime, the first
+    /// time a frame round-trips successfully to the dashboard.
+    fn mark_app_valid(&self) {
+        let rc = unsafe { esp_ota_mark_app_valid_cancel_rollback() };
+        if rc == ESP_OK {
+            info!("[ota-gate] image marked VALID after first frame round-trip");
+        } else {
+            warn!("[ota-gate] esp_ota_mark_app_valid_cancel_rollback returned {}", rc);
+        }
     }
 
     /// Emit `r2.sensor.status` with the current LED FSM state value.

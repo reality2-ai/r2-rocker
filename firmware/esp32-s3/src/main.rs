@@ -20,9 +20,7 @@ use esp_idf_svc::hal::delay::FreeRtos;
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
-use esp_idf_svc::sys::{
-    esp_ota_mark_app_valid_cancel_rollback, esp_restart, link_patches, ESP_OK,
-};
+use esp_idf_svc::sys::{esp_restart, link_patches};
 use log::{info, warn};
 use r2_esp::{beacon, l2cap, ota_tcp, wifi_prov, wifi_sta};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -129,9 +127,10 @@ fn main() -> Result<()> {
         // status events flow over the wire.
         led_handle.set(led::LedState::StreamingLive);
 
-        // OTA gate: per SPEC-R2-ROCKER-SENSOR §12.2 a robust gate would
-        // also wait for first dashboard ACK; WiFi-up is enough for now.
-        mark_app_valid();
+        // OTA-rollback gate is now fired by the sender on first
+        // successful TCP frame round-trip (§12.2-tightened). A buggy
+        // firmware that joins WiFi but can't reach the dashboard never
+        // marks itself valid, so the bootloader rolls back on next boot.
 
         // Phase 9-light — OTA receive listener on TCP port 21043. Accepts
         // CMD_START preamble (sha256 + size) + firmware stream, writes to
@@ -288,11 +287,3 @@ fn broadcast_presence_burst(
     }
 }
 
-fn mark_app_valid() {
-    let rc = unsafe { esp_ota_mark_app_valid_cancel_rollback() };
-    if rc == ESP_OK {
-        info!("ota: marked running partition VALID (rollback cancelled)");
-    } else {
-        warn!("ota: esp_ota_mark_app_valid_cancel_rollback returned {}", rc);
-    }
-}
