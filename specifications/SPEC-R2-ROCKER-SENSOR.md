@@ -228,6 +228,39 @@ The LED indication conforms to `HARDWARE-WIRING.md` §5 mapping. States
 that overlay (only `LOW_BATTERY`) take precedence over the colour of the
 underlying state but do not change the underlying state.
 
+### 4.1.1 Wire encoding
+
+Each state has a stable `u8` value carried in the `r2.sensor.status`
+event (key `0`) per `SPEC-R2-ROCKER-WIRE` §3. The dashboard's WASM
+viewer keys its virtual-LED CSS class off this value (`ledClassFor` in
+`wasm-viewer/index.html`), so the on-screen indicator follows the
+physical RGB LED in lockstep.
+
+| Value | State | Note |
+|---|---|---|
+| 0 | `BOOT` | Brief startup state, white flash. v0.1 firmware emits this immediately at startup; equivalent to the `IDLE` cell in §4.1 (the spec's `IDLE` is the post-boot, pre-networking moment, with the same operational meaning). |
+| 1 | `ADVERTISING` | |
+| 2 | `BLE_CONNECTED` | |
+| 3 | `WIFI_CONNECTING` | |
+| 4 | `STREAMING_LIVE` | Default once WiFi + TCP are healthy. |
+| 5 | `STREAMING_CATCHUP` | |
+| 6 | `CALIBRATING` | |
+| 7 | `LOW_BATTERY` | Overlay: when active, the wire-emitted state is `LOW_BATTERY` regardless of the underlying primary state. The dashboard treats this as an overlay (orange dot wins over the primary state's colour) and surfaces "Battery low" text per `feedback_a11y_indicators`. |
+| 8 | `OTA` | |
+| 9 | `ERROR` | |
+
+Values 10–255 are reserved for future states (e.g. fine-grained error
+sub-codes per `feedback_a11y_indicators`'s pattern-based encoding —
+red rhythm A = ADXL fault, rhythm B = SD fault, etc.). Receivers
+SHOULD render an unknown state as the inert grey placeholder + the
+literal numeric value in any text status, not as a default-to-online
+hint.
+
+The canonical source for this enum is
+`firmware/esp32-s3/src/led.rs::LedState`; the dashboard side is
+`wasm-viewer/index.html`'s `ledClassFor()` switch. The two MUST stay
+in sync; PLAN row Z's wire-vector audit cross-checks this.
+
 ### 4.2 Transitions
 
 ```
