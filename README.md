@@ -4,17 +4,20 @@ A wireless sensor system for monitoring a tyre-testing rig.
 
 ## What this does, in one paragraph
 
-There's a half-tonne machine in a lab that rocks a piece of asphalt
-back and forth under a tyre to study how rubber wears. The machine
-has metal joints where its actuators bolt to its frame, and these
-joints are showing stress in a way that suggests the rig is moving
-*sideways* a tiny bit when it's only meant to move *along the
-direction of travel*. r2-rocker is the instrument that watches for
-that sideways motion. Small battery-powered sensors clip onto each
-joint, send their accelerometer readings live to a laptop on the lab
-bench, and the laptop computes the difference in sideways motion
-between joints — which is what we believe correlates with the
-joint-shear failure mode.
+There's a half-tonne machine in a lab that studies how tyre rubber
+wears against road surfaces. The asphalt sits as a flat bed at the
+bottom; a slab of rubber sample is mounted on the *rocker* — the
+moving upper part — and is driven back and forth across the asphalt
+by hydraulic actuators to simulate a tyre travelling over a road.
+The actuators bolt to the rocker through metal joints, and these
+joints are showing stress in a way that suggests the rocker is
+moving *sideways* a tiny bit when it's only meant to move *along
+the direction of travel*. r2-rocker is the instrument that watches
+for that sideways motion. Small battery-powered sensors clip onto
+each joint, send their accelerometer readings live to a laptop on
+the lab bench, and the laptop computes the difference in sideways
+motion between joints — which is what we believe correlates with
+the joint-shear failure mode.
 
 The hardware is open. The protocol stack is open. The whole thing is
 designed to be handed off to a university group, who can run, modify,
