@@ -38,16 +38,18 @@ const RECONNECT_BACKOFF_MS_INIT: u64 = 1_000;
 const RECONNECT_BACKOFF_MS_MAX: u64 = 30_000;
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Identifies this exact build on the wire — semver + git short SHA
-/// (+ "-dirty" if uncommitted) + " sim" tag while we're not driving a
-/// real ADXL355 yet. Per `SPEC-R2-ROCKER-WIRE` §3.1, this string is
-/// what the dashboard sees in `r2.sensor.announce`'s `fw_ver` field
-/// and uses to decide whether an OTA update is needed.
+/// Identifies this exact build on the wire —
+/// `<semver>-<build-date-time>[-sim]+<git-sha>[-dirty]`.
+/// Human-readable for the operator (date+time visible) AND linkable
+/// back to the git commit for posterity (the `+sha` build-metadata
+/// suffix per semver convention). The `-sim` segment is dropped once
+/// a real ADXL355 is wired in.
 const FW_VER: &str = concat!(
     env!("CARGO_PKG_VERSION"),
-    "+",
+    "-",
+    env!("R2_BUILD_TIMESTAMP"),
+    "-sim+",
     env!("R2_GIT_SHA"),
-    " sim"
 );
 
 pub struct Sender {
@@ -280,6 +282,18 @@ impl Sender {
     fn send_battery(&self, stream: &mut TcpStream) -> Result<()> {
         let t_s = self.boot_instant.elapsed().as_secs_f32();
         let (mv, pct) = self.battery.sample(t_s);
+
+        // LOW_BATTERY overlay (orange slow pulse) per SPEC §4.1 / §8.4.
+        // Threshold 3300 mV; cleared at ≥3400 mV (hysteresis). The flag
+        // is read by the LED loop and overlays whatever underlying state
+        // is current.
+        const LOW_BATTERY_MV: u16 = 3300;
+        const LOW_BATTERY_CLEAR_MV: u16 = 3400;
+        if mv <= LOW_BATTERY_MV {
+            self.led.set_low_battery(true);
+        } else if mv >= LOW_BATTERY_CLEAR_MV {
+            self.led.set_low_battery(false);
+        }
 
         let mut payload = [0u8; 24];
         let mut w = CborWriter::new(&mut payload);

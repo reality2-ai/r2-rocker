@@ -1026,9 +1026,24 @@ function handleEvent(msg) {
       }
       break;
     case 'r2.sensor.announce':
-      if (sensor && msg.payload && msg.payload.name) {
-        setDeviceName(sensor, msg.payload.name);
-        addSensorLog(sensor, 'announced: ' + msg.payload.name);
+      if (sensor && msg.payload) {
+        // Schema field is `hostname` (key 1) per remapPayload SCHEMA;
+        // the legacy server-side `name` was a synthetic alias.
+        const hn = msg.payload.hostname;
+        if (hn) {
+          setDeviceName(sensor, hn);
+          addSensorLog(sensor, 'announced: ' + hn);
+        }
+        // Capture announce metadata for the Devices view (Phase 8a).
+        // Was previously only captured from the legacy `sensor.connected`
+        // synthetic event which the new /ws/raw path doesn't emit.
+        if (msg.payload.fw_ver)    sensor.fwVer    = msg.payload.fw_ver;
+        if (msg.payload.device_pk) sensor.devicePk = msg.payload.device_pk;
+        if (msg.payload.boot_ts_ms != null) sensor.bootTsMs = msg.payload.boot_ts_ms;
+        sensor.online = true;
+        sensor.lastSeen = Date.now();
+        renderDevicesIfVisible();
+        updateSensorList();
       }
       return;
     case 'sensor.connected':
@@ -1330,7 +1345,11 @@ function renderDevices() {
     const status   = classifyOnline(s);
     const name     = s.deviceName ?? s.key;
     const ip       = s.key;
-    const fwShort  = s.fwVer ? s.fwVer.replace(/\s+sim$/, '') : '—';
+    // Show the full fw_ver verbatim — operator wants to see semver +
+    // git short-sha + any tag (e.g. " sim") on the card directly.
+    // Once a "current expected firmware" register exists (Phase 9-fwreg),
+    // a mismatch will get a small "out-of-date" badge layered on top.
+    const fwShort  = s.fwVer ?? '—';
     const battMv   = s.battery?.voltage_mv ?? null;
     const battPct  = s.battery?.percent ?? null;
     const battCharging = s.battery?.charging ?? false;

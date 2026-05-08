@@ -40,8 +40,11 @@ fn stamp_build_metadata() {
     let sha_full = if dirty { format!("{sha}-dirty") } else { sha };
     println!("cargo:rustc-env=R2_GIT_SHA={sha_full}");
 
+    // Human-readable build stamp baked into FW_VER on the wire and
+    // shown on the dashboard's device card. Drops ISO T/Z + seconds —
+    // operator wants "X.Y.Z-date-time", not log-format.
     let ts = std::process::Command::new("date")
-        .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
+        .args(["-u", "+%Y-%m-%d-%H:%M"])
         .output()
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())

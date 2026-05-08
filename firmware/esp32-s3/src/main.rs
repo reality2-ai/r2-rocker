@@ -220,6 +220,10 @@ fn main() -> Result<()> {
             };
             if msg.header.event_hash == wifi_offer_hash {
                 info!("[PROV] #wifi_offer received via BLE L2CAP");
+                // Cyan flash on both physical + virtual LEDs while we
+                // process the offer + persist + reboot. Lasts the 1 s
+                // post-save sleep — long enough to be visible.
+                led_handle.set(led::LedState::BleConnected);
                 if let Some((ssid, psk)) = wifi_prov::decode_wifi_offer(msg.payload) {
                     info!("[PROV] decoded ssid=\"{}\" — saving to NVS", ssid);
                     if wifi_prov::save_credentials(&ssid, &psk) {
