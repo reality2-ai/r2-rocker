@@ -8,6 +8,7 @@
 //!      L2CAP PSM 0xD2 for `#wifi_offer` events from the controller.
 //!   4. On a valid offer: persist creds to NVS and reboot to apply.
 
+mod adxl355;
 mod identity;
 mod led;
 mod sim;
@@ -17,6 +18,7 @@ mod sender;
 use anyhow::{anyhow, Context, Result};
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::delay::FreeRtos;
+use esp_idf_svc::hal::gpio::IOPin;
 use esp_idf_svc::hal::modem::Modem;
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::log::EspLogger;
@@ -57,6 +59,35 @@ fn main() -> Result<()> {
     let led_handle = led::start(peripherals.rmt.channel0, peripherals.pins.gpio38)
         .context("LED init")?;
     led_handle.set(led::LedState::Boot);
+
+    // ── ADXL355 SPI smoke test (Phase 2 first cut) ──────────────────
+    // Read DEVID_AD / DEVID_MST / PARTID over SPI to prove the chip
+    // enumerates. On mismatch or transport error, flash LED red briefly
+    // and continue boot — WiFi + TCP still come up so the dashboard
+    // shows what's happening, and the serial console carries the
+    // diagnostic. A future Phase 2 iteration will replace AccelSim
+    // with a real driver hanging off this same SPI2 bus.
+    use esp_idf_svc::hal::peripheral::Peripheral as _;
+    match adxl355::smoke_test_who_am_i(
+        peripherals.spi2,
+        peripherals.pins.gpio12.downgrade(),
+        peripherals.pins.gpio11.downgrade(),
+        peripherals.pins.gpio13.downgrade(),
+        peripherals.pins.gpio10.downgrade(),
+    ) {
+        Ok(ids) if !ids.matches() => {
+            led_handle.set(led::LedState::Error);
+            FreeRtos::delay_ms(2000);
+            led_handle.set(led::LedState::Boot);
+        }
+        Err(e) => {
+            warn!("[ADXL355] smoke test errored: {e:?}");
+            led_handle.set(led::LedState::Error);
+            FreeRtos::delay_ms(2000);
+            led_handle.set(led::LedState::Boot);
+        }
+        Ok(_) => {}
+    }
 
     // Pull out the modem for `run()`. Anything else from `peripherals`
     // is unused right now — extract more if/when needed.
