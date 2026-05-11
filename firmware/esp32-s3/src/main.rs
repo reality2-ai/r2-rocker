@@ -60,38 +60,14 @@ fn main() -> Result<()> {
         .context("LED init")?;
     led_handle.set(led::LedState::Boot);
 
-    // ── ADXL355 SPI smoke test (Phase 2 first cut) ──────────────────
-    // Read DEVID_AD / DEVID_MST / PARTID over SPI to prove the chip
-    // enumerates. On mismatch or transport error, flash LED red briefly
-    // and continue boot — WiFi + TCP still come up so the dashboard
-    // shows what's happening, and the serial console carries the
-    // diagnostic. A future Phase 2 iteration will replace AccelSim
-    // with a real driver hanging off this same SPI2 bus.
-    use esp_idf_svc::hal::peripheral::Peripheral as _;
-    match adxl355::smoke_test_who_am_i(
-        peripherals.spi2,
-        peripherals.pins.gpio12.downgrade(),
-        peripherals.pins.gpio11.downgrade(),
-        peripherals.pins.gpio13.downgrade(),
-        peripherals.pins.gpio10.downgrade(),
-    ) {
-        Ok(ids) if !ids.matches() => {
-            led_handle.set(led::LedState::Error);
-            FreeRtos::delay_ms(2000);
-            led_handle.set(led::LedState::Boot);
-        }
-        Err(e) => {
-            warn!("[ADXL355] smoke test errored: {e:?}");
-            led_handle.set(led::LedState::Error);
-            FreeRtos::delay_ms(2000);
-            led_handle.set(led::LedState::Boot);
-        }
-        Ok(_) => {}
-    }
-
-    // Pull out the modem for `run()`. Anything else from `peripherals`
-    // is unused right now — extract more if/when needed.
+    // Pull out the peripherals `run()` and the sender thread will need.
+    // Anything else from `peripherals` is unused right now.
     let modem = peripherals.modem;
+    let spi2  = peripherals.spi2;
+    let sclk  = peripherals.pins.gpio12.downgrade();
+    let mosi  = peripherals.pins.gpio11.downgrade();
+    let miso  = peripherals.pins.gpio13.downgrade();
+    let cs    = peripherals.pins.gpio10.downgrade();
 
     // Top-level error trap — anything below sets the LED red long
     // enough for the operator to see, then resets the chip. The
@@ -99,7 +75,7 @@ fn main() -> Result<()> {
     // point: a buggy new image whose sender never reaches its first
     // successful frame round-trip never marks itself valid, and the
     // next reset rolls back to the previous slot.
-    if let Err(e) = run(led_handle.clone(), modem, sysloop, nvs) {
+    if let Err(e) = run(led_handle.clone(), modem, sysloop, nvs, spi2, sclk, mosi, miso, cs) {
         error!("[FATAL] init/runtime error: {e:?}");
         led_handle.set(led::LedState::Error);
         FreeRtos::delay_ms(10_000);
@@ -117,6 +93,11 @@ fn run(
     modem: Modem,
     sysloop: EspSystemEventLoop,
     nvs: EspDefaultNvsPartition,
+    spi2: esp_idf_svc::hal::spi::SPI2,
+    sclk: esp_idf_svc::hal::gpio::AnyIOPin,
+    mosi: esp_idf_svc::hal::gpio::AnyIOPin,
+    miso: esp_idf_svc::hal::gpio::AnyIOPin,
+    cs:   esp_idf_svc::hal::gpio::AnyIOPin,
 ) -> Result<()> {
     // ── Identity (§3.1) — Ed25519 keypair, persisted to NVS. ──────────
     let identity = std::sync::Arc::new(
@@ -231,16 +212,34 @@ fn run(
 
         // Run the sender on its own thread so the main thread can keep
         // draining BLE L2CAP for re-provisioning offers.
+        //
+        // SPI peripherals move into the closure → constructed into an
+        // Adxl355 driver inside the thread (SPI device drivers are not
+        // Send, so this is the right side of the thread boundary). If
+        // init fails the sender falls back to the simulator with a
+        // logged warning — wire path still works for debug.
         let id_for_sender = identity.clone();
         let led_for_sender = led_handle.clone();
         std::thread::Builder::new()
             .stack_size(16384)
             .name("sender".into())
             .spawn(move || {
-                let mut s = sender::Sender::new(gateway, hostname, id_for_sender, led_for_sender);
+                let adxl = match adxl355::Adxl355::new(spi2, sclk, mosi, miso, cs) {
+                    Ok(a) => Some(a),
+                    Err(e) => {
+                        warn!("[ADXL355] init failed in sender thread: {e:?} — falling back to simulator");
+                        None
+                    }
+                };
+                let mut s = sender::Sender::new(gateway, hostname, id_for_sender, led_for_sender, adxl);
                 s.run();
             })
             .context("spawn sender thread")?;
+    } else {
+        // BLE-only path: no sender thread, SPI peripherals go unused.
+        // Drop them explicitly so the compiler doesn't warn (they're
+        // moved into `run()` but never consumed otherwise).
+        let _ = (spi2, sclk, mosi, miso, cs);
     }
 
     // ── Main loop — drain L2CAP for `#wifi_offer` (§4.2). ────────────

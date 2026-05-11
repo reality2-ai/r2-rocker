@@ -21,6 +21,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::adxl355::Adxl355;
 use crate::identity::Identity;
 use crate::led::LedHandle;
 use crate::sim::{AccelSim, BatterySim};
@@ -55,7 +56,14 @@ const FW_VER: &str = concat!(
 pub struct Sender {
     pub gateway: SocketAddr,
     pub hostname: String,
-    accel: AccelSim,
+    /// Real ADXL355 driver. Some(_) means SPI init + WHO_AM_I + standby-
+    /// clear succeeded; samples come from this. None means the driver
+    /// failed at boot and we fall back to `accel_sim` so the wire path
+    /// still works for further debug.
+    adxl: Option<Adxl355<'static>>,
+    /// Fallback / always-available simulator. Used when `adxl` is None
+    /// OR when an individual sample read errors (logged + skipped).
+    accel_sim: AccelSim,
     battery: BatterySim,
     /// Per-device Ed25519 identity, NVS-persisted (Phase 5a).
     identity: Arc<Identity>,
@@ -78,11 +86,13 @@ impl Sender {
         hostname: String,
         identity: Arc<Identity>,
         led: LedHandle,
+        adxl: Option<Adxl355<'static>>,
     ) -> Self {
         Self {
             gateway,
             hostname,
-            accel: AccelSim::rocker_default(),
+            adxl,
+            accel_sim: AccelSim::rocker_default(),
             battery: BatterySim::lipo_default(),
             identity,
             led,
@@ -229,9 +239,25 @@ impl Sender {
         Ok(())
     }
 
-    fn send_sample(&self, stream: &mut TcpStream, seq: u32) -> Result<()> {
-        let t_s = self.boot_instant.elapsed().as_secs_f32();
-        let (x, y, z) = self.accel.sample(t_s);
+    fn send_sample(&mut self, stream: &mut TcpStream, seq: u32) -> Result<()> {
+        // Prefer real samples when the chip is initialised; fall back to
+        // the simulator if SPI init failed at boot OR if an individual
+        // read errors. A per-read failure logs once and resorts to sim
+        // for that one sample — the chip may still be usable for the
+        // next tick (e.g. transient bus glitch).
+        let (x, y, z) = if let Some(adxl) = self.adxl.as_mut() {
+            match adxl.read_xyz_lsb() {
+                Ok(xyz) => xyz,
+                Err(e) => {
+                    warn!("[ADXL355] sample read failed: {e:?} — using sim for this tick");
+                    let t_s = self.boot_instant.elapsed().as_secs_f32();
+                    self.accel_sim.sample(t_s)
+                }
+            }
+        } else {
+            let t_s = self.boot_instant.elapsed().as_secs_f32();
+            self.accel_sim.sample(t_s)
+        };
 
         let mut payload = [0u8; 32];
         let mut w = CborWriter::new(&mut payload);
