@@ -1,0 +1,65 @@
+# sdkconfig.defaults — applied on top of ESP-IDF defaults at build time.
+# Tuned for the Seeed XIAO ESP32-S3 (Pre-Soldered) carrier
+# (per HARDWARE-WIRING-XIAO.md §1).
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# Generous main-task stack for higher-level Rust code (logging,
+# allocations, future BLE/WiFi/SPI work).
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16000
+
+# XIAO ESP32-S3: 8 MB flash (matches the ESP32-S3R8 module the XIAO
+# uses). The XIAO ESP32-S3 Plus has 16 MB — change to FLASHSIZE_16MB
+# if you build for that SKU.
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+
+# Octal PSRAM — the XIAO's ESP32-S3R8 die has 8 MB octal SPI PSRAM
+# integrated. Comment out only if you are building for a no-PSRAM
+# variant.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# Watchdog defaults are 5 s on the main task — fine for the smoke test.
+# Phase 1+ will tighten this with explicit kicks per SPEC-R2-ROCKER-SENSOR §2.3.
+
+# ─── Console routing ──────────────────────────────────────────────────────
+# Send `log::info!` output to the ESP32-S3's native USB-Serial-JTAG.
+# The XIAO has a single USB-C port wired to the chip's native
+# USB-Serial-JTAG peripheral — `espflash flash --monitor` carries the
+# log output back over the same cable used to flash.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# ─── OTA / partition table ────────────────────────────────────────────────
+# Custom two-OTA-slot layout — see partitions.csv in this directory.
+# build.rs physically copies partitions.csv into esp-idf-sys's CMake
+# build dir each cycle so this relative path resolves there. (ESP-IDF
+# resolves the filename relative to its auto-generated project_dir,
+# which is esp-idf-sys's OUT dir, not our crate root.) Same workaround
+# as r2-core/platforms/esp32-s3.
+#
+# First build of a fresh checkout will use the ESP-IDF default table
+# because the OUT dir doesn't exist yet when build.rs first runs. Run
+# `tools/setup-firmware.sh` before the first cargo invocation, or
+# rebuild once. Second build onwards picks up the custom layout.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# ─── Bluetooth LE / NimBLE (Phase 6) ──────────────────────────────────────
+# Required for r2-esp::beacon (R2-BEACON advertise+scan) and r2-esp::l2cap
+# (CoC server on PSM 0xD2). esp32-nimble 0.11 only generates its `sys::*`
+# bindings against these symbols when NimBLE is the selected host stack —
+# Bluedroid is the ESP-IDF default and silently produces an empty bindings
+# set, which is why a build without these lines fails with hundreds of
+# "not found in `sys`" errors.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_BLUEDROID_ENABLED=n
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=3
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=y
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
+CONFIG_BT_NIMBLE_L2CAP_COC_MAX_NUM=3
+CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=251

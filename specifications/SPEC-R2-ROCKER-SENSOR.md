@@ -1,9 +1,9 @@
 # SPEC-R2-ROCKER-SENSOR: Sensor Firmware Behaviour
 
-**Version:** 0.1 Draft
-**Date:** 2026-05-07
+**Version:** 0.2 Draft
+**Date:** 2026-05-12
 **Status:** Normative Draft
-**Depends on:** SPEC-R2-ROCKER-WIRE, R2-WIRE, R2-TRUST, R2-BLE, R2-BOOTSTRAP, R2-WIFI
+**Depends on:** SPEC-R2-ROCKER-WIRE, R2-WIRE, R2-TRUST, R2-BLE, R2-BOOTSTRAP, R2-WIFI, HARDWARE-WIRING (carrier-specific)
 
 ---
 
@@ -15,8 +15,19 @@ acquisition, SD-card store-and-forward semantics, network behaviour, OTA
 update flow, NVS configuration, and error handling.
 
 It builds on `SPEC-R2-ROCKER-WIRE` (which defines what is sent on the
-wire) and is implemented against the reference hardware described in
-`HARDWARE-WIRING.md`.
+wire) and is implemented against any of the supported carrier boards
+described in `HARDWARE-WIRING.md` (which is an index of carrier-
+specific wiring documents — see ADR-001 for the carrier-choice
+rationale).
+
+This specification is **carrier-agnostic**: it refers to logical pins
+(ADXL355 SPI, battery-sense ADC channel, DRDY, etc.) and points at
+the active carrier's wiring document for the physical GPIO numbers.
+A new carrier may be added by writing a `HARDWARE-WIRING-<NAME>.md`
+file and updating the carrier index — no changes to this
+specification are required so long as the carrier's SoC is ESP32-S3.
+A different SoC family (ESP32-C6, RP2040, etc.) would require a new
+ADR documenting the toolchain and protocol-stack implications.
 
 ### 1.1 Scope
 
@@ -78,9 +89,11 @@ the corresponding error code (§13.1):
 5. Initialise SPI2 driver (FSPI defaults; see `HARDWARE-WIRING.md` §2.1).
 6. Initialise ADXL355 over SPI2; verify WHO_AM_I (`DEVID_AD = 0xAD`,
    `DEVID_MST = 0x1D`, `PARTID = 0xED`). Mismatch → `SPI_FAULT`.
-7. Mount SD card via FATFS over SPI2 (CS = GPIO9). Failure →
-   `SD_MOUNT_FAIL`.
-8. Initialise ADC1 oneshot driver, configure CH3 (GPIO4) at 12 dB
+7. Mount SD card via FATFS over SPI2 (CS pin per the active carrier's
+   wiring spec; see `HARDWARE-WIRING.md` for the carrier index).
+   Failure → `SD_MOUNT_FAIL`.
+8. Initialise ADC1 oneshot driver, configure the battery-sense channel
+   (channel and GPIO per the active carrier's wiring spec) at 12 dB
    attenuation, 12-bit width.
 9. Load device key from NVS; if absent, generate a fresh Ed25519 keypair
    via `esp_fill_random()` and persist (§3.1). NVS errors → `NVS_FAIL`.
@@ -357,8 +370,10 @@ raw_signed   = sign_extend_20bit(raw_unsigned)
 The firmware shall sample at the configured `rate_hz` (default 100 Hz,
 NVS-tunable). Two acquisition modes are permitted:
 
-* **DRDY-triggered** (preferred at high rates): GPIO14 ISR triggers a
-  task that performs the burst read.
+* **DRDY-triggered** (preferred at high rates): the ADXL355 DRDY pin
+  (GPIO per the active carrier's wiring spec — see
+  `HARDWARE-WIRING.md`) ISR triggers a task that performs the burst
+  read.
 * **Polled at fixed period** (acceptable for ≤ 200 Hz): a periodic
   FreeRTOS timer fires at `1/rate_hz`.
 
@@ -554,8 +569,11 @@ pattern).
 
 ### 8.1 Sampling
 
-ADC1_CH3 (GPIO4) shall be sampled at 12-bit resolution with 12 dB
-attenuation (full-scale ≈ 3.1 V). Each battery reading shall be the
+The battery-sense ADC channel (ADC1, channel and GPIO per the active
+carrier's wiring spec — see `HARDWARE-WIRING.md` for the carrier
+index) shall be sampled at 12-bit resolution with 12 dB attenuation
+(full-scale ≈ 3.1 V). The channel MUST be on ADC1, not ADC2 — ADC2
+is unusable while WiFi is active. Each battery reading shall be the
 median of 16 successive samples to reject ADC noise.
 
 ADC calibration via esp-idf's two-point calibration scheme is REQUIRED

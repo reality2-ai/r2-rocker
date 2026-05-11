@@ -1,0 +1,50 @@
+[package]
+name        = "r2-rocker-firmware"
+version     = "0.1.0"
+edition     = "2021"
+description = "r2-rocker sensor firmware (ESP32-S3-DevKitC-1)"
+license     = "MIT OR Apache-2.0"
+publish     = false
+
+[[bin]]
+name    = "r2-rocker-firmware"
+path    = "src/main.rs"
+harness = false
+
+[profile.release]
+opt-level     = "s"
+lto           = "fat"
+codegen-units = 1
+debug         = false
+strip         = true
+
+[profile.dev]
+opt-level = "z"
+debug     = true
+
+[dependencies]
+log           = "0.4"
+anyhow        = "1"
+libm          = "0.2"
+esp-idf-svc   = { version = "0.51", default-features = false, features = ["binstart", "std"] }
+# Per-device Ed25519 identity. Generated on first boot, persisted to NVS,
+# used to sign r2.sensor.announce so the dashboard can verify the sender
+# really holds device_pk (Phase 5a). Pin to the same version r2-core uses
+# for cross-component compat.
+ed25519-dalek = { version = "=2.1.1", default-features = false }
+
+# Phase 6: shared ESP-IDF substrate from r2-core — beacon + L2CAP +
+# wifi_prov + wifi_sta + hive_id. Excluded from the host workspace
+# (xtensa-only); built only by this firmware crate.
+r2-esp        = { path = "../../../crates/r2-esp", default-features = true }
+r2-core       = { path = "../../../crates/r2-core", default-features = false, features = ["alloc"] }
+r2-wire       = { path = "../../../crates/r2-wire", default-features = false, features = ["alloc"] }
+
+# Phase 5L — onboard WS2812 RGB LED (DevKitC-1 v1.1 = GPIO38). Driven
+# via the ESP32 RMT peripheral; the driver crate handles the WS2812
+# bit-timing encoder so we stay focused on state→colour mapping.
+ws2812-esp32-rmt-driver = { version = "0.13", default-features = false, features = ["std", "smart-leds-trait"] }
+smart-leds              = "0.4"
+
+[build-dependencies]
+embuild = { version = "0.32", features = ["espidf"] }

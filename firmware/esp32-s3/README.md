@@ -1,112 +1,78 @@
-# r2-rocker firmware (ESP32-S3)
+# r2-rocker firmware — ESP32-S3 carriers
 
-Sensor firmware for the r2-rocker structural-health-monitoring rig.
-Currently at **Phase 0.5** — pre-soldering smoke test.
+The r2-rocker sensor firmware runs on an ESP32-S3 carrier board.
+**Two carriers are supported as parallel alternative implementations**,
+each with its own crate under this directory.
 
-## What this firmware does (Phase 0.5)
+## Choose your carrier
 
-* Boots.
-* Prints `r2-rocker firmware v0.1.0` and the device's WiFi MAC over UART.
-* Loops, printing one state name per second from the FSM in
-  `SPEC-R2-ROCKER-SENSOR.md` §4.1.
+| Carrier | Tree | Wiring | Status |
+|---|---|---|---|
+| **Seeed XIAO ESP32-S3** (Pre-Soldered) | [`xiao/`](xiao/) | [`HARDWARE-WIRING-XIAO.md`](../../specifications/HARDWARE-WIRING-XIAO.md) | **Current default** (ADR-001) |
+| ESP32-S3-DevKitC-1 | [`devkitc/`](devkitc/) | [`HARDWARE-WIRING-DEVKITC.md`](../../specifications/HARDWARE-WIRING-DEVKITC.md) | Alternative — fully supported |
 
-Nothing else. It does not read the ADXL355, talk to the dashboard,
-write to SD, or sample the battery — those land in Phases 1–5 once the
-hardware is soldered and the protocol stack is in place.
+See [`../../specifications/HARDWARE-WIRING.md`](../../specifications/HARDWARE-WIRING.md)
+for the carrier-choice framework and the trade-offs that drove ADR-001
+([`../../specifications/decisions/ADR-001-xiao-esp32-s3-carrier.md`](../../specifications/decisions/ADR-001-xiao-esp32-s3-carrier.md)).
 
-The **OTA-ready partition table** (`partitions.csv`) is wired in from
-Phase 0.5 onward — two 3 MB OTA slots + 1.875 MB `storage` partition,
-no factory slot. The bootloader's auto-rollback feature is enabled
-(`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`) so OTA-installed images that
-fail first-boot validation revert automatically.
+## What's shared between the two trees
 
-How it's wired: ESP-IDF's CMake resolves
-`CONFIG_PARTITION_TABLE_CUSTOM_FILENAME` relative to esp-idf-sys's
-auto-generated build directory, not our crate root. `build.rs` copies
-`partitions.csv` into that directory each cycle so the relative path
-resolves there. (Same trick as `r2-core/platforms/esp32-s3`.) On a
-**fresh checkout** the FIRST build still uses the default table — run
-`tools/setup-firmware.sh` once before the first `cargo build` to
-pre-stage the file, OR just rebuild a second time.
+Both carriers run on the same **ESP32-S3** silicon with the same Rust
+target (`xtensa-esp32s3-espidf`), the same ESP-IDF version, the same
+dependency set, and functionally-equivalent firmware. The driver code
+(`adxl355.rs`), the sender pipeline (`sender.rs`), the LED state
+machine (`led.rs`), the identity (`identity.rs`), the wire helpers
+(`wire.rs`), and the simulator (`sim.rs`) are byte-identical across
+the two trees today.
 
-## Toolchain prerequisites
+## What differs
 
-This crate uses `esp-idf-svc` and the Xtensa Rust toolchain. One-time
-setup:
+| File | What differs |
+|---|---|
+| `src/main.rs` | Pin literals — XIAO uses D0/D5/D8/D9/D10/D1 (GPIO1/6/7/8/9/2); DevKitC uses GPIO10/38/12/13/11/14 |
+| `Cargo.toml` | Description string and one comment about the WS2812 driver context |
+| `sdkconfig.defaults` | Comments only — both carriers have 8 MB flash + 8 MB octal PSRAM + USB-Serial-JTAG console |
+| `partitions.csv` | Comments only — partition layout is identical |
+| `README.md` | Build-and-flash instructions specific to each carrier |
+| `releases/` | Per-carrier built `.bin` artifacts (gitignored) |
 
-```bash
-espup install
-source ~/export-esp.sh    # or add the source line to your shell rc
-```
-
-`espup install` brings in the Xtensa LLVM, the `esp` Rust toolchain,
-and the ESP-IDF SDK source.
-
-## Build & flash
-
-Plug the DevKitC-1 into the **USB-to-UART** port (the Micro-USB labelled
-`UART` on the silkscreen — not the native USB-OTG one).
+## Choosing a build
 
 ```bash
-cd firmware/esp32-s3
-cargo run --release
+# Build for the XIAO carrier:
+cd firmware/esp32-s3/xiao && cargo run --release
+
+# Build for the DevKitC carrier:
+cd firmware/esp32-s3/devkitc && cargo run --release
 ```
 
-`cargo run` invokes `espflash flash --monitor` (per `.cargo/config.toml`),
-which cross-compiles for `xtensa-esp32s3-espidf`, flashes the binary, and
-opens a serial monitor.
+Each crate has its own `target/` and `.embuild/` — first build of
+either tree clones the ESP-IDF and takes 15–30 minutes; subsequent
+builds are fast.
 
-> **First build takes 15–30 minutes.** `esp-idf-svc` builds the entire
-> ESP-IDF C SDK on first build. Subsequent builds are fast.
+## Adding a third carrier
 
-## Expected UART output
+If you want to add a different ESP32-S3 board (FireBeetle 2 ESP32-S3,
+XIAO ESP32-S3 Plus, or a custom PCB):
 
-```
-I (315) r2_rocker_firmware: ================================================
-I (315) r2_rocker_firmware: r2-rocker firmware v0.1.0
-I (325) r2_rocker_firmware: Phase 0.5 — pre-soldering smoke test
-I (325) r2_rocker_firmware: ================================================
-I (335) r2_rocker_firmware:
-I (335) r2_rocker_firmware: This firmware confirms the build, flash, and boot path.
-I (345) r2_rocker_firmware: It does not yet read sensors or talk to the network.
-I (355) r2_rocker_firmware:
-I (355) r2_rocker_firmware: Device MAC: 7c:df:a1:b2:c3:d4
-I (365) r2_rocker_firmware:
-I (365) r2_rocker_firmware: Beginning FSM-state heartbeat (1 Hz).
-I (375) r2_rocker_firmware: Press Ctrl-C in the monitor to exit.
-I (385) r2_rocker_firmware:
-I (1385) r2_rocker_firmware: [t=    0s] FSM-demo state: BOOT
-I (2385) r2_rocker_firmware: [t=    1s] FSM-demo state: ADVERTISING
-I (3385) r2_rocker_firmware: [t=    2s] FSM-demo state: BLE_CONNECTED
-I (4385) r2_rocker_firmware: [t=    3s] FSM-demo state: WIFI_CONNECTING
-…
-```
+1. Copy one of the existing trees (`xiao/` or `devkitc/`) to a new
+   directory under this folder.
+2. Adjust `src/main.rs` pin literals to match the new board's GPIO map.
+3. Update `Cargo.toml` description and the WS2812 comment.
+4. Adjust `partitions.csv` if the new board has a different flash
+   size.
+5. Update `sdkconfig.defaults` for any board-specific options (e.g.
+   PSRAM presence, flash size, console routing).
+6. Add a corresponding `HARDWARE-WIRING-<NAME>.md` under
+   `specifications/` and extend `HARDWARE-WIRING.md` (the carrier
+   index).
+7. If the carrier uses a **different SoC family** (e.g. ESP32-C6
+   RISC-V, RP2040 ARM), write a new ADR that captures the toolchain
+   and protocol-stack implications — that is a much larger
+   undertaking than a same-SoC carrier swap. See ADR-001
+   §"Alternatives considered" for an example of the ESP32-C6
+   analysis.
 
-If you see this, the toolchain works and the board is alive — proceed
-to Phase 1 once the ADXL355 is soldered per `HARDWARE-WIRING.md`.
-
-## Board-variant notes
-
-`sdkconfig.defaults` is tuned for **ESP32-S3-DevKitC-1-N8R8** (8 MB
-flash, 8 MB octal PSRAM). For other variants:
-
-* **N32R16V**: change `CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y` to
-  `CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y`. Note: this variant has **1.8 V SPI**
-  — GPIO47/48 are 1.8 V signal levels, not 3.3 V. The on-board RGB LED
-  (when we add it in a later firmware version) will need different drive.
-* **WROOM-1U-N8R8** (external antenna): same settings as N8R8.
-* **No-PSRAM** modules: comment out the `CONFIG_SPIRAM*` lines.
-
-## Common issues
-
-* **`error: linker `ldproxy` not found`** — `espup install` not run, or
-  `~/export-esp.sh` not sourced in this shell.
-* **`unable to find a chip`** — DevKitC plugged into wrong USB port, or
-  not in download mode. Hold BOOT, press RESET, release BOOT, then retry
-  flashing.
-* **Build fails with PSRAM-related error** — your module has no PSRAM;
-  comment out the `CONFIG_SPIRAM*` lines in `sdkconfig.defaults`.
-
-## Exit the serial monitor
-
-Press `Ctrl-C` in the terminal where `cargo run` is attached.
+A Cargo-workspace consolidation that pulls the shared sources into a
+library crate (with each carrier providing only its `main.rs` + build
+config) is a plausible future cleanup — out of scope for v0.1.

@@ -1,0 +1,21 @@
+# r2-rocker partition table — 8 MB flash, two OTA slots, no factory.
+#
+# Layout for the Seeed XIAO ESP32-S3 (8 MB flash on the ESP32-S3R8 die).
+# Identical sizing to the DevKitC-1-N8R8 build — both carriers ship with
+# 8 MB flash, so the same partition table works for either. Set up from
+# Phase 0.5 onward so that no re-flash of a different partition table is
+# needed when OTA arrives in Phase 9.
+#
+# OTA slots are 3 MB each — plenty of headroom for a full esp-idf-svc
+# firmware (BLE + WiFi + NimBLE + R2 stack ≈ 2–3 MB). The remaining
+# 1.875 MB `storage` partition is reserved for non-volatile local data
+# (e.g. cached metadata, OTA backup digest, debug logs) per
+# SPEC-R2-ROCKER-SENSOR §6 / §12.
+#
+# # Name,    Type, SubType, Offset,   Size,      Flags
+nvs,         data, nvs,     0x9000,   0x6000,
+otadata,     data, ota,     0xf000,   0x2000,
+phy_init,    data, phy,     0x11000,  0x1000,
+ota_0,       app,  ota_0,   0x20000,  0x300000,
+ota_1,       app,  ota_1,   0x320000, 0x300000,
+storage,     data, fat,     0x620000, 0x1E0000,
