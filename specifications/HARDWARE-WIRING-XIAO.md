@@ -1,10 +1,10 @@
 ---
 title: r2-rocker — Hardware wiring (Seeed XIAO ESP32-S3)
-status: Draft v0.1 — current default carrier per ADR-001
-date: 2026-05-11
+status: Alternative carrier — fully supported (was current default under ADR-001; reverted by ADR-002)
+date: 2026-05-11 (status reflagged 2026-05-13)
 applies-to: Seeed XIAO ESP32-S3 (Pre-Soldered SKU) + EVAL-ADXL355-PMDZ + microSD-SPI + LiPo (removable, on-board charging)
-related-carriers: HARDWARE-WIRING-DEVKITC.md (alternative, fully supported)
-related: decisions/ADR-001-xiao-esp32-s3-carrier.md
+related-carriers: HARDWARE-WIRING-DEVKITC.md (current default per ADR-002)
+related: decisions/ADR-001-xiao-esp32-s3-carrier.md, decisions/ADR-002-revert-active-default-to-devkitc.md
 trade-offs: On-board LiPo charger + buck regulator + USB-C, tiny form factor; only 11 exposed GPIOs, 8 MB flash, no on-board RGB LED (external WS2812 required)
 ---
 
@@ -14,15 +14,18 @@ Soldering-ready wiring for the rocker-rig sensor node. Three phases, each
 self-contained — you can stop after any phase and have a working sensor for
 that phase's scope.
 
-> **One of several supported carrier-board implementations.** This is
-> the **current default** for new builds (see
-> `decisions/ADR-001-xiao-esp32-s3-carrier.md` for the rationale). The
-> ESP32-S3-DevKitC-1 build at `HARDWARE-WIRING-DEVKITC.md` is a fully-
-> supported alternative — both wiring documents describe complete,
-> working sensor implementations against the same firmware codebase
-> and the same SPEC-R2-ROCKER-SENSOR contract. A future student or
-> operator may legitimately choose either carrier depending on
-> priorities (size, GPIO headroom, on-board peripherals, BOM).
+> **One of several supported carrier-board implementations.** This
+> XIAO build is a **fully-supported alternative** carrier; the
+> **current default** for new builds is the ESP32-S3-DevKitC-1 (see
+> `HARDWARE-WIRING-DEVKITC.md` and
+> `decisions/ADR-002-revert-active-default-to-devkitc.md`). ADR-001
+> originally made the XIAO the default during a parts-availability
+> window; ADR-002 reverted after a buck-boost regulator and SD
+> breakout arrived. Both wiring documents describe complete, working
+> sensor implementations against the same firmware codebase and the
+> same SPEC-R2-ROCKER-SENSOR contract. A future student or operator
+> may legitimately choose either carrier depending on priorities
+> (size, GPIO headroom, on-board peripherals, BOM).
 
 | Phase | Adds | Purpose |
 |---|---|---|

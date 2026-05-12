@@ -1,23 +1,25 @@
 ---
 title: r2-rocker — Hardware wiring (ESP32-S3-DevKitC-1)
-status: Alternative carrier — not the current default; fully supported
-date: 2026-05-07 (last revised 2026-05-11)
+status: Current default per ADR-002 (was alternative under ADR-001)
+date: 2026-05-07 (last revised 2026-05-13)
 applies-to: ESP32-S3-DevKitC-1 + EVAL-ADXL355-PMDZ + microSD-SPI + LiPo (removable, externally charged)
-related-carriers: HARDWARE-WIRING-XIAO.md (current default per ADR-001)
-trade-offs: More GPIO headroom (45 pins vs 11), on-board RGB LED, 16 MB flash; requires external buck-boost regulator for LiPo operation
+related-carriers: HARDWARE-WIRING-XIAO.md (alternative — fully supported)
+trade-offs: More GPIO headroom (45 pins vs 11), on-board RGB LED, 16 MB flash, discrete + diagnosable power chain; requires external buck-boost regulator for LiPo operation
 ---
 
 # r2-rocker — Hardware wiring (ESP32-S3-DevKitC-1)
 
-> **One of several supported carrier-board implementations.** The
-> current default for new builds is the **Seeed XIAO ESP32-S3** (see
-> `HARDWARE-WIRING-XIAO.md` and `decisions/ADR-001-xiao-esp32-s3-carrier.md`),
-> chosen for on-board power management and smaller form factor. This
-> ESP32-S3-DevKitC-1 build is a fully-functional alternative — a
-> future student or operator who wants more GPIO headroom, the
-> on-board WS2812 LED, or 16 MB of flash may legitimately choose it.
-> The DevKitC firmware tree at `firmware/esp32-s3/devkitc/` is the
-> active build target for this carrier.
+> **Current default carrier for new builds** (per
+> `decisions/ADR-002-revert-active-default-to-devkitc.md`). The
+> ESP32-S3-DevKitC-1 was the original carrier (ADR-001 briefly moved
+> to the XIAO during a parts-availability window; ADR-002 reverted
+> after the buck-boost regulator and SD breakout arrived). The
+> **Seeed XIAO ESP32-S3** build at `HARDWARE-WIRING-XIAO.md` remains
+> a fully-supported alternative — a future student or operator who
+> wants the on-board LiPo charging, USB-C convenience, or the tiny
+> form factor may legitimately choose it. The DevKitC firmware tree
+> at `firmware/esp32-s3/devkitc/` is the active build target for
+> this carrier.
 
 Soldering-ready wiring for the rocker-rig sensor node. Three phases, each
 self-contained — you can stop after any phase and have a working sensor for

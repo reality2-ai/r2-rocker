@@ -8,12 +8,16 @@ each with its own crate under this directory.
 
 | Carrier | Tree | Wiring | Status |
 |---|---|---|---|
-| **Seeed XIAO ESP32-S3** (Pre-Soldered) | [`xiao/`](xiao/) | [`HARDWARE-WIRING-XIAO.md`](../../specifications/HARDWARE-WIRING-XIAO.md) | **Current default** (ADR-001) |
-| ESP32-S3-DevKitC-1 | [`devkitc/`](devkitc/) | [`HARDWARE-WIRING-DEVKITC.md`](../../specifications/HARDWARE-WIRING-DEVKITC.md) | Alternative — fully supported |
+| **ESP32-S3-DevKitC-1** | [`devkitc/`](devkitc/) | [`HARDWARE-WIRING-DEVKITC.md`](../../specifications/HARDWARE-WIRING-DEVKITC.md) | **Current default** (ADR-002) |
+| Seeed XIAO ESP32-S3 (Pre-Soldered) | [`xiao/`](xiao/) | [`HARDWARE-WIRING-XIAO.md`](../../specifications/HARDWARE-WIRING-XIAO.md) | Alternative — fully supported (was current default under ADR-001) |
 
 See [`../../specifications/HARDWARE-WIRING.md`](../../specifications/HARDWARE-WIRING.md)
-for the carrier-choice framework and the trade-offs that drove ADR-001
-([`../../specifications/decisions/ADR-001-xiao-esp32-s3-carrier.md`](../../specifications/decisions/ADR-001-xiao-esp32-s3-carrier.md)).
+for the carrier-choice framework. The carrier-choice history is
+captured in two ADRs:
+[`ADR-001`](../../specifications/decisions/ADR-001-xiao-esp32-s3-carrier.md)
+(XIAO chosen during a parts-availability window) and
+[`ADR-002`](../../specifications/decisions/ADR-002-revert-active-default-to-devkitc.md)
+(DevKitC restored as default once the buck-boost regulator and SD breakout arrived).
 
 ## What's shared between the two trees
 

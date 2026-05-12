@@ -1,7 +1,7 @@
 ---
 title: r2-rocker — Hardware wiring (index of carrier alternatives)
 status: Index — points to carrier-specific wiring documents
-date: 2026-05-11
+date: 2026-05-13
 ---
 
 # r2-rocker — Hardware wiring (carrier alternatives)
@@ -22,30 +22,36 @@ parallel implementations of the same sensor specification.**
 
 | Carrier | Wiring document | Status | Strengths | Trade-offs |
 |---|---|---|---|---|
-| **Seeed XIAO ESP32-S3** (Pre-Soldered) | [`HARDWARE-WIRING-XIAO.md`](HARDWARE-WIRING-XIAO.md) | **Current default** per ADR-001 | On-board LiPo charger + buck regulator + USB-C; tiny 21 × 17.5 mm footprint; ~14 µA deep sleep | 11 GPIO pins (tight if adding hats); 8 MB flash; no on-board RGB LED (external WS2812 required) |
-| **ESP32-S3-DevKitC-1** | [`HARDWARE-WIRING-DEVKITC.md`](HARDWARE-WIRING-DEVKITC.md) | Alternative; fully supported | 45 GPIO pins (lots of expansion); on-board WS2812 RGB LED; 16 MB flash (N16R8 variant) | No on-board LiPo charging; requires external buck-boost regulator for LiPo operation; ~52 × 27 mm footprint |
+| **ESP32-S3-DevKitC-1** | [`HARDWARE-WIRING-DEVKITC.md`](HARDWARE-WIRING-DEVKITC.md) | **Current default** per ADR-002 | 45 GPIO pins (lots of expansion); on-board WS2812 RGB LED; 16 MB flash (N16R8 variant); discrete and diagnosable power chain | No on-board LiPo charging; requires external buck-boost regulator for LiPo operation; ~52 × 27 mm footprint |
+| **Seeed XIAO ESP32-S3** (Pre-Soldered) | [`HARDWARE-WIRING-XIAO.md`](HARDWARE-WIRING-XIAO.md) | Alternative — fully supported (was current default under ADR-001) | On-board LiPo charger + buck regulator + USB-C; tiny 21 × 17.5 mm footprint; ~14 µA deep sleep | 11 GPIO pins (tight if adding hats); 8 MB flash; no on-board RGB LED (external WS2812 required); integrated power IC harder to diagnose if a fault develops |
 
 ## How to choose
 
+Pick the **ESP32-S3-DevKitC-1** (current default) if:
+
+* You have a buck-boost regulator on hand (Pololu S7V8F3 / TPS63020 /
+  similar) — or you're happy running from USB power for bench work.
+* You want the on-board WS2812 RGB LED — one less component to wire.
+* You're prototyping with multiple accessories (SD card, LoRa hat,
+  RS485 breakout) that would exhaust the XIAO's 11-pin header.
+* You're following a teaching / research-handoff path that
+  emphasises explicit, diagnosable power-management circuitry as a
+  learning artifact (the LiPo, buck-boost, divider resistors, and
+  JST-PH disconnect are all individually visible).
+* You may want to access more flash (16 MB on the N16R8 variant) for
+  larger OTA slots or embedded assets.
+
 Pick the **XIAO ESP32-S3** if:
 
-* The sensor packaging needs to be small (rocker rig, embedded
-  deployment).
+* The sensor packaging needs to be small (e.g. a future sealed
+  sensor pack for non-rig deployment).
 * You want USB-C charging of the LiPo without external hardware.
-* The Phase 3 power problem (external buck-boost availability) is a
-  blocker.
+* The external-buck-boost availability is a blocker on your timeline
+  (this was the original reason ADR-001 picked the XIAO — see
+  `decisions/ADR-001-xiao-esp32-s3-carrier.md`).
 * You don't mind running an external WS2812 module on a single GPIO
-  for status indication.
-
-Pick the **ESP32-S3-DevKitC-1** if:
-
-* You're prototyping with many sensor accessories that exhaust the
-  XIAO's 11-pin header.
-* You want the on-board WS2812 RGB LED (one less component).
-* You have access to a buck-boost regulator (Pololu S7V8F3 / TPS63020 /
-  similar) or are happy running from USB power for bench work.
-* You're following a teaching path that emphasises explicit power-
-  management circuitry as a learning artifact.
+  for status indication, and the 11-pin budget fits your accessory
+  set.
 
 ## Adding a new carrier
 
