@@ -94,7 +94,7 @@ Key distinctions:
   - a **QR code** displayed on the dashboard (operator points another
     device's camera at the screen), and
   - a **shareable link** of the form
-    `https://reality2-roycdavies.github.io/r2-rocker/?join=<token>`
+    `https://reality2-ai.github.io/r2-rocker/?join=<token>`
     (operator emails / messages it).
 
   Either path opens the WebApp **and** triggers enrolment in the same
