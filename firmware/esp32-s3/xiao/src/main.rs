@@ -244,10 +244,46 @@ fn run(
             })
             .context("spawn sender thread")?;
     } else {
-        // BLE-only path: no sender thread, SPI peripherals go unused.
-        // Drop them explicitly so the compiler doesn't warn (they're
-        // moved into `run()` but never consumed otherwise).
-        let _ = (spi2, sclk, mosi, miso, cs);
+        // BLE-only mode (no WiFi credentials, or WiFi failed) — spawn
+        // an ADXL355 diagnostic thread anyway so the operator can
+        // verify the SPI wiring and chip enumeration via the serial
+        // log before provisioning WiFi. Useful for bench bring-up of a
+        // new carrier or fresh solder joints — answers "did the chip
+        // come up?" independent of network state.
+        //
+        // No samples leave the device in this mode; nothing is buffered
+        // for later replay. The sender's normal path takes over once
+        // WiFi is provisioned and the firmware reboots.
+        let led_for_diag = led_handle.clone();
+        std::thread::Builder::new()
+            .stack_size(8192)
+            .name("adxl-diag".into())
+            .spawn(move || {
+                match adxl355::Adxl355::new(spi2, sclk, mosi, miso, cs) {
+                    Ok(mut adxl) => {
+                        info!("[ADXL355-DIAG] BLE-only mode — sensor enumerated; sampling 1 Hz to console");
+                        led_for_diag.set(led::LedState::StreamingLive);
+                        const LSB_PER_G: f64 = 256_000.0;
+                        loop {
+                            match adxl.read_xyz_lsb() {
+                                Ok((x, y, z)) => info!(
+                                    "[ADXL355-DIAG] x={:+.3}g y={:+.3}g z={:+.3}g  (raw lsb {}/{}/{})",
+                                    x as f64 / LSB_PER_G,
+                                    y as f64 / LSB_PER_G,
+                                    z as f64 / LSB_PER_G,
+                                    x, y, z,
+                                ),
+                                Err(e) => warn!("[ADXL355-DIAG] read failed: {e:?}"),
+                            }
+                            FreeRtos::delay_ms(1000);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("[ADXL355-DIAG] init failed: {e:?} — sensor not usable in this boot");
+                    }
+                }
+            })
+            .context("spawn adxl-diag thread")?;
     }
 
     // ── Main loop — drain L2CAP for `#wifi_offer` (§4.2). ────────────
