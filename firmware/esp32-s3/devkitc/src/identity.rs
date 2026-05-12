@@ -19,7 +19,7 @@ use log::info;
 
 /// TG public key — same bytes the dashboard verifies against. Embedded
 /// at compile time per SPEC-R2-ROCKER-SENSOR §3.2.
-pub const TG_PUB_KEY: [u8; 32] = *include_bytes!("../../../trust_keys/tg_pub.bin");
+pub const TG_PUB_KEY: [u8; 32] = *include_bytes!("../../../../trust_keys/tg_pub.bin");
 
 const NVS_NS: &str = "r2-rocker";
 const NVS_KEY_DEVICE_PRIV: &str = "device_priv";

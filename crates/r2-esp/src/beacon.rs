@@ -198,10 +198,22 @@ pub fn start(
     let class_string_for_log = config.class_string.clone();
     let cb: Box<dyn Fn(PeerObservation) + Send + 'static> = Box::new(on_peer_observed);
 
-    // BLEDevice::take() + initial advert publish happens inside the spawned
-    // thread so the &'static mut BLEDevice singleton stays cleanly owned by
-    // the loop. If BLE init or first advert fails, the thread logs and
-    // exits without panicking the firmware (USB + LoRa keep running).
+    // Take the BLEDevice singleton SYNCHRONOUSLY here, before spawning
+    // the thread, so NimBLE is fully initialised by the time `start()`
+    // returns. Callers that follow `beacon::start` with `l2cap::init`
+    // (or any other NimBLE-touching call) depend on this — without it,
+    // `ble_l2cap_create_server` can dereference an uninitialised host
+    // struct and the firmware crashes with a Guru Meditation
+    // LoadProhibited at EXCVADDR≈0xa0. Observed on Seeed XIAO ESP32-S3
+    // (see r2-rocker ADR-001), where the race always loses; on the
+    // ESP32-S3-DevKitC-1 it happened to win. `BLEDevice::take()` is
+    // idempotent — the spawned thread re-takes to get the same
+    // `&'static mut` singleton, no double-init.
+    {
+        let ble_device = BLEDevice::take();
+        ble_device.set_preferred_mtu(251).ok();
+    }
+
     std::thread::Builder::new()
         .stack_size(8192)
         .name("beacon".into())

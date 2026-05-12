@@ -75,9 +75,10 @@ impl<'d> Adxl355<'d> {
         MISO: Peripheral<P = AnyIOPin> + 'd,
         CS:   Peripheral<P = AnyIOPin> + 'd,
     {
-        info!(
-            "[ADXL355] init SPI2 (sclk=GPIO12, mosi=GPIO11, miso=GPIO13, cs=GPIO10, mode 0, 5 MHz)"
-        );
+        // Pins are whatever the caller passed in — varies per carrier
+        // (DevKitC: GPIO10/11/12/13; XIAO: GPIO1/9/7/8). See the active
+        // carrier's HARDWARE-WIRING-*.md §2.1 for the physical map.
+        info!("[ADXL355] init SPI2 (mode 0, 5 MHz; pins per active carrier wiring)");
 
         let dev = SpiDeviceDriver::new_single(
             spi2,

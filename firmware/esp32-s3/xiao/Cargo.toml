@@ -2,7 +2,7 @@
 name        = "r2-rocker-firmware"
 version     = "0.1.0"
 edition     = "2021"
-description = "r2-rocker sensor firmware (ESP32-S3-DevKitC-1)"
+description = "r2-rocker sensor firmware (Seeed XIAO ESP32-S3)"
 license     = "MIT OR Apache-2.0"
 publish     = false
 
@@ -36,13 +36,15 @@ ed25519-dalek = { version = "=2.1.1", default-features = false }
 # Phase 6: shared ESP-IDF substrate from r2-core — beacon + L2CAP +
 # wifi_prov + wifi_sta + hive_id. Excluded from the host workspace
 # (xtensa-only); built only by this firmware crate.
-r2-esp        = { path = "../../crates/r2-esp", default-features = true }
-r2-core       = { path = "../../crates/r2-core", default-features = false, features = ["alloc"] }
-r2-wire       = { path = "../../crates/r2-wire", default-features = false, features = ["alloc"] }
+r2-esp        = { path = "../../../crates/r2-esp", default-features = true }
+r2-core       = { path = "../../../crates/r2-core", default-features = false, features = ["alloc"] }
+r2-wire       = { path = "../../../crates/r2-wire", default-features = false, features = ["alloc"] }
 
-# Phase 5L — onboard WS2812 RGB LED (DevKitC-1 v1.1 = GPIO38). Driven
-# via the ESP32 RMT peripheral; the driver crate handles the WS2812
-# bit-timing encoder so we stay focused on state→colour mapping.
+# Phase 5L — external WS2812 RGB LED on XIAO silkscreen D5 (GPIO6).
+# Driven via the ESP32 RMT peripheral; the driver crate handles the
+# WS2812 bit-timing encoder so we stay focused on state→colour mapping.
+# (The XIAO has no on-board addressable RGB LED — Phase 1 wiring adds
+# an external single-WS2812 module per HARDWARE-WIRING-XIAO.md §2.2.)
 ws2812-esp32-rmt-driver = { version = "0.13", default-features = false, features = ["std", "smart-leds-trait"] }
 smart-leds              = "0.4"
 

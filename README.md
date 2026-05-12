@@ -114,7 +114,7 @@ You only do this once per fresh checkout.
 
 ```bash
 # 1. Get the source.
-git clone https://github.com/reality2-roycdavies/r2-rocker
+git clone https://github.com/reality2-ai/r2-rocker
 cd r2-rocker
 
 # 2. Install the Rust embedded toolchain (one-time, ~5 minutes).

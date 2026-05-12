@@ -1,0 +1,131 @@
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+fn main() {
+    println!("cargo:rerun-if-changed=partitions.csv");
+    println!("cargo:rerun-if-changed=sdkconfig.defaults");
+    println!("cargo:rerun-if-changed=wifi_config.toml");
+    println!("cargo:rerun-if-changed=build.rs");
+
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
+
+    stage_partitions_csv(&manifest_dir);
+    load_wifi_config(&manifest_dir);
+    stamp_build_metadata();
+
+    embuild::espidf::sysenv::output();
+}
+
+/// Stamp git short SHA + build timestamp as compile-time env vars so the
+/// firmware's announce frame can carry an unambiguous version string.
+/// Falls back to "unknown" outside a git checkout.
+fn stamp_build_metadata() {
+    let sha = std::process::Command::new("git")
+        .args(["rev-parse", "--short=8", "HEAD"])
+        .output()
+        .ok()
+        .and_then(|o| if o.status.success() { Some(o.stdout) } else { None })
+        .and_then(|b| String::from_utf8(b).ok())
+        .map(|s| s.trim().to_owned())
+        .unwrap_or_else(|| "unknown".into());
+
+    // Append "-dirty" if the working tree has uncommitted changes.
+    let dirty = std::process::Command::new("git")
+        .args(["diff-index", "--quiet", "HEAD", "--"])
+        .status()
+        .map(|s| !s.success())
+        .unwrap_or(false);
+
+    let sha_full = if dirty { format!("{sha}-dirty") } else { sha };
+    println!("cargo:rustc-env=R2_GIT_SHA={sha_full}");
+
+    // Human-readable build stamp baked into FW_VER on the wire and
+    // shown on the dashboard's device card. Drops ISO T/Z + seconds —
+    // operator wants "X.Y.Z-date-time", not log-format.
+    let ts = std::process::Command::new("date")
+        .args(["-u", "+%Y-%m-%d-%H:%M"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_owned())
+        .unwrap_or_else(|| "unknown".into());
+    println!("cargo:rustc-env=R2_BUILD_TIMESTAMP={ts}");
+}
+
+/// ESP-IDF resolves `CONFIG_PARTITION_TABLE_CUSTOM_FILENAME` relative to
+/// esp-idf-sys's auto-generated build directory. Workaround: copy our
+/// partitions.csv there so the relative path resolves. Same trick as
+/// `r2-core/platforms/esp32-s3/build.rs`. On a fresh checkout the FIRST
+/// build still gets the default table — run `tools/setup-firmware.sh`
+/// to pre-stage, or rebuild a second time.
+fn stage_partitions_csv(manifest_dir: &str) {
+    let out_dir = env::var("OUT_DIR").expect("OUT_DIR");
+    let src = PathBuf::from(manifest_dir).join("partitions.csv");
+    if !src.exists() {
+        return;
+    }
+
+    let _ = fs::copy(&src, Path::new(&out_dir).join("partitions.csv"));
+
+    if let Some(build_dir) = Path::new(&out_dir).parent().and_then(Path::parent) {
+        if let Ok(entries) = fs::read_dir(build_dir) {
+            for entry in entries.flatten() {
+                if entry.file_name().to_string_lossy().starts_with("esp-idf-sys-") {
+                    let espidf_out = entry.path().join("out");
+                    if espidf_out.is_dir() {
+                        let _ = fs::copy(&src, espidf_out.join("partitions.csv"));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Load WiFi credentials from wifi_config.toml (gitignored), falling back
+/// to env vars. Output is `cargo:rustc-env` so main.rs can `env!()` them
+/// at compile time. Empty strings are emitted if neither source is set —
+/// the firmware will warn on boot.
+///
+/// Adapted from `r2-core/platforms/esp32-s3/build.rs`.
+fn load_wifi_config(manifest_dir: &str) {
+    let config_path = format!("{manifest_dir}/wifi_config.toml");
+
+    let mut ssid = env::var("R2_WIFI_SSID").unwrap_or_default();
+    let mut pass = env::var("R2_WIFI_PASS").unwrap_or_default();
+    let mut gw   = env::var("R2_GATEWAY_IP").unwrap_or_default();
+
+    if Path::new(&config_path).exists() {
+        if let Ok(content) = fs::read_to_string(&config_path) {
+            for line in content.lines() {
+                let line = line.trim();
+                if line.starts_with('#') || line.is_empty() {
+                    continue;
+                }
+                if let Some((key, value)) = line.split_once('=') {
+                    let key = key.trim();
+                    let value = value.trim().trim_matches('"');
+                    match key {
+                        "ssid"       => ssid = value.to_string(),
+                        "password"   => pass = value.to_string(),
+                        "gateway_ip" => gw   = value.to_string(),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    println!("cargo:rustc-env=R2_WIFI_SSID={ssid}");
+    println!("cargo:rustc-env=R2_WIFI_PASS={pass}");
+    println!("cargo:rustc-env=R2_GATEWAY_IP={gw}");
+
+    if ssid.is_empty() {
+        println!("cargo:warning=WiFi not configured — copy wifi_config.toml.example to wifi_config.toml");
+    } else {
+        println!(
+            "cargo:warning=WiFi: SSID=\"{ssid}\" gateway={gw} (password {})",
+            if pass.is_empty() { "not set" } else { "set" }
+        );
+    }
+}
