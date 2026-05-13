@@ -40,18 +40,28 @@ const RECONNECT_BACKOFF_MS_MAX: u64 = 30_000;
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Identifies this exact build on the wire —
-/// `<semver>-<build-date-time>[-sim]+<git-sha>[-dirty]`.
-/// Human-readable for the operator (date+time visible) AND linkable
-/// back to the git commit for posterity (the `+sha` build-metadata
-/// suffix per semver convention). The `-sim` segment is dropped once
-/// a real ADXL355 is wired in.
-const FW_VER: &str = concat!(
-    env!("CARGO_PKG_VERSION"),
-    "-",
-    env!("R2_BUILD_TIMESTAMP"),
-    "-sim+",
-    env!("R2_GIT_SHA"),
-);
+/// `<semver>-<build-date-time>[-sim]+<git-sha>[-dirty]`. The `-sim`
+/// segment is present only when the sender is running off the
+/// synthetic accelerometer (ADXL355 init failed). Built per-instance
+/// in `Sender::new` so it reflects runtime reality, not a compile-time
+/// guess.
+fn build_fw_ver(real_adxl: bool) -> String {
+    if real_adxl {
+        format!(
+            "{}-{}+{}",
+            env!("CARGO_PKG_VERSION"),
+            env!("R2_BUILD_TIMESTAMP"),
+            env!("R2_GIT_SHA"),
+        )
+    } else {
+        format!(
+            "{}-{}-sim+{}",
+            env!("CARGO_PKG_VERSION"),
+            env!("R2_BUILD_TIMESTAMP"),
+            env!("R2_GIT_SHA"),
+        )
+    }
+}
 
 pub struct Sender {
     pub gateway: SocketAddr,
@@ -78,6 +88,10 @@ pub struct Sender {
     /// WiFi but can't reach the dashboard never sets this, so the
     /// bootloader rolls back on the next reset.
     app_validated: bool,
+    /// Build identifier sent in every `r2.sensor.announce`. Reflects
+    /// the runtime ADXL355 path: includes `-sim` only when we fell back
+    /// to the synthetic accelerometer.
+    fw_ver: String,
 }
 
 impl Sender {
@@ -88,6 +102,7 @@ impl Sender {
         led: LedHandle,
         adxl: Option<Adxl355<'static>>,
     ) -> Self {
+        let fw_ver = build_fw_ver(adxl.is_some());
         Self {
             gateway,
             hostname,
@@ -98,6 +113,7 @@ impl Sender {
             led,
             boot_instant: Instant::now(),
             app_validated: false,
+            fw_ver,
         }
     }
 
@@ -204,7 +220,7 @@ impl Sender {
             w.map(n_keys);
             w.key(0); w.bytes(&device_pk);
             w.key(1); w.text(&self.hostname);
-            w.key(2); w.text(FW_VER);
+            w.key(2); w.text(&self.fw_ver);
             w.key(3); w.u(last_seq);
             w.key(4); w.u(ts_ms);
             w.key(5); w.bytes(&nonce);
