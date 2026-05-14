@@ -36,7 +36,8 @@ use esp_idf_svc::hal::spi::{
     config::{Config as SpiConfig, DriverConfig as SpiDriverConfig},
     SpiDeviceDriver, SpiDriver, SPI2,
 };
-use log::info;
+use log::{info, warn};
+use std::time::Duration;
 
 /// Expected identification-register values (ADXL355 datasheet §11).
 pub const EXPECTED_DEVID_AD:  u8 = 0xAD;
@@ -47,9 +48,13 @@ pub const EXPECTED_PARTID:    u8 = 0xED;
 const REG_DEVID_AD:  u8 = 0x00;
 const REG_XDATA3:    u8 = 0x08; // X high byte; auto-increment runs through Z low at 0x10
 const REG_POWER_CTL: u8 = 0x2D;
+const REG_RESET:     u8 = 0x2F; // write 0x52 → soft reset (datasheet §11)
 
 // POWER_CTL bits.
 const POWER_CTL_MEASURE_MODE: u8 = 0x00; // bit 0 = 0 → measurement; default is 1 (standby)
+
+/// Code written to REG_RESET to trigger a soft reset (datasheet §11).
+const RESET_CODE: u8 = 0x52;
 
 /// Owns SPI2 + the four wired pins for the chip's lifetime. The struct
 /// is constructed inside the sender thread (SPI device drivers are not
@@ -95,15 +100,47 @@ impl<'d> Adxl355<'d> {
 
         let mut adxl = Self { dev };
 
-        // Boot self-test (datasheet §11 / SPEC-R2-ROCKER-SENSOR §2.1 step 6).
-        let (a, m, p) = adxl.read_who_am_i()?;
-        info!(
-            "[ADXL355] DEVID_AD=0x{:02X} DEVID_MST=0x{:02X} PARTID=0x{:02X}",
-            a, m, p
-        );
-        if a != EXPECTED_DEVID_AD || m != EXPECTED_DEVID_MST || p != EXPECTED_PARTID {
+        // Cold-boot defensive sequence. The actual race we hit before this
+        // landed was: CS bouncing during ESP32-S3 boot (before our SPI
+        // driver claimed it) left the ADXL355 mid-transaction, so the
+        // first WHO_AM_I returned garbage and the sender fell through to
+        // simulator mode "needing several reset presses to come right".
+        //
+        //   1. settle delay — let SPI pin state stabilise
+        //   2. soft-reset kick (datasheet §11, write 0x52 to REG_RESET):
+        //      forces the chip back to power-on defaults regardless of
+        //      any prior partial-transaction state. Best-effort: if the
+        //      bus is still flaky the write may itself be corrupted, in
+        //      which case the retry loop below catches it.
+        //   3. retry WHO_AM_I up to 3× — covers the case where the first
+        //      transaction after `SpiDeviceDriver::new_single` is itself
+        //      flaky (occasionally observed on ESP-IDF SPI master).
+        std::thread::sleep(Duration::from_millis(10));
+        let _ = adxl.write_reg(REG_RESET, RESET_CODE);
+        std::thread::sleep(Duration::from_millis(10));
+
+        let mut last_who = (0u8, 0u8, 0u8);
+        let mut ok = false;
+        for attempt in 1..=3 {
+            let (a, m, p) = adxl.read_who_am_i()?;
+            info!(
+                "[ADXL355] WHO_AM_I attempt {}: DEVID_AD=0x{:02X} DEVID_MST=0x{:02X} PARTID=0x{:02X}",
+                attempt, a, m, p
+            );
+            last_who = (a, m, p);
+            if a == EXPECTED_DEVID_AD && m == EXPECTED_DEVID_MST && p == EXPECTED_PARTID {
+                ok = true;
+                break;
+            }
+            if attempt < 3 {
+                warn!("[ADXL355] WHO_AM_I mismatch — retrying after 25 ms");
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+        if !ok {
+            let (a, m, p) = last_who;
             return Err(anyhow!(
-                "WHO_AM_I mismatch — expected 0xAD/0x1D/0xED, got 0x{:02X}/0x{:02X}/0x{:02X}",
+                "WHO_AM_I mismatch after 3 attempts — expected 0xAD/0x1D/0xED, got 0x{:02X}/0x{:02X}/0x{:02X}",
                 a, m, p
             ));
         }

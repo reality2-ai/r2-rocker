@@ -740,18 +740,17 @@ function handleBootstrapEvent(msg) {
   const evt = msg.event;
   if (!evt) return;
 
-  // Reset event clears the log panel and all sensor cards for a fresh bootstrap run
+  // Reset event clears the bootstrap log panel for a fresh run. Note:
+  // we intentionally do NOT clear the `sensors` map — a "restart the
+  // bootstrap loop" gesture is distinct from "all sensors are gone".
+  // The dashboard's cached `last_announce` is only replayed on /ws/raw
+  // open, not on every bootstrap restart, so wiping fwVer/dataSource/
+  // virtual-LED here would leave the device cards permanently blank
+  // until each sensor next reboots and re-announces.
   if (evt === null || 'Reset' in msg.event) {
     document.getElementById('bootstrap-log').innerHTML = '';
     document.getElementById('bootstrap-panel').classList.add('visible');
     addBootstrapLine('↺ Restarting…', 'amber');
-    // Destroy all sensor cards and chart instances
-    sensors.forEach(s => { try { s.chart.destroy(); } catch(e) {} });
-    sensors.clear();
-    const area = document.getElementById('sensorsArea');
-    area.innerHTML = '<div id="sensorPlaceholder" style="color:#475569; text-align:center; padding:40px;">Waiting for sensors…</div>';
-    document.getElementById('sensorCount').textContent = '0';
-    document.getElementById('sensorList').textContent = 'None';
     return;
   }
 
