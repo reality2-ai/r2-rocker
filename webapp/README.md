@@ -1,4 +1,4 @@
-# wasm-viewer
+# webapp
 
 The browser-side r2-rocker WebApp — a full R2 hive running in WebAssembly.
 
@@ -25,10 +25,10 @@ via `wasm-pack`, with `--out-dir` pointing back here so the viewer
 is a self-contained deployable:
 
 ```bash
-wasm-pack build crates/r2-wasm --target web --release --out-dir ../../wasm-viewer/pkg
+wasm-pack build crates/r2-wasm --target web --release --out-dir ../../webapp/pkg
 ```
 
-Output lands at `wasm-viewer/pkg/`. The HTML in this directory
+Output lands at `webapp/pkg/`. The HTML in this directory
 imports from `./pkg/r2_wasm.js`.
 
 ## Run the smoke test

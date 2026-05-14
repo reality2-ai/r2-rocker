@@ -311,8 +311,7 @@ whichever occurs first (per WIRE §4.1).
 
 | Route | Method | Purpose |
 |---|---|---|
-| `/` | GET | Legacy SPA bundle (server-decoded; deprecated, see §5.5) |
-| `/v/*` | GET | WASM viewer bundle — `wasm-viewer/` static tree (HTML + JS + `pkg/` WASM); the canonical browser frontend per Phase 5d |
+| `/` | GET | WASM viewer bundle — `webapp/` static tree (HTML + JS + `pkg/` WASM); the canonical browser frontend (the pre-Phase-5d server-decoded `/` HTML was removed once `/v/` reached parity and got promoted to root) |
 | `/api/peers` | GET | Current peers (snapshot) |
 | `/api/peers/:pk` | PATCH | Update label/role/joint assignment |
 | `/api/joints` | GET, POST, PATCH, DELETE | Manage joint definitions |
@@ -325,7 +324,6 @@ whichever occurs first (per WIRE §4.1).
 | `/api/bootstrap/status` | GET | `{running: bool, log: [...]}` snapshot |
 | `/api/ota` | POST `{pk, url, sha256}` | Trigger OTA (§13) |
 | `/api/reset/:pk` | POST `{factory: bool}` | Forward to sensor |
-| `/ws` | WebSocket | Legacy server-decoded event stream (deprecated, see §5.5) |
 | `/ws/raw` | WebSocket | **Binary** R2-WIRE frames forwarded verbatim from sensors (canonical Phase-5d transport) |
 | `/ws/status` | WebSocket | **Text JSON** status events: bootstrap progress, hotspot up/down, server-side errors |
 
@@ -383,15 +381,14 @@ Future versions will use `/ws/status` for:
 | `subscribe` | `{peers: [...] \| "all"}` | Filter pushes |
 | `viewport_hint` | `{visible_peers: [...]}` | Server prioritises these |
 
-### 5.5 Legacy `/ws` (deprecated)
+### 5.5 Removed legacy endpoints
 
-The original dashboard.html (pre-Phase-5d) consumed a single bidirectional
-JSON WebSocket on which the **server** decoded R2-WIRE frames and pushed
-typed events (`peer_state`, `acceleration`, `battery`, `status`,
-`event_log`, `joint_metric`, `bootstrap_log`, `sync_status`). This channel
-remains live for transitional compatibility while the WASM viewer at
-`/v/` is hardened, and SHALL be removed once `/v/` reaches feature parity
-(tracked in PLAN row 5d). New consumers MUST use `/ws/raw` + `/ws/status`.
+The pre-Phase-5d dashboard exposed two transitional channels — `GET /`
+(server-decoded SPA bundle, embedded HTML) and `GET /ws` (bidirectional
+JSON WebSocket where the server decoded R2-WIRE frames). Both were
+removed once the WASM viewer reached parity. New consumers MUST use
+`/ws/raw` + `/ws/status` (defined above) and connect to the WASM viewer
+served at `/`.
 
 ---
 

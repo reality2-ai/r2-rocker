@@ -13,14 +13,14 @@ use axum::{
     body::Bytes,
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
     extract::{Path, State},
-    response::{Html, IntoResponse, Json},
+    response::{IntoResponse, Json},
     routing::{get, post},
     Router,
 };
 use sha2::{Digest, Sha256};
 use clap::Parser;
 use r2_bootstrap::{BootstrapConfig, BootstrapEvent};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -221,33 +221,6 @@ struct DashboardEvent {
     device_name: Option<String>,
 }
 
-/// JSON command received from browser via WebSocket
-#[derive(Deserialize, Debug)]
-struct DashboardCommand {
-    command: String,
-    /// Calibration offset (only for "calibrate" command)
-    offset: Option<CalibrationOffset>,
-}
-
-#[derive(Deserialize, Debug)]
-struct CalibrationOffset {
-    x: f32,
-    y: f32,
-    z: f32,
-}
-
-/// Encode a CBOR map of text→float32 pairs for the calibrate command
-fn encode_cbor_offset(x: f32, y: f32, z: f32) -> Vec<u8> {
-    let mut buf = vec![0xA3u8];
-    for (key, val) in [("x", x), ("y", y), ("z", z)] {
-        buf.push(0x60 | key.len() as u8);
-        buf.extend_from_slice(key.as_bytes());
-        buf.push(0xFA);
-        buf.extend_from_slice(&val.to_be_bytes());
-    }
-    buf
-}
-
 /// Connected sensor peer
 #[derive(Debug)]
 struct SensorPeer {
@@ -322,13 +295,11 @@ async fn main() {
         run_event_listener(&event_bind, event_state).await;
     });
 
-    // HTTP server with dashboard + WebSocket + bootstrap API
+    // HTTP server with WASM viewer + WebSocket + bootstrap API.
+    // The legacy `/` HTML dashboard and `/ws` bidirectional channel were
+    // removed once the WASM viewer at the repo's webapp/ became feature-
+    // complete. The WASM viewer consumes /ws/raw + /ws/status instead.
     let mut app = Router::new()
-        .route("/", get(dashboard_handler))
-        .route("/ws", get({
-            let ws_state = state.clone();
-            move |ws| ws_handler(ws, ws_state)
-        }))
         // Phase 5d: raw R2-WIRE frame forwarder for WASM viewers.
         .route("/ws/raw", get({
             let ws_state = state.clone();
@@ -345,24 +316,28 @@ async fn main() {
         .route("/api/keyholder/tg-pub", get(tg_pub_handler))
         .route("/api/enrol-init", post(enrol_init_handler))
         .route("/api/enrol-complete", post(enrol_complete_handler))
-        // Existing routes (legacy dashboard.html consumes /ws JSON).
         .route("/api/bootstrap", post(bootstrap_handler))
         .route("/api/bootstrap/status", get(bootstrap_status_handler))
         // Phase 9-light: stream a firmware .bin to a sensor's OTA listener.
         .route("/api/ota/{addr}", post(ota_push_handler))
+        // SPEC-R2-ROCKER-SENSOR-REMOTE-RESET: push a CMD_RESET to a sensor's
+        // reset listener (TCP 21044). Triggers esp_restart() on the sensor.
+        .route("/api/sensor/{addr}/reset", post(reset_push_handler))
         .route("/api/version", get(version_handler));
 
-    // Phase 5d: serve the WASM viewer (wasm-viewer/) at /v/ if the
+    // Serve the WASM viewer (webapp/) as the dashboard root if the
     // directory exists. Same-origin with the dashboard's WS endpoints
-    // means no CORS dance for the browser.
+    // means no CORS dance for the browser. fallback_service ensures
+    // the explicit /api/ and /ws/ routes win; everything else falls
+    // through to the static asset server.
     let viewer_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .map(|p| p.join("wasm-viewer"));
+        .map(|p| p.join("webapp"));
     if let Some(dir) = viewer_dir.as_ref().filter(|d| d.is_dir()) {
-        app = app.nest_service("/v", tower_http::services::ServeDir::new(dir));
-        eprintln!("[viewer] mounted wasm-viewer/ at /v/  ({})", dir.display());
+        app = app.fallback_service(tower_http::services::ServeDir::new(dir));
+        eprintln!("[webapp] mounted webapp/ at /  ({})", dir.display());
     } else {
-        eprintln!("[viewer] wasm-viewer/ not found — /v/ disabled");
+        eprintln!("[webapp] webapp/ not found — UI disabled");
     }
 
     let app = app.with_state(state.clone());
@@ -387,11 +362,6 @@ async fn main() {
             std::process::exit(1);
         });
     axum::serve(listener, app).await.unwrap();
-}
-
-/// Serve the embedded HTML dashboard
-async fn dashboard_handler() -> impl IntoResponse {
-    Html(include_str!("dashboard.html"))
 }
 
 /// POST /api/bootstrap — trigger sensor bootstrap (re-pressing cancels and restarts)
@@ -612,6 +582,107 @@ async fn push_firmware(
     Ok((status, String::from_utf8_lossy(&msg).into_owned()))
 }
 
+/// POST /api/sensor/{addr}/reset — per SPEC-R2-ROCKER-SENSOR-REMOTE-RESET.
+/// Sends a single CMD_RESET (0x10) byte to the sensor's reset listener
+/// (TCP 21044) and returns the receiver's status + message. The sensor
+/// reboots ~100 ms after responding.
+///
+/// `addr` may be `ip` or `ip:port`; the streaming port is stripped and
+/// 21044 is always used.
+async fn reset_push_handler(
+    State(state): State<Arc<AppState>>,
+    Path(addr): Path<String>,
+) -> impl IntoResponse {
+    use std::net::ToSocketAddrs;
+
+    let ip_only: &str = addr.split(':').next().unwrap_or(&addr);
+    let reset_target = format!("{}:21044", ip_only);
+
+    eprintln!("[reset] push to {}", reset_target);
+    let _ = state.ws_broadcast_tx.send(serde_json::json!({
+        "type": "reset",
+        "phase": "requested",
+        "target": reset_target,
+    }).to_string());
+
+    let socket = match reset_target.to_socket_addrs() {
+        Ok(mut it) => match it.next() {
+            Some(a) => a,
+            None    => return reset_err(&state, &reset_target, "no addr resolved"),
+        },
+        Err(e) => return reset_err(&state, &reset_target, &format!("resolve: {e}")),
+    };
+
+    // 8 s is generous — a healthy sensor responds in <100 ms.
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        push_reset(socket),
+    )
+    .await;
+
+    match result {
+        Ok(Ok((status_byte, msg))) => {
+            let ok = status_byte == 0x00; // STATUS_OK in r2-esp::reset_tcp
+            let phase = if ok { "applied" } else { "error" };
+            let _ = state.ws_broadcast_tx.send(serde_json::json!({
+                "type": "reset",
+                "phase": phase,
+                "target": reset_target,
+                "message": msg,
+            }).to_string());
+            (
+                axum::http::StatusCode::OK,
+                Json(serde_json::json!({
+                    "ok": ok,
+                    "status_byte": status_byte,
+                    "message": msg,
+                })),
+            )
+        }
+        Ok(Err(e)) => reset_err(&state, &reset_target, &format!("push: {e}")),
+        Err(_)     => reset_err(&state, &reset_target, "timed out after 8 s"),
+    }
+}
+
+fn reset_err(state: &Arc<AppState>, target: &str, msg: &str) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+    eprintln!("[reset] {} — {}", target, msg);
+    let _ = state.ws_broadcast_tx.send(serde_json::json!({
+        "type": "reset",
+        "phase": "error",
+        "target": target,
+        "message": msg,
+    }).to_string());
+    (
+        axum::http::StatusCode::BAD_GATEWAY,
+        Json(serde_json::json!({"ok": false, "error": msg})),
+    )
+}
+
+/// Drives the reset protocol from `r2-esp::reset_tcp`:
+///   CMD_RESET(1) → status(1) + len_le(2) + message
+async fn push_reset(target: SocketAddr) -> std::io::Result<(u8, String)> {
+    const CMD_RESET: u8 = 0x10;
+    let mut stream = tokio::time::timeout(
+        std::time::Duration::from_secs(4),
+        TcpStream::connect(target),
+    )
+    .await
+    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "connect timed out"))??;
+
+    stream.write_all(&[CMD_RESET]).await?;
+    stream.flush().await?;
+
+    let mut hdr = [0u8; 3];
+    stream.read_exact(&mut hdr).await?;
+    let status = hdr[0];
+    let msg_len = u16::from_le_bytes([hdr[1], hdr[2]]) as usize;
+    let mut msg = vec![0u8; msg_len];
+    if msg_len > 0 {
+        stream.read_exact(&mut msg).await?;
+    }
+    Ok((status, String::from_utf8_lossy(&msg).into_owned()))
+}
+
 /// GET /api/bootstrap/status — return bootstrap state
 async fn bootstrap_status_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let running = state.bootstrap_running.load(Ordering::SeqCst);
@@ -620,136 +691,6 @@ async fn bootstrap_status_handler(State(state): State<Arc<AppState>>) -> impl In
         "running": running,
         "log": *log,
     }))
-}
-
-/// WebSocket handler — pushes events to browser, receives commands
-async fn ws_handler(ws: WebSocketUpgrade, state: Arc<AppState>) -> impl IntoResponse {
-    ws.on_upgrade(|socket| handle_ws_connection(socket, state))
-}
-
-async fn handle_ws_connection(mut socket: WebSocket, state: Arc<AppState>) {
-    // Replay current sensor state to the newly connected browser
-    {
-        let peers = state.peers.read().await;
-        for (addr, peer) in peers.iter() {
-            let event = DashboardEvent {
-                event: "sensor.connected".to_string(),
-                hash: String::new(),
-                timestamp_ms: 0,
-                payload: None,
-                source_addr: Some(addr.to_string()),
-                device_name: peer.name.clone(),
-            };
-            let json = serde_json::to_string(&event).unwrap();
-            if socket.send(Message::Text(json.into())).await.is_err() {
-                return;
-            }
-        }
-    }
-
-    // Replay bootstrap log to late-joining browsers
-    {
-        let log = state.bootstrap_log.lock().await;
-        for entry in log.iter() {
-            if socket.send(Message::Text(entry.clone().into())).await.is_err() {
-                return;
-            }
-        }
-    }
-
-    let mut event_rx = state.event_tx.subscribe();
-    let mut ws_broadcast_rx = state.ws_broadcast_tx.subscribe();
-
-    loop {
-        tokio::select! {
-            // Forward dashboard events to browser
-            Ok(event) = event_rx.recv() => {
-                let json = serde_json::to_string(&event).unwrap();
-                if socket.send(Message::Text(json.into())).await.is_err() {
-                    break;
-                }
-            }
-            // Forward bootstrap/raw WS broadcasts to browser
-            Ok(msg) = ws_broadcast_rx.recv() => {
-                if socket.send(Message::Text(msg.into())).await.is_err() {
-                    break;
-                }
-            }
-            // Receive commands from browser
-            Some(Ok(msg)) = socket.recv() => {
-                if let Message::Text(text) = msg {
-                    if let Ok(cmd) = serde_json::from_str::<DashboardCommand>(&text) {
-                        handle_command(&cmd, &state).await;
-                    }
-                }
-            }
-            else => break,
-        }
-    }
-}
-
-/// Handle a command from the browser dashboard
-async fn handle_command(cmd: &DashboardCommand, state: &AppState) {
-    let (event_hash, payload) = match cmd.command.as_str() {
-        "start" => (CMD_START, vec![]),
-        "stop" => (CMD_STOP, vec![]),
-        "mark" => (CMD_MARK, vec![]),
-        "shutdown" => (SHUTDOWN, vec![]),
-        "calibrate" => {
-            if let Some(off) = &cmd.offset {
-                (CMD_CALIBRATE, encode_cbor_offset(off.x, off.y, off.z))
-            } else {
-                eprintln!("[cmd] calibrate missing offset");
-                return;
-            }
-        }
-        _ => {
-            eprintln!("[cmd] unknown command: {}", cmd.command);
-            return;
-        }
-    };
-
-    eprintln!("[cmd] sending {} (0x{:08X}) to all peers", cmd.command, event_hash);
-
-    let frame = build_r2_wire_frame(event_hash, &payload);
-
-    // Collect the senders first (release the lock before awaiting).
-    // Holding an async RwLock read guard across an `await` point blocks any
-    // concurrent write-lock acquisition (e.g. a sensor connecting while a
-    // command is in-flight on a full channel), which can cause deadlocks.
-    let senders: Vec<(SocketAddr, tokio::sync::mpsc::Sender<Vec<u8>>)> = {
-        let peers = state.peers.read().await;
-        peers.iter().map(|(addr, peer)| (*addr, peer.tx.clone())).collect()
-    };
-
-    for (addr, tx) in senders {
-        if let Err(e) = tx.send(frame.clone()).await {
-            eprintln!("[cmd] failed to send to {}: {}", addr, e);
-        }
-    }
-}
-
-/// Build a minimal R2-WIRE frame
-fn build_r2_wire_frame(event_hash: u32, payload: &[u8]) -> Vec<u8> {
-    let mut frame = Vec::new();
-    let body_len = 1 + 2 + 4 + payload.len();
-
-    frame.push((body_len >> 8) as u8);
-    frame.push(body_len as u8);
-
-    frame.push(0x01);
-
-    frame.push(0x00);
-    frame.push(0x00);
-
-    frame.push((event_hash >> 24) as u8);
-    frame.push((event_hash >> 16) as u8);
-    frame.push((event_hash >> 8) as u8);
-    frame.push(event_hash as u8);
-
-    frame.extend_from_slice(payload);
-
-    frame
 }
 
 /// Listen for TCP connections from sensor nodes

@@ -302,17 +302,21 @@ impl Sender {
         }
     }
 
-    /// Emit `r2.sensor.status` with the current LED FSM state value.
-    /// Dashboard consumes `payload.0` as `fsmState` and lights the
-    /// virtual LED with the matching tg-* CSS class. SD%, sample-rate,
-    /// uptime fields TBD when those subsystems land.
+    /// Emit `r2.sensor.status` with the current LED FSM state value
+    /// and the data-source health signal. Dashboard consumes `payload.0`
+    /// as `fsmState` (lights the virtual LED) and `payload.7` as
+    /// `dataSource` (0 = real ADXL355, 1 = simulator) per
+    /// SPEC-R2-ROCKER-SENSOR-HEALTH §3. SD%, sample-rate, uptime fields
+    /// TBD when those subsystems land.
     fn send_status(&self, stream: &mut TcpStream) -> Result<()> {
         let state = self.led.current() as u8;
-        let mut payload = [0u8; 12];
+        let data_source: u8 = if self.adxl.is_some() { 0 } else { 1 };
+        let mut payload = [0u8; 16];
         let mut w = CborWriter::new(&mut payload);
-        w.map(2);
+        w.map(3);
         w.key(0); w.u(state as u64);              // FSM state (LedState repr)
         w.key(1); w.u(self.ts_ms() as u64);       // ts_ms
+        w.key(7); w.u(data_source as u64);        // data_source: 0 real, 1 sim
         let used = w.pos();
 
         let mut frame = [0u8; 32];

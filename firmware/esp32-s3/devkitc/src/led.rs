@@ -3,7 +3,7 @@
 //! Drives the onboard WS2812 (GPIO38 on DevKitC-1 v1.1) per the colour
 //! map in `HARDWARE-WIRING.md` §5 and `SPEC-R2-ROCKER-SENSOR.md` §4.1.
 //! The dashboard's virtual LED uses the same `tg-*` colour + animation
-//! map (`wasm-viewer/index.html`), so the on-screen indicators mirror
+//! map (`webapp/index.html`), so the on-screen indicators mirror
 //! the physical LED once the firmware emits FSM state on the wire.
 //!
 //! Calm-tech endpoint: ambient signal, glanceable, no UI noise. The
@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use ws2812_esp32_rmt_driver::Ws2812Esp32Rmt;
 
 /// FSM state values — wire-compatible with the dashboard's `ledClassFor()`
-/// switch in `wasm-viewer/index.html`.
+/// switch in `webapp/index.html`.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug)]
 pub enum LedState {
@@ -33,6 +33,11 @@ pub enum LedState {
     LowBattery = 7,       // orange, slow pulse — overlay set via `LedHandle::set_low_battery()`
     Ota = 8,              // white, fast strobe
     Error = 9,            // red, fast pulse
+    /// Streaming but with synthetic data — ADXL355 init failed at sender
+    /// start; samples come from the simulator. Rhythmically distinct
+    /// from `Calibrating` (also purple) by pulse vs solid. See
+    /// `SPEC-R2-ROCKER-SENSOR-HEALTH` §4.
+    StreamingDegradedSim = 10, // purple, slow pulse 0.5 Hz
 }
 
 impl LedState {
@@ -48,6 +53,7 @@ impl LedState {
             7 => Self::LowBattery,
             8 => Self::Ota,
             9 => Self::Error,
+            10 => Self::StreamingDegradedSim,
             _ => Self::Boot,
         }
     }
@@ -185,6 +191,7 @@ fn render(state: LedState, low_battery: bool, elapsed: Duration) -> RGB8 {
         LedState::LowBattery  => scale(rgb(0xFF, 0x80, 0x00), pulse(elapsed, 1.5)),
         LedState::Ota         => strobe(rgb(0x40, 0x40, 0x40), elapsed, 0.18),
         LedState::Error       => scale(rgb(0xFF, 0x00, 0x00), pulse(elapsed, 0.25)),
+        LedState::StreamingDegradedSim => scale(rgb(0x80, 0x00, 0xC0), pulse(elapsed, 2.0)),
     }
 }
 

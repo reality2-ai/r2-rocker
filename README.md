@@ -233,7 +233,7 @@ r2-rocker/
 ├─ crates/                   ← protocol building blocks (compact frames, CBOR, crypto)
 ├─ dashboard/                ← the controller's web server (Rust)
 ├─ firmware/esp32-s3/        ← sensor firmware (Rust on Xtensa)
-├─ wasm-viewer/              ← the web app (HTML + JS + WASM bundle)
+├─ webapp/              ← the web app (HTML + JS + WASM bundle)
 ├─ tools/                    ← scripts and CLIs (build, flash, key generation, setup)
 ├─ trust_keys/               ← public keys + cert (PRIVATE KEY NEVER LIVES HERE)
 ├─ specifications/           ← spec-first source of truth for what the system does

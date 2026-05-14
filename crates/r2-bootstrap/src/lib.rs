@@ -13,7 +13,7 @@ use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use bluer::l2cap::{Socket, SocketAddr as L2capSocketAddr, Security, SecurityLevel};
 use bluer::{AdapterEvent, Address, AddressType, DiscoveryFilter, DiscoveryTransport};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -872,10 +872,12 @@ fn get_hotspot_ip(iface: &str) -> Option<String> {
     None
 }
 
-/// Create a WiFi hotspot using nmcli on the free WiFi adapter.
-/// Check if a WiFi hotspot is already active and return (ssid, psk, ip) if so.
-/// Avoids tearing down and recreating the hotspot on every "Connect Sensors" press.
-fn find_active_hotspot() -> Option<(String, String, Option<String>)> {
+/// Check if a WiFi hotspot is already active on `want_device` and return
+/// (ssid, psk, ip) if so. The adapter filter is critical — a hotspot
+/// landing on the WRONG (internet-carrying) adapter is precisely the
+/// "vicious circle" bug where the spare adapter then joins it as client.
+/// We only reuse a hotspot that's on the intended (spare) device.
+fn find_active_hotspot_on(want_device: &str) -> Option<(String, String, Option<String>)> {
     // List active connections: NAME:TYPE:STATE:DEVICE
     let out = Command::new("nmcli")
         .args(["-t", "-f", "NAME,TYPE,STATE,DEVICE", "con", "show", "--active"])
@@ -886,24 +888,20 @@ fn find_active_hotspot() -> Option<(String, String, Option<String>)> {
         let parts: Vec<&str> = line.splitn(4, ':').collect();
         if parts.len() < 4 { continue; }
         let (name, typ, state, device) = (parts[0], parts[1], parts[2], parts[3]);
-        // Look for an active wifi connection in AP/hotspot mode
         if typ != "802-11-wireless" || state != "activated" { continue; }
-        // nmcli reports hotspot connections as having mode=ap; check the connection name or mode
+        if device != want_device { continue; }
         let mode_out = Command::new("nmcli")
             .args(["-t", "-g", "802-11-wireless.mode", "con", "show", name])
             .output().ok()?;
         let mode = String::from_utf8_lossy(&mode_out.stdout).trim().to_string();
         if mode != "ap" { continue; }
 
-        // Found an active hotspot — get SSID and PSK
         let ssid_out = Command::new("nmcli")
             .args(["-t", "-g", "802-11-wireless.ssid", "con", "show", name])
             .output().ok()?;
         let ssid = String::from_utf8_lossy(&ssid_out.stdout).trim().to_string();
         if ssid.is_empty() { continue; }
 
-        // If this is our known fixed hotspot, use the hardcoded PSK — reading
-        // secrets via `nmcli -s` requires elevated privileges on Manjaro/polkit.
         let psk = if ssid == HOTSPOT_SSID {
             HOTSPOT_PSK.to_string()
         } else {
@@ -922,36 +920,86 @@ fn find_active_hotspot() -> Option<(String, String, Option<String>)> {
     None
 }
 
+/// Tear down any active wifi-AP connection that is NOT on `want_device`.
+/// Belt-and-braces against the "hotspot grabbed the internet adapter" bug:
+/// if a previous activation landed on the wrong adapter, deactivate it so
+/// (a) the internet adapter can re-associate to its real network, and
+/// (b) the spare adapter is free to host a fresh hotspot.
+fn teardown_misplaced_hotspots(want_device: &str) {
+    let out = match Command::new("nmcli")
+        .args(["-t", "-f", "NAME,TYPE,STATE,DEVICE", "con", "show", "--active"])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return,
+    };
+    let s = String::from_utf8_lossy(&out.stdout);
+    for line in s.lines() {
+        let parts: Vec<&str> = line.splitn(4, ':').collect();
+        if parts.len() < 4 { continue; }
+        let (name, typ, state, device) = (parts[0], parts[1], parts[2], parts[3]);
+        if typ != "802-11-wireless" || state != "activated" { continue; }
+        if device == want_device { continue; }
+        // Confirm it's actually an AP — don't tear down a station-mode connection.
+        let mode_out = Command::new("nmcli")
+            .args(["-t", "-g", "802-11-wireless.mode", "con", "show", name])
+            .output().ok();
+        let mode = mode_out
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        if mode != "ap" { continue; }
+        eprintln!(
+            "[bootstrap] tearing down misplaced hotspot '{}' on {} (should be on {})",
+            name, device, want_device
+        );
+        let _ = Command::new("nmcli").args(["con", "down", name]).output();
+    }
+}
+
 fn create_hotspot() -> Result<(String, String, Option<String>)> {
-    // Reuse existing hotspot if one is already active — avoids new random SSID every time
-    if let Some((ssid, psk, ip)) = find_active_hotspot() {
+    // Pick the adapter that ISN'T carrying the default route. If both
+    // wifi adapters are internet-connected, or only one wifi exists,
+    // there's no safe place to host the hotspot — bail with a clear
+    // message rather than risk taking the internet adapter offline.
+    let free_iface = find_free_wifi_interface().ok_or_else(|| {
+        anyhow!(
+            "no spare wifi adapter free to host the hotspot \
+             — every wifi interface is currently carrying the default route. \
+             Disconnect one before retrying."
+        )
+    })?;
+
+    // Reuse existing hotspot only if it's on the CORRECT adapter — a
+    // misplaced one (e.g. NetworkManager auto-connected R2-rocker on the
+    // internet adapter) is the exact failure we're guarding against, so
+    // don't silently inherit it.
+    if let Some((ssid, psk, ip)) = find_active_hotspot_on(&free_iface) {
         return Ok((ssid, psk, ip));
     }
 
-    // Try to bring up a pre-created R2-rocker profile (no elevated privileges needed
-    // to activate an existing connection vs. creating a new hotspot from scratch).
-    let up_out = Command::new("nmcli").args(["con", "up", HOTSPOT_SSID]).output();
-    if let Ok(ref o) = up_out {
-        if o.status.success() {
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            if let Some((ssid, psk, ip)) = find_active_hotspot() {
-                return Ok((ssid, psk, ip));
-            }
-        }
-    }
+    // If a hotspot is active on the wrong adapter, tear it down first.
+    // Otherwise NM will refuse to start a second hotspot on the spare
+    // adapter while a duplicate SSID is broadcasting elsewhere.
+    teardown_misplaced_hotspots(&free_iface);
+
+    // Disconnect the spare adapter — if it's in client mode (which is
+    // how the "vicious circle" begins, the spare auto-joining R2-rocker
+    // hosted on the wrong adapter), nmcli won't repurpose it cleanly.
+    let _ = Command::new("nmcli").args(["dev", "disconnect", &free_iface]).output();
 
     let ssid = HOTSPOT_SSID.to_string();
     let psk = HOTSPOT_PSK.to_string();
 
-    let free_iface = find_free_wifi_interface();
-
-    let mut nmcli_args: Vec<String> = vec!["dev".into(), "wifi".into(), "hotspot".into()];
-    let iface_owned;
-    if let Some(ref iface) = free_iface {
-        iface_owned = iface.clone();
-        nmcli_args.extend_from_slice(&["ifname".into(), iface_owned]);
-    }
-    nmcli_args.extend_from_slice(&["ssid".into(), ssid.clone(), "password".into(), psk.clone()]);
+    // Always use `nmcli dev wifi hotspot ifname X` — never `con up <name>`
+    // without ifname, because NM picks an adapter on its own and can land
+    // on the wrong one. The explicit ifname binds the new hotspot to the
+    // spare adapter regardless of any cached profile preferences.
+    let nmcli_args: Vec<String> = vec![
+        "dev".into(), "wifi".into(), "hotspot".into(),
+        "ifname".into(), free_iface.clone(),
+        "ssid".into(), ssid.clone(),
+        "password".into(), psk.clone(),
+    ];
 
     let output = Command::new("nmcli")
         .args(&nmcli_args)
@@ -979,34 +1027,8 @@ fn create_hotspot() -> Result<(String, String, Option<String>)> {
         bail!("nmcli hotspot failed: {}", stderr.trim());
     }
 
-    let hotspot_ip = if let Some(ref iface) = free_iface {
-        get_hotspot_ip(iface)
-    } else {
-        std::thread::sleep(Duration::from_secs(2));
-        get_hotspot_ip_any()
-    };
-
+    let hotspot_ip = get_hotspot_ip(&free_iface);
     Ok((ssid, psk, hotspot_ip))
-}
-
-/// Scan all interfaces for a 10.42.x.x address (nmcli hotspot default subnet).
-fn get_hotspot_ip_any() -> Option<String> {
-    let out = Command::new("ip")
-        .args(["-4", "addr", "show"])
-        .output()
-        .ok()?;
-    let s = String::from_utf8_lossy(&out.stdout);
-    for line in s.lines() {
-        let line = line.trim();
-        if line.starts_with("inet ") {
-            let addr = line.split_whitespace().nth(1)?;
-            let ip = addr.split('/').next()?;
-            if ip.starts_with("10.42.") {
-                return Some(ip.to_string());
-            }
-        }
-    }
-    None
 }
 
 /// Get first non-loopback IPv4 address.

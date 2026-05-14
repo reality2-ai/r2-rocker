@@ -18,7 +18,7 @@ members = [
     "dashboard",
     "tools/r2-rocker-tg",
     # r2-wasm has cdylib + wasm32-only deps (wasm-bindgen, getrandom/js).
-    # It is built with `wasm-pack` from the wasm-viewer/ package, NOT
+    # It is built with `wasm-pack` from the webapp/ package, NOT
     # by the host workspace. Excluded so `cargo check --workspace` on
     # x86_64-linux doesn't try to compile the wasm-bindgen targets.
 ]

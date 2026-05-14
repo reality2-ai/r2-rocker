@@ -25,7 +25,7 @@ use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::sys::{esp_restart, link_patches};
 use log::{error, info, warn};
-use r2_esp::{beacon, l2cap, ota_tcp, wifi_prov, wifi_sta};
+use r2_esp::{beacon, l2cap, ota_tcp, reset_tcp, wifi_prov, wifi_sta};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 /// Canonical R2-BEACON class string (locked at SPEC-R2-ROCKER-DASHBOARD §6.3
@@ -165,10 +165,10 @@ fn run(
 
     // ── Sender path (only if WiFi came up). ──────────────────────────
     if wifi_up {
-        // WiFi up → STREAMING_LIVE (green heartbeat). The dashboard
-        // sees the matching colour on the virtual LED once Phase 5L
-        // status events flow over the wire.
-        led_handle.set(led::LedState::StreamingLive);
+        // WiFi up → streaming. The LED state distinguishes healthy
+        // (green heartbeat) from sim-fallback (purple slow pulse), set
+        // inside the sender thread once we know whether ADXL355 init
+        // succeeded. See SPEC-R2-ROCKER-SENSOR-HEALTH §4.
 
         // OTA-rollback gate is now fired by the sender on first
         // successful TCP frame round-trip (§12.2-tightened). A buggy
@@ -183,6 +183,12 @@ fn run(
         // bootloader reverts on the next reset.
         ota_tcp::start_listener();
         info!("[OTA] receive listener started on TCP 21043");
+
+        // Remote-reset listener on TCP 21044 — accepts a single CMD_RESET byte
+        // and calls esp_restart(). Per SPEC-R2-ROCKER-SENSOR-REMOTE-RESET.
+        // Refuses while an OTA is in flight (ota_tcp::ota_in_progress()).
+        reset_tcp::start_listener();
+        info!("[RESET] receive listener started on TCP 21044");
 
         // UDP presence — closes the dashboard's bootstrap loop. Spawn a
         // short-lived task that sends ~5 packets at 1 s intervals. UDP
@@ -231,6 +237,11 @@ fn run(
                         None
                     }
                 };
+                led_for_sender.set(if adxl.is_some() {
+                    led::LedState::StreamingLive
+                } else {
+                    led::LedState::StreamingDegradedSim
+                });
                 let mut s = sender::Sender::new(gateway, hostname, id_for_sender, led_for_sender, adxl);
                 s.run();
             })

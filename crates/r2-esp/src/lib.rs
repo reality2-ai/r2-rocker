@@ -23,6 +23,7 @@
 
 pub mod hive_id;
 pub mod ota_tcp;
+pub mod reset_tcp;
 pub mod wifi_sta;
 pub mod wifi_prov;
 

@@ -246,7 +246,7 @@ underlying state but do not change the underlying state.
 Each state has a stable `u8` value carried in the `r2.sensor.status`
 event (key `0`) per `SPEC-R2-ROCKER-WIRE` §3. The dashboard's WASM
 viewer keys its virtual-LED CSS class off this value (`ledClassFor` in
-`wasm-viewer/index.html`), so the on-screen indicator follows the
+`webapp/index.html`), so the on-screen indicator follows the
 physical RGB LED in lockstep.
 
 | Value | State | Note |
@@ -271,7 +271,7 @@ hint.
 
 The canonical source for this enum is
 `firmware/esp32-s3/src/led.rs::LedState`; the dashboard side is
-`wasm-viewer/index.html`'s `ledClassFor()` switch. The two MUST stay
+`webapp/index.html`'s `ledClassFor()` switch. The two MUST stay
 in sync; PLAN row Z's wire-vector audit cross-checks this.
 
 ### 4.2 Transitions

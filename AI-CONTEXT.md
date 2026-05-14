@@ -177,7 +177,7 @@ MAC `1c:db:d4:41:28:3c`.
 | `tools/build-firmware.sh` | ✅ NEW — builds + saves OTA-ready .bin + archives versioned copy under `firmware/esp32-s3/releases/` |
 | `crates/r2-{fnv,cbor,wire,core,bootstrap,trust,transport,route,engine,wasm,esp}/` | ✅ all vendored from r2-core. r2-esp + r2-wasm exclude from host workspace (xtensa- and wasm-only respectively) |
 | `dashboard/` | ✅ + `/ws/raw` (binary), `/ws/status` (text JSON), `/v/` (WASM viewer), `/api/ota/{addr}`, `/api/bootstrap`, peer_disconnected push, 5 s read timeout, sig-verify announce, announce-replay-on-/ws/raw-connect |
-| `wasm-viewer/` | ✅ Live + Devices tabs, virtual LEDs (sidebar dot + device card LED) sync to physical via `r2.sensor.status`, OTA file picker, calm-tech UI strings |
+| `webapp/` | ✅ Live + Devices tabs, virtual LEDs (sidebar dot + device card LED) sync to physical via `r2.sensor.status`, OTA file picker, calm-tech UI strings |
 | `firmware/esp32-s3/` | ✅ Phase 5a/5L/6/9-light. WS2812 LED FSM, BLE bootstrap (R2-BEACON + L2CAP `#wifi_offer` + UDP presence), persistent RBID, OTA receive listener, ERROR-on-init-fault top-level trap, mark_app_valid gated on first frame round-trip per §12.2 |
 | `firmware/esp32-s3/releases/` | ✅ NEW — versioned archive of OTA-pushed firmware images |
 | `trust_keys/tg_pub.bin` + `tg_cert.bin` | ✅ generated; priv off-tree at `~/.config/r2-rocker/tg_signer/` |
@@ -258,8 +258,8 @@ ensemble; the firmware can stay AOT-compiled.
 
   | Host | Role | Why this host |
   |---|---|---|
-  | GitHub Pages (or any static CDN) | Serves the `wasm-viewer/` bundle (HTML + JS + .wasm). Updated via `git push`. | Static hosting for the **remote** path. Public, cacheable, no execution, no plaintext, no secrets. |
-  | Onsite controller | Hosts its own copy of the same `wasm-viewer/` bundle on its HTTP server (e.g. `http://10.42.0.1:8080/`). Plus: sensor TCP listener + relay-compatible WSS forwarder + TG KeyHolder cert issuance + local data archive (Phase 5f). | Lets onsite browsers get the WebApp **without internet** — open a tablet on the hotspot, browse to the controller's IP, scan the QR from the same dashboard's "Enrol device" UI, join TG. Closed-network deployments work end-to-end. |
+  | GitHub Pages (or any static CDN) | Serves the `webapp/` bundle (HTML + JS + .wasm). Updated via `git push`. | Static hosting for the **remote** path. Public, cacheable, no execution, no plaintext, no secrets. |
+  | Onsite controller | Hosts its own copy of the same `webapp/` bundle on its HTTP server (e.g. `http://10.42.0.1:8080/`). Plus: sensor TCP listener + relay-compatible WSS forwarder + TG KeyHolder cert issuance + local data archive (Phase 5f). | Lets onsite browsers get the WebApp **without internet** — open a tablet on the hotspot, browse to the controller's IP, scan the QR from the same dashboard's "Enrol device" UI, join TG. Closed-network deployments work end-to-end. |
   | r2-relay (e.g. $5 VPS) | Forwards TG-encrypted frames between members over WSS. Sees no plaintext. | Public-internet rendezvous so remote browsers can reach the controller across NAT. Skipped when everything's onsite on the hotspot. |
 
   Both bundles are byte-identical (same `cargo build --target wasm32`

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>R2 Rocker Rig — Live Dashboard</title>
+<title>R2 Rocker Rig — WASM viewer</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -115,6 +115,9 @@
   .bs-line.red { color: #f87171; }
 
   /* ── Main layout ── */
+  /* `display: grid/block` here would beat the implicit display:none from
+     the [hidden] attribute used by setView() to switch tabs — restore it. */
+  [hidden] { display: none !important; }
   .main {
     display: grid;
     grid-template-columns: 1fr 280px;
@@ -368,12 +371,41 @@
   .virt-led.tg-boot       { background: #f8fafc; box-shadow: 0 0 8px #f8fafc; animation: led-flash 1s 1; }
   .virt-led.tg-advertising { background: #3b82f6; box-shadow: 0 0 8px #3b82f6; animation: led-pulse 1.0s ease-in-out infinite; }
   .virt-led.tg-ble        { background: #06b6d4; box-shadow: 0 0 8px #06b6d4; animation: led-pulse 0.4s ease-in-out infinite; }
-  .virt-led.tg-streaming  { background: #22c55e; box-shadow: 0 0 8px #22c55e; animation: led-heartbeat 1.0s ease-in-out infinite; }
-  .virt-led.tg-catchup    { background: #facc15; box-shadow: 0 0 8px #facc15; animation: led-heartbeat 1.0s ease-in-out infinite; }
+  /* Steady (no animation) for resting states — animation is reserved for
+     "needs attention" or "in transition". The physical RGB LED still
+     heartbeats so the rig itself remains glanceable; the dashboard's
+     virtual LED conveys the same colour without the visual chatter. */
+  .virt-led.tg-streaming  { background: #22c55e; box-shadow: 0 0 8px #22c55e; }
+  .virt-led.tg-catchup    { background: #facc15; box-shadow: 0 0 8px #facc15; }
   .virt-led.tg-cal        { background: #a855f7; box-shadow: 0 0 8px #a855f7; }
   .virt-led.tg-low        { background: #f97316; box-shadow: 0 0 8px #f97316; animation: led-pulse 1.5s ease-in-out infinite; }
   .virt-led.tg-ota        { background: #ec4899; box-shadow: 0 0 8px #ec4899; animation: led-strobe 0.18s steps(2) infinite; }
   .virt-led.tg-error      { background: #ef4444; box-shadow: 0 0 8px #ef4444; animation: led-pulse 0.25s ease-in-out infinite; }
+  /* Streaming with synthetic data — purple slow pulse, distinct from solid-purple Calibrating */
+  .virt-led.tg-streaming-sim { background: #a855f7; box-shadow: 0 0 8px #a855f7; animation: led-pulse 2.0s ease-in-out infinite; }
+  /* Transient client-side state: optimistic indicator while a remote reset is in flight. Cleared when the sensor reconnects. */
+  .virt-led.tg-resetting  { background: #94a3b8; box-shadow: 0 0 6px #94a3b8; animation: led-pulse 0.5s ease-in-out infinite; }
+
+  /* Health-source dot — second indicator next to the FSM-state dot. */
+  .health-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    flex-shrink: 0;
+    border: 1px solid #475569;
+  }
+  .health-dot.health-real { background: #22c55e; box-shadow: 0 0 4px #22c55e; }
+  .health-dot.health-sim  { background: #a855f7; box-shadow: 0 0 6px #a855f7; animation: led-pulse 2.0s ease-in-out infinite; }
+  .health-label {
+    font-size: 0.78em;
+    color: #94a3b8;
+    margin-left: 4px;
+  }
+  .health-label.health-sim-text { color: #c4b5fd; }
+  .health-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 4px;
+  }
 
   @keyframes led-pulse     { 0%,100% { opacity: 1; } 50% { opacity: 0.25; } }
   @keyframes led-heartbeat { 0%, 30%, 100% { opacity: 1; } 15%, 45% { opacity: 0.3; } }
@@ -397,6 +429,20 @@
   }
   .btn-update:hover { background: #64748b; }
   .btn-update:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  /* Secondary destructive action — reset sensor (amber outline). */
+  .btn-reset {
+    flex: 1;
+    background: transparent;
+    color: #f59e0b;
+    border: 1px solid #b45309;
+    border-radius: 6px;
+    padding: 7px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .btn-reset:hover { background: rgba(245, 158, 11, 0.12); }
+  .btn-reset:disabled { opacity: 0.5; cursor: not-allowed; }
 
   .devices-summary {
     display: flex;
@@ -481,7 +527,7 @@
 <div class="bootstrap-panel" id="bootstrap-panel">
   <div class="bootstrap-log-card">
     <div class="bootstrap-log-header">
-      <h2>Bootstrap Log</h2>
+      <h2>Connection Log</h2>
       <button class="bootstrap-close" onclick="closeBootstrapPanel()">&times;</button>
     </div>
     <div class="bootstrap-log-entries" id="bootstrap-log"></div>
@@ -496,7 +542,7 @@
   </div>
 </div>
 
-<script>
+<script type="module">
 const MAX_POINTS = 200;
 const CALIBRATION_MIN = 10;
 
@@ -573,6 +619,8 @@ function getOrCreateSensor(addr) {
     bootTsMs: null,
     battery: null,    // { voltage_mv, percent, charging, ts }
     fsmState: null,   // populated once Phase 5L firmware emits status events
+    dataSource: null, // 0 = real ADXL355, 1 = sim fallback; null = unknown (no status yet)
+    pendingReset: false, // transient: true between Reset button click and sensor reconnect
     lastSeen: Date.now(),
     online: true,
     chart,
@@ -618,9 +666,17 @@ function updateSensorList() {
   const el = document.getElementById('sensorList');
   document.getElementById('sensorCount').textContent = sensors.size;
   if (sensors.size === 0) { el.textContent = 'None'; return; }
+  // Sidebar status dot reuses the same tg-* colour/animation map as the
+  // Devices-view virtual LED, so the dot here mirrors the physical RGB
+  // LED on the sensor as a quick visual reference. Until Phase 5L lands
+  // a real fsmState (`r2.sensor.status`), ledClassFor() returns "" and
+  // the dot stays the inert grey placeholder.
   el.innerHTML = [...sensors.values()].map(s => {
     const label = s.deviceName ? `${s.deviceName} <span style="color:#475569;">(${s.key})</span>` : s.key;
-    return `<div style="padding:4px 0; border-bottom:1px solid #1e293b; color:#94a3b8;">\u25CF ${label}</div>`;
+    const led = ledClassFor(s);
+    return `<div style="display:flex; align-items:center; gap:8px; padding:4px 0; border-bottom:1px solid #1e293b; color:#94a3b8;">`
+         + `<span class="virt-led ${led}" style="width:10px; height:10px;"></span>`
+         + `<span>${label}</span></div>`;
   }).join('');
 }
 
@@ -646,7 +702,15 @@ function addSensorLog(sensor, text) {
 function startBootstrap() {
   const btn = document.getElementById('btn-connect');
   btn.disabled = true;
-  btn.textContent = 'Scanning...';
+  btn.textContent = 'Scanning…';
+
+  // Safety net — the controller's bootstrap loop runs continuously and
+  // only emits `Done` when every known sensor is simultaneously Active.
+  // If any sensor never reports presence the button would otherwise be
+  // stuck on "Scanning…" forever. Reset after 60 s no matter what; the
+  // log panel keeps showing live progress in the background.
+  if (window.__connectButtonTimeout) clearTimeout(window.__connectButtonTimeout);
+  window.__connectButtonTimeout = setTimeout(resetConnectButton, 60_000);
 
   const panel = document.getElementById('bootstrap-panel');
   panel.classList.add('visible');
@@ -655,19 +719,16 @@ function startBootstrap() {
   fetch('/api/bootstrap', { method: 'POST' })
     .then(r => {
       if (r.status === 409) {
-        addBootstrapLine('Bootstrap already in progress', 'amber');
-        btn.disabled = false;
-        btn.textContent = '\uD83D\uDD0D Connect Sensors';
+        addBootstrapLine('Already connecting…', 'amber');
+        resetConnectButton();
       } else if (!r.ok) {
         r.text().then(t => addBootstrapLine('Error: ' + t, 'red'));
-        btn.disabled = false;
-        btn.textContent = '\uD83D\uDD0D Connect Sensors';
+        resetConnectButton();
       }
     })
     .catch(e => {
       addBootstrapLine('Fetch error: ' + e.message, 'red');
-      btn.disabled = false;
-      btn.textContent = '\uD83D\uDD0D Connect Sensors';
+      resetConnectButton();
     });
 }
 
@@ -683,7 +744,7 @@ function handleBootstrapEvent(msg) {
   if (evt === null || 'Reset' in msg.event) {
     document.getElementById('bootstrap-log').innerHTML = '';
     document.getElementById('bootstrap-panel').classList.add('visible');
-    addBootstrapLine('↺ Restarting bootstrap…', 'amber');
+    addBootstrapLine('↺ Restarting…', 'amber');
     // Destroy all sensor cards and chart instances
     sensors.forEach(s => { try { s.chart.destroy(); } catch(e) {} });
     sensors.clear();
@@ -697,26 +758,45 @@ function handleBootstrapEvent(msg) {
   switch (evt.kind) {
     case 'Log':
       addBootstrapLine(evt.data, '');
+      // Recognise steady-state messages — when the bootstrap loop has
+      // either found sensors already streaming OR set up the hotspot and
+      // is now waiting in scan-quiet mode, there's nothing further the
+      // user is blocked on. Re-enable the button so they can re-trigger.
+      // The bootstrap loop keeps running in the background regardless.
+      if (/scan quiet for|sensor\(s\) streaming|Hotspot ready/i.test(evt.data)) {
+        resetConnectButton();
+      }
       break;
     case 'SensorFound':
       addBootstrapLine('Found sensor: ' + evt.data.addr, 'amber');
       break;
     case 'SensorConnected':
       addBootstrapLine('\u2713 ' + evt.data.name + ' connected (' + evt.data.ip + ')', 'green');
+      // Per-sensor success \u2014 reset the button now rather than waiting
+      // for `Done`, which only fires when *all* known sensors are
+      // simultaneously Active (a state the loop may never reach if any
+      // sensor drops out, and never re-fires after the first time).
+      resetConnectButton();
       break;
-    case 'Done': {
-      addBootstrapLine('Bootstrap complete \u2014 ' + evt.data.count + ' sensor(s) connected', 'green');
-      const btn = document.getElementById('btn-connect');
-      btn.disabled = false;
-      btn.textContent = '\uD83D\uDD0D Connect Sensors';
+    case 'Done':
+      addBootstrapLine(evt.data.count + ' sensor(s) connected', 'green');
+      resetConnectButton();
       break;
-    }
     case 'Error':
       addBootstrapLine('ERROR: ' + evt.data, 'red');
-      const btn2 = document.getElementById('btn-connect');
-      btn2.disabled = false;
-      btn2.textContent = '\uD83D\uDD0D Connect Sensors';
+      resetConnectButton();
       break;
+  }
+}
+
+function resetConnectButton() {
+  const btn = document.getElementById('btn-connect');
+  if (!btn) return;
+  btn.disabled = false;
+  btn.textContent = '\uD83D\uDD0D Connect Sensors';
+  if (window.__connectButtonTimeout) {
+    clearTimeout(window.__connectButtonTimeout);
+    window.__connectButtonTimeout = null;
   }
 }
 
@@ -729,11 +809,100 @@ function addBootstrapLine(text, cls) {
   el.scrollTop = el.scrollHeight;
 }
 
-// ── WebSocket ──
+// ── WASM hive bootstrap + WebSocket /ws/raw ────────────────────────────────
+//
+// This viewer is the browser-side R2 hive. It receives raw R2-WIRE frames
+// (with src_addr envelope) over WSS, decodes them in WebAssembly via the
+// vendored r2-wasm bundle, and drives the existing Live + Devices UI by
+// synthesising the same {event, source_addr, payload, ...} message shape
+// the legacy JSON-pushing dashboard used. Existing handlers below stay
+// unchanged.
+import init, {
+  fnv1a_32 as wasmFnv1a32,
+  decode_compact_frame as wasmDecodeFrame,
+  r2_version as wasmVersion,
+} from './pkg/r2_wasm.js';
+
 let ws;
-function connect() {
+let HASH_TO_NAME = new Map();           // u32 event_hash → friendly name
+const LSB_PER_G_AT_2G = 256000;         // ADXL355 scale at ±2 g
+const TEXT_DECODER = new TextDecoder('utf-8');
+
+const KNOWN_EVENT_NAMES = [
+  'r2.sensor.announce',
+  'r2.sensor.acceleration',
+  'r2.sensor.acceleration.batch',
+  'r2.sensor.battery',
+  'r2.sensor.status',
+  'r2.sensor.event.log',
+  'r2.sensor.cal.sample.resp',
+  'r2.sensor.sync_pong',
+  // Legacy M10 names retained for mixed-deployment compat.
+  'acceleration',
+  'battery_status',
+  'run_state',
+];
+
+async function bootstrapHive() {
+  try {
+    await init();
+  } catch (err) {
+    console.error('[hive] WASM init FAILED:', err);
+    document.getElementById('wsStatus').textContent = 'WASM init failed (see console)';
+    return;
+  }
+  console.log('[hive] r2-wasm loaded:', wasmVersion());
+  console.log('[hive] hash table:');
+  for (const name of KNOWN_EVENT_NAMES) {
+    const hash = wasmFnv1a32(new TextEncoder().encode(name)) >>> 0;
+    HASH_TO_NAME.set(hash, name);
+    console.log('  0x' + hash.toString(16).padStart(8, '0'), name);
+  }
+  console.log('[hive] connecting to /ws/raw …');
+  connectRaw();
+  console.log('[hive] connecting to /ws/status …');
+  connectStatus();
+}
+
+let statusWs;
+function connectStatus() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(`${proto}//${location.host}/ws`);
+  statusWs = new WebSocket(`${proto}//${location.host}/ws/status`);
+  statusWs.onopen = () => console.log('[hive] /ws/status open');
+  statusWs.onclose = () => {
+    console.log('[hive] /ws/status closed; retry in 2 s');
+    setTimeout(connectStatus, 2000);
+  };
+  statusWs.onerror = (e) => console.warn('[hive] /ws/status error', e);
+  statusWs.onmessage = (e) => {
+    if (typeof e.data !== 'string') return;
+    let msg;
+    try { msg = JSON.parse(e.data); }
+    catch (err) { console.warn('[hive] bad status JSON:', e.data); return; }
+    if (msg.type === 'bootstrap') {
+      handleBootstrapEvent(msg);
+    } else if (msg.type === 'peer_disconnected') {
+      // Server detected the sensor's TCP socket close. Flip the virtual
+      // LED to inert grey now rather than waiting for the OFFLINE_MS
+      // timeout to fire on lastSeen ageing.
+      const s = sensors.get(msg.addr);
+      if (s) {
+        s.online = false;
+        s.lastSeen = 0;            // forces classifyOnline → 'offline'
+        updateSensorList();
+        renderDevicesIfVisible();
+      }
+    } else if (msg.type === 'ota') {
+      handleOtaEvent(msg);
+    }
+    // Future: hotspot, server_error, etc. (SPEC-R2-ROCKER-DASHBOARD §5.3)
+  };
+}
+
+function connectRaw() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws/raw`);
+  ws.binaryType = 'arraybuffer';
   ws.onopen = () => {
     document.getElementById('wsDot').className = 'status-dot connected';
     document.getElementById('wsStatus').textContent = 'Connected';
@@ -741,21 +910,147 @@ function connect() {
   ws.onclose = () => {
     document.getElementById('wsDot').className = 'status-dot';
     document.getElementById('wsStatus').textContent = 'Disconnected';
-    setTimeout(connect, 2000);
+    setTimeout(connectRaw, 2000);
   };
+  ws.onerror = (e) => console.warn('[hive] ws error', e);
   ws.onmessage = (e) => {
-    const msg = JSON.parse(e.data);
-    if (msg.type === 'bootstrap') {
-      // Show the panel if not visible (e.g. replayed log on reconnect)
-      const panel = document.getElementById('bootstrap-panel');
-      if (!panel.classList.contains('visible')) panel.classList.add('visible');
-      handleBootstrapEvent(msg);
-    } else {
-      handleEvent(msg);
-    }
+    if (typeof e.data === 'string') return; // shouldn't happen on /ws/raw
+    onRawFrame(new Uint8Array(e.data));
   };
 }
-connect();
+
+// Envelope from dashboard's /ws/raw (Phase 5d step 3):
+//   [u16 BE: src_addr_len][src_addr utf-8]
+//   [u32 BE: ts_ms_low32]
+//   [u16 BE: frame_len][frame bytes]
+function onRawFrame(buf) {
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  let off = 0;
+  const srcLen = dv.getUint16(off); off += 2;
+  const src = TEXT_DECODER.decode(buf.subarray(off, off + srcLen));
+  off += srcLen;
+  const tsMs = dv.getUint32(off); off += 4;
+  const frameLen = dv.getUint16(off); off += 2;
+  const frame = buf.subarray(off, off + frameLen);
+
+  let decoded;
+  try {
+    decoded = wasmDecodeFrame(frame);
+  } catch (err) {
+    console.warn('[hive] decode_compact_frame failed:', err);
+    return;
+  }
+
+  const eventHash = decoded.event_hash >>> 0;
+  const eventName = HASH_TO_NAME.get(eventHash) || 'unknown';
+  // serde-wasm-bindgen serialises Vec<u8> as a JS Array (not Uint8Array)
+  // — coerce so our CBOR decoder's DataView/subarray calls work.
+  let payloadBytes = decoded.payload;
+  if (payloadBytes && !(payloadBytes instanceof Uint8Array)) {
+    payloadBytes = new Uint8Array(payloadBytes);
+  }
+  const payload = payloadBytes && payloadBytes.length
+    ? remapPayload(eventName, decodeCbor(payloadBytes))
+    : null;
+  if (window.__r2_debug_frames) {
+    console.log('[hive frame]', src, eventName,
+                '0x' + eventHash.toString(16),
+                'payload:', payload);
+  }
+
+  const msg = {
+    event: eventName,
+    hash: '0x' + eventHash.toString(16).padStart(8, '0').toUpperCase(),
+    source_addr: src,
+    timestamp_ms: tsMs,
+    payload,
+    device_name: payload && payload.hostname,
+  };
+  handleEvent(msg);
+}
+
+// Minimal CBOR decoder — covers exactly the major types our SPEC uses.
+// uint, negint, bytes, text, array, map, bool, null. RFC 8949 §3.
+function decodeCbor(bytes) {
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let pos = 0;
+  function readHead() {
+    const ib = dv.getUint8(pos++);
+    const major = ib >> 5;
+    const ai = ib & 0x1f;
+    let len;
+    if (ai < 24) len = ai;
+    else if (ai === 24) { len = dv.getUint8(pos); pos += 1; }
+    else if (ai === 25) { len = dv.getUint16(pos); pos += 2; }
+    else if (ai === 26) { len = dv.getUint32(pos); pos += 4; }
+    else if (ai === 27) {
+      const hi = dv.getUint32(pos); const lo = dv.getUint32(pos + 4);
+      pos += 8;
+      len = hi * 0x100000000 + lo;
+    } else throw new Error('cbor head ai=' + ai + ' unsupported');
+    return { major, len };
+  }
+  function readValue() {
+    const { major, len } = readHead();
+    switch (major) {
+      case 0: return len;
+      case 1: return -1 - len;
+      case 2: { const b = bytes.subarray(pos, pos + len); pos += len; return b; }
+      case 3: { const s = TEXT_DECODER.decode(bytes.subarray(pos, pos + len)); pos += len; return s; }
+      case 4: { const arr = []; for (let i = 0; i < len; i++) arr.push(readValue()); return arr; }
+      case 5: { const obj = {}; for (let i = 0; i < len; i++) { const k = readValue(); const v = readValue(); obj[String(k)] = v; } return obj; }
+      case 7:
+        if (len === 20) return false;
+        if (len === 21) return true;
+        if (len === 22) return null;
+        throw new Error('cbor simple ' + len + ' unsupported');
+      default:
+        throw new Error('cbor major=' + major + ' unsupported');
+    }
+  }
+  return readValue();
+}
+
+// Port of the dashboard's server-side remap_payload — turns int-keyed CBOR
+// maps into named-key JS objects, and scales raw ADXL355 LSB to g for
+// acceleration. Browser-side equivalent of dashboard/src/main.rs.
+function remapPayload(eventName, raw) {
+  if (!raw || typeof raw !== 'object') return raw;
+  function bytesToHex(v) {
+    if (v instanceof Uint8Array) {
+      return Array.from(v).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+    return v;
+  }
+  if (eventName === 'r2.sensor.acceleration') {
+    return {
+      seq:   raw['0'],
+      ts_ms: raw['1'],
+      x: typeof raw['2'] === 'number' ? raw['2'] / LSB_PER_G_AT_2G : null,
+      y: typeof raw['3'] === 'number' ? raw['3'] / LSB_PER_G_AT_2G : null,
+      z: typeof raw['4'] === 'number' ? raw['4'] / LSB_PER_G_AT_2G : null,
+      range: raw['10'],
+    };
+  }
+  const SCHEMA = {
+    'r2.sensor.battery':     [['0','voltage_mv'],['1','percent'],['2','charging'],['3','ts_ms'],['10','temp_c']],
+    'r2.sensor.announce':    [['0','device_pk'],['1','hostname'],['2','fw_ver'],['3','last_seq'],['4','boot_ts_ms'],['5','nonce'],['6','sig'],['10','mounting_role']],
+    'r2.sensor.status':      [['0','state'],['1','uptime_ms'],['2','samples_total'],['3','samples_acked'],['4','sd_pct_used'],['5','rate_hz_active'],['6','range_active'],['7','data_source'],['10','error_code']],
+  };
+  const map = SCHEMA[eventName];
+  if (!map) return raw;
+  const out = {};
+  for (const [intKey, name] of map) {
+    if (intKey in raw) out[name] = raw[intKey];
+  }
+  // bytes fields → hex (matches what the legacy server-side remap produced)
+  for (const k of ['device_pk','nonce','sig']) {
+    if (out[k] instanceof Uint8Array) out[k] = bytesToHex(out[k]);
+  }
+  return out;
+}
+
+bootstrapHive();
 
 function handleEvent(msg) {
   totalEvents++;
@@ -780,9 +1075,24 @@ function handleEvent(msg) {
       }
       break;
     case 'r2.sensor.announce':
-      if (sensor && msg.payload && msg.payload.name) {
-        setDeviceName(sensor, msg.payload.name);
-        addSensorLog(sensor, 'announced: ' + msg.payload.name);
+      if (sensor && msg.payload) {
+        // Schema field is `hostname` (key 1) per remapPayload SCHEMA;
+        // the legacy server-side `name` was a synthetic alias.
+        const hn = msg.payload.hostname;
+        if (hn) {
+          setDeviceName(sensor, hn);
+          addSensorLog(sensor, 'announced: ' + hn);
+        }
+        // Capture announce metadata for the Devices view (Phase 8a).
+        // Was previously only captured from the legacy `sensor.connected`
+        // synthetic event which the new /ws/raw path doesn't emit.
+        if (msg.payload.fw_ver)    sensor.fwVer    = msg.payload.fw_ver;
+        if (msg.payload.device_pk) sensor.devicePk = msg.payload.device_pk;
+        if (msg.payload.boot_ts_ms != null) sensor.bootTsMs = msg.payload.boot_ts_ms;
+        sensor.online = true;
+        sensor.lastSeen = Date.now();
+        renderDevicesIfVisible();
+        updateSensorList();
       }
       return;
     case 'sensor.connected':
@@ -828,12 +1138,17 @@ function handleEvent(msg) {
       return;
     case 'r2.sensor.status':
       if (sensor && msg.payload) {
-        // Capture FSM state for the virtual LED (lights up once Phase 5L
-        // sends real state values).
+        // Capture FSM state for the virtual LED + sidebar status dot
+        // (both light up once Phase 5L sends real state values).
         if (msg.payload.state != null) sensor.fsmState = msg.payload.state;
+        // SPEC-R2-ROCKER-SENSOR-HEALTH: data_source key 7 → 0 real, 1 sim.
+        if (msg.payload.data_source != null) sensor.dataSource = msg.payload.data_source;
+        // First status frame after a reset clicks the transient indicator off.
+        if (sensor.pendingReset) sensor.pendingReset = false;
         sensor.lastSeen = Date.now();
         sensor.online = true;
         renderDevicesIfVisible();
+        updateSensorList(); // keep sidebar dot's colour in sync with fsmState
       }
       addLog(msg);
       return;
@@ -886,6 +1201,8 @@ function handleAcceleration(msg, sensor) {
   }
 
   if (runState !== 'rocking') return;
+  // Chart is hidden on the Devices tab — skip all chart work when not Live.
+  if (currentView !== 'live') return;
 
   const label = new Date(msg.timestamp_ms).toLocaleTimeString('en-NZ', {
     hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit'
@@ -1006,13 +1323,23 @@ function addLog(msg) {
 // object and call renderDevicesIfVisible().
 
 let currentView = 'live';
-const STALE_MS    = 10_000;   // last_seen older than 10 s = stale
-const OFFLINE_MS  = 30_000;   // last_seen older than 30 s = offline
+// Sensors send `r2.sensor.status` every 2 s — these thresholds are
+// counted in "how many status events have we missed?" 4 s = ~1 missed
+// (probably a network blip), 6 s = 3 missed (confident offline).
+const STALE_MS    = 4_000;
+const OFFLINE_MS  = 6_000;
 
 function setView(name) {
   currentView = name;
-  document.getElementById('liveMain').hidden    = (name !== 'live');
-  document.getElementById('devicesMain').hidden = (name !== 'devices');
+  // Toggle the `hidden` attribute (CSS hook) AND set inline `display` so we
+  // win against any cached/legacy CSS that beats the [hidden] selector — past
+  // regressions came from `.main { display: grid; }` overriding `[hidden]`.
+  const live    = document.getElementById('liveMain');
+  const devices = document.getElementById('devicesMain');
+  live.hidden    = (name !== 'live');
+  devices.hidden = (name !== 'devices');
+  live.style.display    = (name === 'live')    ? 'grid'  : 'none';
+  devices.style.display = (name === 'devices') ? 'block' : 'none';
   document.getElementById('viewLive').classList.toggle('active',    name === 'live');
   document.getElementById('viewDevices').classList.toggle('active', name === 'devices');
   if (name === 'devices') renderDevices();
@@ -1041,7 +1368,15 @@ function classifyOnline(s) {
 // firmware sends real state values, fsmState is null and the LED
 // stays the inert grey placeholder.
 function ledClassFor(s) {
+  // Optimistic client-side override while a reset is in flight — wins over
+  // whatever the last status frame said, until the sensor reconnects.
+  if (s.pendingReset) return 'tg-resetting';
   if (s.fsmState == null) return '';
+  // If the sensor's gone offline (no events for OFFLINE_MS), don't
+  // pretend we know its FSM state — fall back to the inert grey
+  // placeholder. classifyOnline() reads s.lastSeen against
+  // OFFLINE_MS / STALE_MS thresholds defined above.
+  if (classifyOnline(s) === 'offline') return '';
   switch (s.fsmState) {
     case 0:  return 'tg-boot';         // BOOT
     case 1:  return 'tg-advertising';  // ADVERTISING
@@ -1053,8 +1388,19 @@ function ledClassFor(s) {
     case 7:  return 'tg-low';          // LOW_BATTERY
     case 8:  return 'tg-ota';          // OTA
     case 9:  return 'tg-error';        // ERROR
+    case 10: return 'tg-streaming-sim'; // STREAMING_DEGRADED_SIM (SPEC-R2-ROCKER-SENSOR-HEALTH)
     default: return '';
   }
+}
+
+// Render the health-source row (dot + label) per SPEC-R2-ROCKER-SENSOR-HEALTH §6.
+// Always visible once data_source is known; hidden until the first status frame.
+function healthRowFor(s) {
+  if (s.dataSource == null) return '';
+  if (s.dataSource === 0) {
+    return '<div class="health-row"><div class="health-dot health-real" title="ADXL355 ok"></div><span class="health-label">Real ADXL355</span></div>';
+  }
+  return '<div class="health-row"><div class="health-dot health-sim" title="Sensor not reading — synthetic data on the wire"></div><span class="health-label health-sim-text">Sim fallback — sensor not reading</span></div>';
 }
 
 function renderDevices() {
@@ -1073,7 +1419,11 @@ function renderDevices() {
     const status   = classifyOnline(s);
     const name     = s.deviceName ?? s.key;
     const ip       = s.key;
-    const fwShort  = s.fwVer ? s.fwVer.replace(/\s+sim$/, '') : '—';
+    // Show the full fw_ver verbatim — operator wants to see semver +
+    // git short-sha + any tag (e.g. " sim") on the card directly.
+    // Once a "current expected firmware" register exists (Phase 9-fwreg),
+    // a mismatch will get a small "out-of-date" badge layered on top.
+    const fwShort  = s.fwVer ?? '—';
     const battMv   = s.battery?.voltage_mv ?? null;
     const battPct  = s.battery?.percent ?? null;
     const battCharging = s.battery?.charging ?? false;
@@ -1086,10 +1436,10 @@ function renderDevices() {
     return `
       <div class="device-card ${status}" data-key="${escapeAttr(s.key)}">
         <div class="device-header">
-          <div class="online-dot"></div>
           <div class="virt-led ${led}" title="virtual LED${s.fsmState == null ? ' — awaiting Phase 5L FSM state' : ''}"></div>
           <div style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeText(name)}</div>
         </div>
+        ${healthRowFor(s)}
         <div class="device-row"><span class="label">addr</span><span class="value">${escapeText(ip)}</span></div>
         <div class="device-row"><span class="label">firmware</span><span class="value" title="${escapeAttr(s.fwVer ?? '—')}">${escapeText(fwShort)}</span></div>
         <div class="device-row"><span class="label">last seen</span><span class="value">${lastSeen}</span></div>
@@ -1100,6 +1450,7 @@ function renderDevices() {
         ${battPct != null ? `<div class="battery-bar"><div class="${battClass}" style="width:${Math.max(2, Math.min(100, battPct))}%;"></div></div>` : ''}
         <div class="device-actions">
           <button class="btn-update" onclick="requestFirmwareUpdate('${escapeAttr(s.key)}')">⬆ Update Firmware</button>
+          <button class="btn-reset" onclick="requestReset('${escapeAttr(s.key)}')">↻ Reset Sensor</button>
         </div>
       </div>`;
   }).join('');
@@ -1122,20 +1473,71 @@ function updateDevicesSummary(peers) {
   document.getElementById('dsNeedsUpdate').textContent = counts.needsUpdate;
 }
 
+// OTA progress events from /ws/status (dashboard's /api/ota/{addr} handler
+// broadcasts these). Reuses the Connection Log panel as a generic
+// "activity feed" so the operator sees phase transitions live without
+// needing to read browser console.
+function handleOtaEvent(msg) {
+  // Auto-open the Connection Log on first event so the operator sees it
+  // even if they triggered the OTA from the Devices view.
+  document.getElementById('bootstrap-panel').classList.add('visible');
+  switch (msg.phase) {
+    case 'uploading':
+      addBootstrapLine(`⬆ Pushing firmware to ${msg.target} (${msg.size} bytes)…`, 'amber');
+      break;
+    case 'applied':
+      addBootstrapLine(`✓ ${msg.target} accepted: ${msg.message || 'rebooting'}`, 'green');
+      break;
+    case 'rejected':
+      addBootstrapLine(`✗ ${msg.target} rejected: ${msg.message || 'unknown'}`, 'red');
+      break;
+    case 'error':
+      addBootstrapLine(`✗ ${msg.target}: ${msg.message || 'error'}`, 'red');
+      break;
+  }
+}
+
 function requestFirmwareUpdate(addr) {
-  // Phase 9 will turn this into a real `r2.dash.fw.update` push (server
-  // pushes binary URL + sha256 + tg_sig, sensor fetches + verifies +
-  // swaps partition). For now: visual feedback only.
-  console.log('[stub] firmware update requested for', addr);
+  // Phase 9-light: open a file picker, POST the chosen .bin to the
+  // dashboard's /api/ota/{addr}, watch progress via /ws/status events.
+  // Phase 9-secure (#24) will add Ed25519 signing + verify before swap.
   const btn = document.querySelector(`.device-card[data-key="${addr}"] .btn-update`);
-  if (btn) {
-    btn.textContent = '✓ queued (stub)';
+  if (!btn) return;
+
+  const picker = document.createElement('input');
+  picker.type = 'file';
+  picker.accept = '.bin,application/octet-stream';
+  picker.style.display = 'none';
+  picker.onchange = async () => {
+    const file = picker.files && picker.files[0];
+    if (!file) return;
     btn.disabled = true;
+    btn.textContent = `⬆ Uploading ${(file.size / 1024).toFixed(0)} KB…`;
+    try {
+      const res = await fetch(`/api/ota/${encodeURIComponent(addr)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: file,
+      });
+      const out = await res.json().catch(() => ({}));
+      if (res.ok && out.ok) {
+        btn.textContent = '✓ Updated';
+      } else {
+        btn.textContent = '✗ Update failed';
+        console.warn('[ota] failed:', out);
+      }
+    } catch (err) {
+      btn.textContent = '✗ Network error';
+      console.warn('[ota] fetch error:', err);
+    }
     setTimeout(() => {
       btn.textContent = '⬆ Update Firmware';
       btn.disabled = false;
-    }, 2500);
-  }
+    }, 4000);
+  };
+  document.body.appendChild(picker);
+  picker.click();
+  setTimeout(() => picker.remove(), 60_000);
 }
 
 function escapeText(s) {
@@ -1143,11 +1545,67 @@ function escapeText(s) {
 }
 function escapeAttr(s) { return escapeText(s).replace(/"/g, '&quot;'); }
 
+// SPEC-R2-ROCKER-SENSOR-REMOTE-RESET: POST /api/sensor/{addr}/reset,
+// watch progress via /ws/status reset events. Flips the virtual-LED dot
+// to a transient grey-pulse "resetting" state immediately on click, so
+// the user gets visual confirmation that something is happening; the
+// flag clears on the first status frame from the rebooted sensor (or
+// after a 10 s failsafe in case the sensor never comes back).
+async function requestReset(addr) {
+  const btn = document.querySelector(`.device-card[data-key="${addr}"] .btn-reset`);
+  if (!btn) return;
+  const sensor = sensors.get(addr);
+  if (sensor) {
+    sensor.pendingReset = true;
+    renderDevicesIfVisible();
+    updateSensorList();
+    setTimeout(() => {
+      if (sensor.pendingReset) {
+        sensor.pendingReset = false;
+        renderDevicesIfVisible();
+        updateSensorList();
+      }
+    }, 10_000);
+  }
+  btn.disabled = true;
+  btn.textContent = '↻ Resetting…';
+  try {
+    const res = await fetch(`/api/sensor/${encodeURIComponent(addr)}/reset`, { method: 'POST' });
+    const out = await res.json().catch(() => ({}));
+    btn.textContent = (res.ok && out.ok) ? '✓ Reset' : '✗ Failed';
+    if (!(res.ok && out.ok)) console.warn('[reset] failed:', out);
+  } catch (err) {
+    btn.textContent = '✗ Network error';
+    console.warn('[reset] fetch error:', err);
+  }
+  setTimeout(() => {
+    btn.textContent = '↻ Reset Sensor';
+    btn.disabled = false;
+  }, 4000);
+}
+
 // Keep online/stale/offline classification fresh even when no events
 // arrive for a while — re-render once a second when Devices is visible.
+// Re-render every second so online/stale/offline classification refreshes
+// even without events arriving. Sidebar dot and Devices-view LED both
+// depend on `classifyOnline(s)` against `lastSeen`, so both need a tick.
 setInterval(() => {
+  updateSensorList();
   if (currentView === 'devices') renderDevices();
 }, 1000);
+
+// Module scripts isolate names; expose the inline-onclick handlers on
+// `window` so the existing onclick="..." attributes in the HTML still
+// resolve. (Cleaner long-term: addEventListener bindings, but this
+// keeps the diff vs the legacy dashboard minimal.)
+Object.assign(window, {
+  setView,
+  startBootstrap,
+  sendCmd,
+  closeBootstrapPanel,
+  requestFirmwareUpdate,
+  requestReset,
+});
 </script>
 </body>
 </html>
