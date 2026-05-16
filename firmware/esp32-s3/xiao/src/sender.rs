@@ -27,11 +27,13 @@ use crate::adxl355::Adxl355;
 use crate::clock::Clock;
 use crate::identity::Identity;
 use crate::led::LedHandle;
+use crate::ring::Ring;
 use crate::sim::{AccelSim, BatterySim};
 use crate::wire::{
-    decode_compact_frame, frame_for_tcp, parse_set_clock_offset, parse_sync_pulse_req_id,
+    decode_compact_frame, frame_for_tcp, parse_dash_ack_through_seq,
+    parse_set_clock_offset, parse_sync_pulse_req_id,
     CborWriter,
-    EVT_DASH_SET_CLOCK_OFFSET, EVT_DASH_SYNC_PULSE, EVT_SENSOR_ACCELERATION,
+    EVT_DASH_ACK, EVT_DASH_SET_CLOCK_OFFSET, EVT_DASH_SYNC_PULSE, EVT_SENSOR_ACCELERATION,
     EVT_SENSOR_ANNOUNCE, EVT_SENSOR_BATTERY, EVT_SENSOR_STATUS, EVT_SENSOR_SYNC_PONG,
 };
 
@@ -90,6 +92,15 @@ pub struct Sender {
     /// per SPEC-R2-ROCKER-TIMESYNC. NVS-backed offset is applied
     /// transparently inside `Clock::ts_ms`.
     clock: Arc<Clock>,
+    /// SD ring writer (SPEC-R2-ROCKER-SENSOR §6). `None` means the SD
+    /// path is unavailable for this boot (no card, mount failed) — the
+    /// sender continues streaming-only.
+    ring: Option<Ring>,
+    /// Last `through_seq` received via `r2.dash.ack`. Used to free SD
+    /// segments whose records have all been acknowledged by the
+    /// dashboard. RAM-only in v0.1 — spec §6.4 calls for rate-limited
+    /// NVS persistence, deferred.
+    last_acked_seq: u32,
     boot_instant: Instant,
     /// OTA-rollback gate (SPEC-R2-ROCKER-SENSOR §12.2): cleared until
     /// the first successful TCP frame round-trip, then we tell the
@@ -111,6 +122,7 @@ impl Sender {
         led: LedHandle,
         adxl: Option<Adxl355>,
         clock: Arc<Clock>,
+        ring: Option<Ring>,
     ) -> Self {
         let fw_ver = build_fw_ver(adxl.is_some());
         Self {
@@ -122,6 +134,8 @@ impl Sender {
             identity,
             led,
             clock,
+            ring,
+            last_acked_seq: 0,
             boot_instant: Instant::now(),
             app_validated: false,
             fw_ver,
@@ -161,9 +175,13 @@ impl Sender {
         // Spawn an inbound-frame reader on a try_cloned half of the socket.
         // Dispatches dashboard → sensor commands. Frames that need to
         // round-trip a reply (sync_pulse → sync_pong) are pushed back
-        // through `outbound_rx` so the main writer loop emits them on
-        // the same socket — avoids two threads racing the writer side.
+        // through `outbound_rx`. ACK events (`r2.dash.ack`) are pushed
+        // through `ack_rx` so the main loop can update the
+        // `last_acked_seq` and free SD ring segments — Ring is owned
+        // by Sender and can't be reached safely from the reader
+        // thread without a Mutex we'd rather avoid.
         let (outbound_tx, outbound_rx) = mpsc::channel::<Vec<u8>>();
+        let (ack_tx, ack_rx) = mpsc::channel::<u32>();
         let stop_reader = Arc::new(AtomicBool::new(false));
         let _reader_handle = {
             let read_stream = stream
@@ -177,10 +195,11 @@ impl Sender {
             let stop = stop_reader.clone();
             let clock = self.clock.clone();
             let out_tx = outbound_tx.clone();
+            let ack_tx_for_reader = ack_tx.clone();
             std::thread::Builder::new()
                 .stack_size(4096)
                 .name("sender-rx".into())
-                .spawn(move || inbound_reader_loop(read_stream, stop, clock, out_tx))
+                .spawn(move || inbound_reader_loop(read_stream, stop, clock, out_tx, ack_tx_for_reader))
                 .context("spawn sender-rx thread")?
         };
         // RAII-ish: signal the reader to stop when session() returns.
@@ -194,7 +213,16 @@ impl Sender {
         let mut next_sample = Instant::now();
         let mut next_battery = Instant::now() + Duration::from_millis(BATTERY_PERIOD_MS);
         let mut next_status = Instant::now(); // first status fires immediately
-        let mut seq: u32 = 1;
+        // Seed the seq counter from the SD ring's recovered tail per
+        // SPEC-R2-ROCKER-SENSOR §6.5: continue right after the
+        // highest-numbered record on disk. Without a ring (no SD)
+        // start at 1 — the dashboard's `last_seq=0` in the announce
+        // signals there's no durability and the dashboard SHOULD NOT
+        // expect to fill backlog gaps.
+        let mut seq: u32 = self.ring.as_ref().map(|r| r.tail_seq().wrapping_add(1)).unwrap_or(1);
+        info!("sender: starting at seq={} ({})",
+              seq,
+              if self.ring.is_some() { "resumed from SD ring" } else { "no SD ring — fresh count" });
 
         loop {
             let now = Instant::now();
@@ -229,6 +257,29 @@ impl Sender {
                         if let Err(e) = stream.write_all(&frame) {
                             warn!("sender: outbound write failed: {} — dropping session", e);
                             return Err(e).context("outbound write");
+                        }
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => break,
+                }
+            }
+
+            // Drain ack events (r2.dash.ack). Each carries a
+            // through_seq — every sample with seq ≤ through_seq has
+            // landed with the dashboard. Update RAM cumulator and
+            // free SD segments whose records are entirely acked
+            // (SPEC-R2-ROCKER-SENSOR §7.4). NVS persistence of
+            // last_acked_seq (§6.4) is deferred to a follow-up.
+            loop {
+                match ack_rx.try_recv() {
+                    Ok(through_seq) => {
+                        if through_seq > self.last_acked_seq {
+                            self.last_acked_seq = through_seq;
+                            if let Some(ref mut ring) = self.ring {
+                                if let Err(e) = ring.free_through(through_seq) {
+                                    warn!("[ring] free_through({}) failed: {}", through_seq, e);
+                                }
+                            }
                         }
                     }
                     Err(mpsc::TryRecvError::Empty) => break,
@@ -334,11 +385,24 @@ impl Sender {
             self.accel_sim.sample(t_s)
         };
 
+        // Sample once so the wire ts_ms and the on-disk ts_ms match.
+        let ts_ms = self.ts_ms();
+
+        // Durable copy first (SPEC-R2-ROCKER-SENSOR §7.2). Best-effort:
+        // log + continue on write error so the wire path stays alive
+        // even with a flaky/full card. v0.1 omits the in-RAM retry
+        // queue + ERROR escalation that §6.7 calls for.
+        if let Some(ref mut ring) = self.ring {
+            if let Err(e) = ring.append(seq, ts_ms, x, y, z) {
+                warn!("[ring] append seq={} failed: {}", seq, e);
+            }
+        }
+
         let mut payload = [0u8; 32];
         let mut w = CborWriter::new(&mut payload);
         w.map(5);
         w.key(0); w.u(seq as u64);
-        w.key(1); w.u(self.ts_ms() as u64);
+        w.key(1); w.u(ts_ms as u64);
         w.key(2); w.i(x as i64);
         w.key(3); w.i(y as i64);
         w.key(4); w.i(z as i64);
@@ -429,6 +493,7 @@ fn inbound_reader_loop(
     stop: Arc<AtomicBool>,
     clock: Arc<Clock>,
     out_tx: mpsc::Sender<Vec<u8>>,
+    ack_tx: mpsc::Sender<u32>,
 ) {
     let mut len_buf = [0u8; 2];
     let mut frame_buf = Vec::with_capacity(64);
@@ -460,6 +525,17 @@ fn inbound_reader_loop(
             continue; // malformed — skip
         };
         match event_hash {
+            EVT_DASH_ACK => {
+                if let Some(through_seq) = parse_dash_ack_through_seq(payload) {
+                    // Push to main loop; let it update last_acked_seq
+                    // and free SD segments. Reader thread owns no Ring.
+                    if ack_tx.send(through_seq).is_err() {
+                        return;
+                    }
+                } else {
+                    warn!("[sender-rx] malformed dash.ack payload");
+                }
+            }
             EVT_DASH_SET_CLOCK_OFFSET => {
                 if let Some(delta_ms) = parse_set_clock_offset(payload) {
                     info!("[sender-rx] r2.dash.set_clock_offset delta_ms={:+}", delta_ms);

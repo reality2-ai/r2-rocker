@@ -41,6 +41,7 @@ pub const EVT_SENSOR_EVENT_LOG:    u32 = fnv1a_32(b"r2.sensor.event.log");
 pub const EVT_SENSOR_SYNC_PONG:    u32 = fnv1a_32(b"r2.sensor.sync_pong");
 // Dashboard → sensor events handled on the streaming TCP socket
 // (SPEC-R2-ROCKER-TIMESYNC §4, SPEC-R2-ROCKER-WIRE §4).
+pub const EVT_DASH_ACK:              u32 = fnv1a_32(b"r2.dash.ack");
 pub const EVT_DASH_SYNC_PULSE:       u32 = fnv1a_32(b"r2.dash.sync_pulse");
 pub const EVT_DASH_SET_CLOCK_OFFSET: u32 = fnv1a_32(b"r2.dash.set_clock_offset");
 
@@ -199,6 +200,23 @@ pub fn decode_compact_frame(frame: &[u8]) -> Option<(u32, &[u8])> {
     }
     let event_hash = u32::from_be_bytes([frame[4], frame[5], frame[6], frame[7]]);
     Some((event_hash, &frame[12..]))
+}
+
+/// Parse `r2.dash.ack` — a CBOR map `{0: through_seq, 1: dash_ts_ms}` per
+/// SPEC-R2-ROCKER-WIRE §4.1. We only need `through_seq` to free SD ring
+/// segments; `dash_ts_ms` is advisory.
+pub fn parse_dash_ack_through_seq(payload: &[u8]) -> Option<u32> {
+    let mut p = 0;
+    if payload.len() <= p { return None; }
+    let head = payload[p]; p += 1;
+    if head & 0xE0 != MT_MAP { return None; }
+    if payload.len() <= p { return None; }
+    let kh = payload[p]; p += 1;
+    if kh != 0x00 { return None; }
+    let (mag, mt, used) = read_cbor_int_at(&payload[p..])?;
+    if mt != MT_UINT { return None; }
+    let _ = p + used;
+    u32::try_from(mag).ok()
 }
 
 /// Parse `r2.dash.sync_pulse` — a CBOR map `{0: req_id, 1: dash_ts_ms}` per

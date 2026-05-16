@@ -46,7 +46,8 @@ const SENSOR_CAL_RESP:     u32 = r2_fnv::fnv1a_32(b"r2.sensor.cal.sample.resp");
 const SENSOR_SYNC_PONG:    u32 = r2_fnv::fnv1a_32(b"r2.sensor.sync_pong");
 const SENSOR_ANNOUNCE:     u32 = r2_fnv::fnv1a_32(b"r2.sensor.announce");
 
-// Dashboard → sensor commands (SPEC-R2-ROCKER-TIMESYNC §4).
+// Dashboard → sensor commands (SPEC-R2-ROCKER-WIRE §4 + SPEC-R2-ROCKER-TIMESYNC §4).
+const DASH_ACK:               u32 = r2_fnv::fnv1a_32(b"r2.dash.ack");
 const DASH_SYNC_PULSE:        u32 = r2_fnv::fnv1a_32(b"r2.dash.sync_pulse");
 const DASH_SET_CLOCK_OFFSET:  u32 = r2_fnv::fnv1a_32(b"r2.dash.set_clock_offset");
 
@@ -303,6 +304,19 @@ fn build_dash_frame(event_hash: u32, msg_id: u16, payload: &[u8]) -> Vec<u8> {
     out.extend_from_slice(&[0u8; 4]); // target = broadcast
     out.extend_from_slice(payload);
     out
+}
+
+/// Encode `r2.dash.ack` payload `{0: through_seq, 1: dash_ts_ms}` per WIRE §4.1.
+fn encode_dash_ack(through_seq: u32, dash_ts_ms: u64) -> Vec<u8> {
+    let mut buf = [0u8; 32];
+    let used = {
+        let mut enc = r2_cbor::Encoder::new(&mut buf);
+        let _ = enc.map(2);
+        let _ = enc.kv(0, &r2_cbor::Value::UInt(through_seq as u64));
+        let _ = enc.kv(1, &r2_cbor::Value::UInt(dash_ts_ms));
+        enc.len()
+    };
+    buf[..used].to_vec()
 }
 
 /// Encode `r2.dash.sync_pulse` payload `{0: req_id, 1: dash_ts_ms}`.
@@ -1070,6 +1084,23 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
         const ACCEL_DECIMATION: u32 = 10;
         let mut accel_n: u32 = 0;
 
+        // ACK tracking per SPEC-R2-ROCKER-WIRE §4.1. We emit a
+        // `r2.dash.ack {through_seq, dash_ts_ms}` to the sensor at
+        // most every ACK_PERIOD_MS or every ACK_SAMPLES received
+        // acceleration frames, whichever first. The firmware uses
+        // `through_seq` to free SD ring segments
+        // (SPEC-R2-ROCKER-SENSOR §7.4); without these acks the ring
+        // fills up. We track max_seq_seen locally so a stuck/
+        // out-of-order frame can't cause us to ack the wrong
+        // through_seq.
+        const ACK_PERIOD_MS: u64 = 200;
+        const ACK_SAMPLES: u32 = 100;
+        let mut max_seq_seen: u32 = 0;
+        let mut samples_since_ack: u32 = 0;
+        let mut next_ack_at = tokio::time::Instant::now()
+            + std::time::Duration::from_millis(ACK_PERIOD_MS);
+        let mut ack_msg_id: u16 = 1;
+
         loop {
             // 5 s read deadline. The sensor sends `r2.sensor.status` every
             // 2 s plus continuous 10 Hz acceleration; if 5 s pass with no
@@ -1132,6 +1163,28 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
                         } else {
                             None
                         };
+
+                        // SPEC-R2-ROCKER-WIRE §4.1 — observe ACCELERATION frames
+                        // to track max_seq_seen for periodic r2.dash.ack
+                        // emission. Triggers a send when ACK_SAMPLES (or
+                        // ACK_PERIOD_MS, below) has passed.
+                        if event_hash == Some(ACCELERATION) && frame.len() > 12 {
+                            if let Some(payload) = decode_cbor_payload(&frame[12..]) {
+                                if let Some(seq) = payload.get("0").and_then(|v| v.as_u64()) {
+                                    let seq32 = seq as u32;
+                                    if seq32 > max_seq_seen {
+                                        max_seq_seen = seq32;
+                                    }
+                                    samples_since_ack = samples_since_ack.saturating_add(1);
+                                }
+                            }
+                        }
+                        if event_hash == Some(ACCELERATION_BATCH) && frame.len() > 12 {
+                            // For batched frames we'd ideally walk the
+                            // inner records to pick up the LAST seq. v0.1
+                            // sensors don't emit batches yet (catch-up
+                            // mode is deferred); leave a TODO once they do.
+                        }
 
                         // SPEC-R2-ROCKER-TIMESYNC §3 — handle sync_pong inline,
                         // update peer's smoothed offset, push set_clock_offset
@@ -1236,6 +1289,46 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
                                 // JSON). Keep stderr for connection-lifecycle events only.
                                 let _ = read_state.event_tx.send(event);
                             }
+                        }
+
+                        // Per WIRE §4.1: send r2.dash.ack at the
+                        // earlier of ACK_PERIOD_MS or ACK_SAMPLES
+                        // received. Frees the firmware's SD ring
+                        // (SPEC-R2-ROCKER-SENSOR §7.4). No-op if we
+                        // haven't observed any acceleration frames
+                        // yet (max_seq_seen still 0).
+                        let now = tokio::time::Instant::now();
+                        let should_ack = max_seq_seen > 0
+                            && (samples_since_ack >= ACK_SAMPLES || now >= next_ack_at);
+                        if should_ack {
+                            let dash_ts = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as u64)
+                                .unwrap_or(0);
+                            let payload = encode_dash_ack(max_seq_seen, dash_ts);
+                            let frame_bytes = build_dash_frame(
+                                DASH_ACK,
+                                ack_msg_id,
+                                &payload,
+                            );
+                            ack_msg_id = ack_msg_id.wrapping_add(1);
+                            // Send via the peer's writer mpsc. Don't
+                            // hold the peers lock across await; collect
+                            // the tx once if available.
+                            let tx = {
+                                let peers = read_state.peers.read().await;
+                                peers.get(&addr).map(|p| p.tx.clone())
+                            };
+                            if let Some(tx) = tx {
+                                if tx.send(frame_bytes).await.is_err() {
+                                    // Writer half died — peer is gone.
+                                    // The session will tear down via the
+                                    // top-level select on read/write handles.
+                                }
+                            }
+                            samples_since_ack = 0;
+                            next_ack_at = now
+                                + std::time::Duration::from_millis(ACK_PERIOD_MS);
                         }
                     }
                 }

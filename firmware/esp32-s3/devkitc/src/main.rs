@@ -12,6 +12,7 @@ mod adxl355;
 mod clock;
 mod identity;
 mod led;
+mod ring;
 mod sd;
 mod sim;
 mod wire;
@@ -266,19 +267,36 @@ fn run(
                     }
                 };
                 // Best-effort SD mount on the shared bus. None on failure;
-                // sensor remains useful in streaming-only mode. Bound to
-                // `_sd` for now so the mount guard is kept alive for the
-                // lifetime of the sender thread (drop unmounts the FS).
-                // Phase 2 (#41) will pass this to Sender::new for the
-                // ring-segment writer.
+                // sensor remains useful in streaming-only mode. The mount
+                // guard `_sd` is kept alive for the lifetime of the
+                // sender thread (drop unmounts the FS).
                 let _sd = sd::SdCard::try_mount(bus.clone(), cs_sd);
+                // If the SD path is up, open the ring writer + run boot
+                // recovery (SPEC-R2-ROCKER-SENSOR §6.5). The Sender
+                // takes ownership and uses `Ring::append` on every
+                // sample + `Ring::tail_seq` to seed its seq counter
+                // (resuming from where we left off across reboots).
+                let ring = if _sd.is_some() {
+                    match ring::Ring::open(sd::MOUNT_POINT) {
+                        Ok(r) => {
+                            info!("[ring] ready (tail_seq={})", r.tail_seq());
+                            Some(r)
+                        }
+                        Err(e) => {
+                            warn!("[ring] open failed: {e:?} — streaming-only this boot");
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
                 led_for_sender.set(if adxl.is_some() {
                     led::LedState::StreamingLive
                 } else {
                     led::LedState::StreamingDegradedSim
                 });
                 let mut s = sender::Sender::new(
-                    gateway, hostname, id_for_sender, led_for_sender, adxl, clock_for_sender,
+                    gateway, hostname, id_for_sender, led_for_sender, adxl, clock_for_sender, ring,
                 );
                 s.run();
             })

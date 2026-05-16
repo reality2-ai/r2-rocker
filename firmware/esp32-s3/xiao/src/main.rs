@@ -12,6 +12,7 @@ mod adxl355;
 mod clock;
 mod identity;
 mod led;
+mod ring;
 mod sd;
 mod sim;
 mod wire;
@@ -272,13 +273,27 @@ fn run(
                     }
                 };
                 let _sd = sd::SdCard::try_mount(bus.clone(), cs_sd);
+                let ring = if _sd.is_some() {
+                    match ring::Ring::open(sd::MOUNT_POINT) {
+                        Ok(r) => {
+                            info!("[ring] ready (tail_seq={})", r.tail_seq());
+                            Some(r)
+                        }
+                        Err(e) => {
+                            warn!("[ring] open failed: {e:?} — streaming-only this boot");
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
                 led_for_sender.set(if adxl.is_some() {
                     led::LedState::StreamingLive
                 } else {
                     led::LedState::StreamingDegradedSim
                 });
                 let mut s = sender::Sender::new(
-                    gateway, hostname, id_for_sender, led_for_sender, adxl, clock_for_sender,
+                    gateway, hostname, id_for_sender, led_for_sender, adxl, clock_for_sender, ring,
                 );
                 s.run();
             })
