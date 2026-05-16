@@ -12,6 +12,7 @@ mod adxl355;
 mod clock;
 mod identity;
 mod led;
+mod sd;
 mod sim;
 mod wire;
 mod sender;
@@ -63,12 +64,16 @@ fn main() -> Result<()> {
 
     // Pull out the peripherals `run()` and the sender thread will need.
     // Anything else from `peripherals` is unused right now.
-    let modem = peripherals.modem;
-    let spi2  = peripherals.spi2;
-    let sclk  = peripherals.pins.gpio12.downgrade();
-    let mosi  = peripherals.pins.gpio11.downgrade();
-    let miso  = peripherals.pins.gpio13.downgrade();
-    let cs    = peripherals.pins.gpio10.downgrade();
+    let modem   = peripherals.modem;
+    let spi2    = peripherals.spi2;
+    let sclk    = peripherals.pins.gpio12.downgrade();
+    let mosi    = peripherals.pins.gpio11.downgrade();
+    let miso    = peripherals.pins.gpio13.downgrade();
+    let cs_adxl = peripherals.pins.gpio10.downgrade();
+    // SD card CS — dedicated, distinct from ADXL355's. Per
+    // HARDWARE-WIRING-DEVKITC.md §3.2. The SD breakout sits on the
+    // same MISO/MOSI/SCK lines as the ADXL355; only the CS differs.
+    let cs_sd   = peripherals.pins.gpio9.downgrade();
 
     // Top-level error trap — anything below sets the LED red long
     // enough for the operator to see, then resets the chip. The
@@ -76,7 +81,7 @@ fn main() -> Result<()> {
     // point: a buggy new image whose sender never reaches its first
     // successful frame round-trip never marks itself valid, and the
     // next reset rolls back to the previous slot.
-    if let Err(e) = run(led_handle.clone(), modem, sysloop, nvs, spi2, sclk, mosi, miso, cs) {
+    if let Err(e) = run(led_handle.clone(), modem, sysloop, nvs, spi2, sclk, mosi, miso, cs_adxl, cs_sd) {
         error!("[FATAL] init/runtime error: {e:?}");
         led_handle.set(led::LedState::Error);
         FreeRtos::delay_ms(10_000);
@@ -98,7 +103,8 @@ fn run(
     sclk: esp_idf_svc::hal::gpio::AnyIOPin,
     mosi: esp_idf_svc::hal::gpio::AnyIOPin,
     miso: esp_idf_svc::hal::gpio::AnyIOPin,
-    cs:   esp_idf_svc::hal::gpio::AnyIOPin,
+    cs_adxl: esp_idf_svc::hal::gpio::AnyIOPin,
+    cs_sd:   esp_idf_svc::hal::gpio::AnyIOPin,
 ) -> Result<()> {
     // ── Identity (§3.1) — Ed25519 keypair, persisted to NVS. ──────────
     let identity = std::sync::Arc::new(
@@ -224,11 +230,15 @@ fn run(
         // Run the sender on its own thread so the main thread can keep
         // draining BLE L2CAP for re-provisioning offers.
         //
-        // SPI peripherals move into the closure → constructed into an
-        // Adxl355 driver inside the thread (SPI device drivers are not
-        // Send, so this is the right side of the thread boundary). If
-        // init fails the sender falls back to the simulator with a
-        // logged warning — wire path still works for debug.
+        // The shared SPI2 bus is initialised here (still on the main
+        // thread, before the spawn) and Arc-shared into the sender
+        // thread. ADXL355 and (optionally) the SD card both attach to
+        // the same bus inside the thread — SPI device drivers are not
+        // Send, so each device's SpiDeviceDriver / SdSpiHostDriver is
+        // constructed on the right side of the thread boundary. If
+        // ADXL init fails, the sender falls back to the simulator with
+        // a logged warning. If SD init fails, the sender continues
+        // streaming-only (no durability) per spec §6.7.
         let id_for_sender = identity.clone();
         let led_for_sender = led_handle.clone();
         let clock_for_sender = clock.clone();
@@ -236,13 +246,32 @@ fn run(
             .stack_size(16384)
             .name("sender".into())
             .spawn(move || {
-                let adxl = match adxl355::Adxl355::new(spi2, sclk, mosi, miso, cs) {
+                use esp_idf_svc::hal::spi::{config::DriverConfig as SpiDriverConfig, Dma, SpiDriver};
+                use std::sync::Arc;
+                let bus = match SpiDriver::new(
+                    spi2, sclk, mosi, Some(miso),
+                    &SpiDriverConfig::new().dma(Dma::Auto(4096)),
+                ) {
+                    Ok(b) => Arc::new(b),
+                    Err(e) => {
+                        warn!("[SPI2] bus init failed: {e:?} — sensor cannot stream");
+                        return;
+                    }
+                };
+                let adxl = match adxl355::Adxl355::new(bus.clone(), cs_adxl) {
                     Ok(a) => Some(a),
                     Err(e) => {
                         warn!("[ADXL355] init failed in sender thread: {e:?} — falling back to simulator");
                         None
                     }
                 };
+                // Best-effort SD mount on the shared bus. None on failure;
+                // sensor remains useful in streaming-only mode. Bound to
+                // `_sd` for now so the mount guard is kept alive for the
+                // lifetime of the sender thread (drop unmounts the FS).
+                // Phase 2 (#41) will pass this to Sender::new for the
+                // ring-segment writer.
+                let _sd = sd::SdCard::try_mount(bus.clone(), cs_sd);
                 led_for_sender.set(if adxl.is_some() {
                     led::LedState::StreamingLive
                 } else {
@@ -270,7 +299,23 @@ fn run(
             .stack_size(8192)
             .name("adxl-diag".into())
             .spawn(move || {
-                match adxl355::Adxl355::new(spi2, sclk, mosi, miso, cs) {
+                use esp_idf_svc::hal::spi::{config::DriverConfig as SpiDriverConfig, Dma, SpiDriver};
+                use std::sync::Arc;
+                // SD CS is unused in BLE-only diagnostic mode (no SD writes
+                // happen here) but the pin is still owned by the closure;
+                // we drop it explicitly to keep the borrow checker happy.
+                let _ = cs_sd;
+                let bus = match SpiDriver::new(
+                    spi2, sclk, mosi, Some(miso),
+                    &SpiDriverConfig::new().dma(Dma::Auto(4096)),
+                ) {
+                    Ok(b) => Arc::new(b),
+                    Err(e) => {
+                        warn!("[ADXL355-DIAG] SPI2 bus init failed: {e:?}");
+                        return;
+                    }
+                };
+                match adxl355::Adxl355::new(bus, cs_adxl) {
                     Ok(mut adxl) => {
                         info!("[ADXL355-DIAG] BLE-only mode — sensor enumerated; sampling 1 Hz to console");
                         led_for_diag.set(led::LedState::StreamingLive);

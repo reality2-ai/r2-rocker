@@ -75,7 +75,7 @@ pub struct Sender {
     /// clear succeeded; samples come from this. None means the driver
     /// failed at boot and we fall back to `accel_sim` so the wire path
     /// still works for further debug.
-    adxl: Option<Adxl355<'static>>,
+    adxl: Option<Adxl355>,
     /// Fallback / always-available simulator. Used when `adxl` is None
     /// OR when an individual sample read errors (logged + skipped).
     accel_sim: AccelSim,
@@ -109,7 +109,7 @@ impl Sender {
         hostname: String,
         identity: Arc<Identity>,
         led: LedHandle,
-        adxl: Option<Adxl355<'static>>,
+        adxl: Option<Adxl355>,
         clock: Arc<Clock>,
     ) -> Self {
         let fw_ver = build_fw_ver(adxl.is_some());

@@ -26,7 +26,7 @@ debug     = true
 log           = "0.4"
 anyhow        = "1"
 libm          = "0.2"
-esp-idf-svc   = { version = "0.51", default-features = false, features = ["binstart", "std"] }
+esp-idf-svc   = { version = "0.51", default-features = false, features = ["binstart", "std", "experimental"] }
 # Per-device Ed25519 identity. Generated on first boot, persisted to NVS,
 # used to sign r2.sensor.announce so the dashboard can verify the sender
 # really holds device_pk (Phase 5a). Pin to the same version r2-core uses

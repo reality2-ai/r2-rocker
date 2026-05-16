@@ -621,6 +621,7 @@ function getOrCreateSensor(addr) {
     fsmState: null,   // populated once Phase 5L firmware emits status events
     dataSource: null, // 0 = real ADXL355, 1 = sim fallback; null = unknown (no status yet)
     pendingReset: false, // transient: true between Reset button click and sensor reconnect
+    pendingOta:   false, // transient: true through the OTA upload + reboot + reconnect cycle
     lastSeen: Date.now(),
     online: true,
     chart,
@@ -884,10 +885,19 @@ function connectStatus() {
       // Server detected the sensor's TCP socket close. Flip the virtual
       // LED to inert grey now rather than waiting for the OFFLINE_MS
       // timeout to fire on lastSeen ageing.
+      //
+      // Also clear fsmState / dataSource so when the sensor reconnects
+      // after a reboot (OTA, manual reset, etc.) the dot stays inert
+      // grey until the FIRST fresh status frame arrives. Otherwise the
+      // dot would briefly render whatever state the sensor was last in
+      // before disconnect (commonly `OTA` = white strobe, or stale
+      // `Streaming`), which the operator reads as a stuck indicator.
       const s = sensors.get(msg.addr);
       if (s) {
         s.online = false;
         s.lastSeen = 0;            // forces classifyOnline → 'offline'
+        s.fsmState = null;         // unknown until next r2.sensor.status
+        s.dataSource = null;       // re-resolves on next status frame
         updateSensorList();
         renderDevicesIfVisible();
       }
@@ -1142,8 +1152,12 @@ function handleEvent(msg) {
         if (msg.payload.state != null) sensor.fsmState = msg.payload.state;
         // SPEC-R2-ROCKER-SENSOR-HEALTH: data_source key 7 → 0 real, 1 sim.
         if (msg.payload.data_source != null) sensor.dataSource = msg.payload.data_source;
-        // First status frame after a reset clicks the transient indicator off.
+        // First status frame after a reset / OTA clicks the transient indicator off.
         if (sensor.pendingReset) sensor.pendingReset = false;
+        if (sensor.pendingOta) {
+          sensor.pendingOta = false;
+          if (sensor._otaFailsafe) { clearTimeout(sensor._otaFailsafe); sensor._otaFailsafe = null; }
+        }
         sensor.lastSeen = Date.now();
         sensor.online = true;
         renderDevicesIfVisible();
@@ -1199,7 +1213,6 @@ function handleAcceleration(msg, sensor) {
     setText('rate-' + sk, (1000/dt).toFixed(1) + ' Hz');
   }
 
-  if (runState !== 'rocking') return;
   // Chart is hidden on the Devices tab — skip all chart work when not Live.
   if (currentView !== 'live') return;
 
@@ -1367,8 +1380,13 @@ function classifyOnline(s) {
 // firmware sends real state values, fsmState is null and the LED
 // stays the inert grey placeholder.
 function ledClassFor(s) {
-  // Optimistic client-side override while a reset is in flight — wins over
-  // whatever the last status frame said, until the sensor reconnects.
+  // Optimistic client-side overrides — these win over whatever the last
+  // status frame said. pendingOta covers the entire OTA cycle (upload,
+  // reboot, reconnect, first-fresh-status); pendingReset covers a brief
+  // window around the Reset Sensor button. Both render as a "working"
+  // animation rather than letting the dot flicker through transient
+  // online/offline/fsm-state combinations during recovery.
+  if (s.pendingOta)   return 'tg-ota';
   if (s.pendingReset) return 'tg-resetting';
   if (s.fsmState == null) return '';
   // If the sensor's gone offline (no events for OFFLINE_MS), don't
@@ -1480,18 +1498,56 @@ function handleOtaEvent(msg) {
   // Auto-open the Connection Log on first event so the operator sees it
   // even if they triggered the OTA from the Devices view.
   document.getElementById('bootstrap-panel').classList.add('visible');
+  // Resolve the affected sensor by IP. msg.target is "ip:port" pointing
+  // at the OTA listener (21043); we strip the port to match the WASM
+  // viewer's IP-keyed sensors map.
+  const sensorKey = msg.target ? msg.target.split(':')[0] : null;
+  const sensor = sensorKey ? sensors.get(sensorKey) : null;
+  // Re-render so any pendingOta change below is reflected immediately.
+  const rerender = () => {
+    if (sensor) {
+      renderDevicesIfVisible();
+      updateSensorList();
+    }
+  };
   switch (msg.phase) {
     case 'uploading':
       addBootstrapLine(`⬆ Pushing firmware to ${msg.target} (${msg.size} bytes)…`, 'amber');
+      if (sensor) {
+        sensor.pendingOta = true;
+        // Failsafe: if the sensor never comes back after upload (rare),
+        // unstick the indicator after 90 s. Re-arm on each upload-start.
+        if (sensor._otaFailsafe) clearTimeout(sensor._otaFailsafe);
+        sensor._otaFailsafe = setTimeout(() => {
+          if (sensor.pendingOta) {
+            sensor.pendingOta = false;
+            rerender();
+          }
+        }, 90_000);
+        rerender();
+      }
       break;
     case 'applied':
       addBootstrapLine(`✓ ${msg.target} accepted: ${msg.message || 'rebooting'}`, 'green');
+      // Leave pendingOta set — the sensor is about to reboot. Clearing
+      // happens when the first fresh status frame after this point
+      // arrives in the r2.sensor.status handler.
       break;
     case 'rejected':
       addBootstrapLine(`✗ ${msg.target} rejected: ${msg.message || 'unknown'}`, 'red');
+      if (sensor) {
+        sensor.pendingOta = false;
+        if (sensor._otaFailsafe) { clearTimeout(sensor._otaFailsafe); sensor._otaFailsafe = null; }
+        rerender();
+      }
       break;
     case 'error':
       addBootstrapLine(`✗ ${msg.target}: ${msg.message || 'error'}`, 'red');
+      if (sensor) {
+        sensor.pendingOta = false;
+        if (sensor._otaFailsafe) { clearTimeout(sensor._otaFailsafe); sensor._otaFailsafe = null; }
+        rerender();
+      }
       break;
   }
 }

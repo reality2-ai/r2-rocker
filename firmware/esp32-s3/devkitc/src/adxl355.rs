@@ -33,10 +33,11 @@ use esp_idf_svc::hal::gpio::AnyIOPin;
 use esp_idf_svc::hal::peripheral::Peripheral;
 use esp_idf_svc::hal::prelude::*;
 use esp_idf_svc::hal::spi::{
-    config::{Config as SpiConfig, DriverConfig as SpiDriverConfig},
-    SpiDeviceDriver, SpiDriver, SPI2,
+    config::Config as SpiConfig,
+    SpiDeviceDriver, SpiDriver,
 };
 use log::{info, warn};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Expected identification-register values (ADXL355 datasheet §11).
@@ -56,47 +57,37 @@ const POWER_CTL_MEASURE_MODE: u8 = 0x00; // bit 0 = 0 → measurement; default i
 /// Code written to REG_RESET to trigger a soft reset (datasheet §11).
 const RESET_CODE: u8 = 0x52;
 
-/// Owns SPI2 + the four wired pins for the chip's lifetime. The struct
+/// Holds a `SpiDeviceDriver` attached to the shared SPI2 bus. The struct
 /// is constructed inside the sender thread (SPI device drivers are not
-/// `Send`) and lives for the program's duration.
-pub struct Adxl355<'d> {
-    dev: SpiDeviceDriver<'d, SpiDriver<'d>>,
+/// `Send`) and lives for the program's duration. The bus itself
+/// (`SpiDriver`) is owned by an `Arc` outside this struct so the SD
+/// card can share the same MISO/MOSI/SCK lines on a separate CS.
+pub struct Adxl355 {
+    dev: SpiDeviceDriver<'static, Arc<SpiDriver<'static>>>,
 }
 
-impl<'d> Adxl355<'d> {
-    /// Initialise SPI2 with the wired pins, verify the identification
-    /// registers, and clear standby. Returns a usable driver instance
-    /// on success.
-    pub fn new<SCLK, MOSI, MISO, CS>(
-        spi2: SPI2,
-        sclk: SCLK,
-        mosi: MOSI,
-        miso: MISO,
-        cs:   CS,
+impl Adxl355 {
+    /// Attach an ADXL355 device to a pre-initialised shared SPI bus,
+    /// verify the identification registers, and clear standby. The bus
+    /// must already be set up by the caller (`SpiDriver::new`) — this
+    /// constructor only adds a new chip-select device on it.
+    pub fn new<CS>(
+        bus: Arc<SpiDriver<'static>>,
+        cs: CS,
     ) -> Result<Self>
     where
-        SCLK: Peripheral<P = AnyIOPin> + 'd,
-        MOSI: Peripheral<P = AnyIOPin> + 'd,
-        MISO: Peripheral<P = AnyIOPin> + 'd,
-        CS:   Peripheral<P = AnyIOPin> + 'd,
+        CS: Peripheral<P = AnyIOPin> + 'static,
     {
-        // Pins are whatever the caller passed in — varies per carrier
-        // (DevKitC: GPIO10/11/12/13; XIAO: GPIO1/9/7/8). See the active
-        // carrier's HARDWARE-WIRING-*.md §2.1 for the physical map.
-        info!("[ADXL355] init SPI2 (mode 0, 5 MHz; pins per active carrier wiring)");
+        info!("[ADXL355] attach to shared SPI2 bus (mode 0, 5 MHz; CS per active carrier wiring)");
 
-        let dev = SpiDeviceDriver::new_single(
-            spi2,
-            sclk,
-            mosi,
-            Some(miso),
+        let dev = SpiDeviceDriver::new(
+            bus,
             Some(cs),
-            &SpiDriverConfig::new(),
             // Datasheet §10 max f_SCK = 10 MHz; 5 MHz is comfortable.
             // Mode 0 (CPOL=0, CPHA=0) is the part's default.
             &SpiConfig::new().baudrate(5.MHz().into()),
         )
-        .context("SpiDeviceDriver::new_single")?;
+        .context("SpiDeviceDriver::new (ADXL355 on shared bus)")?;
 
         let mut adxl = Self { dev };
 
