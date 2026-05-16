@@ -9,6 +9,7 @@
 //!   4. On a valid offer: persist creds to NVS and reboot to apply.
 
 mod adxl355;
+mod clock;
 mod identity;
 mod led;
 mod sim;
@@ -118,6 +119,10 @@ fn run(
         identity::TG_PUB_KEY[30], identity::TG_PUB_KEY[31],
     );
 
+    // ── Synchronised clock (SPEC-R2-ROCKER-TIMESYNC) ──────────────────
+    // NVS-backed offset applied to every emitted/persisted ts_ms.
+    let clock = clock::Clock::load(nvs.clone()).context("clock init")?;
+
     // ── Boot priority WiFi-cred resolution (§2.1.1). ──────────────────
     wifi_prov::init_nvs(nvs.clone());
     let creds = wifi_prov::load_credentials(nvs.clone());
@@ -226,6 +231,7 @@ fn run(
         // logged warning — wire path still works for debug.
         let id_for_sender = identity.clone();
         let led_for_sender = led_handle.clone();
+        let clock_for_sender = clock.clone();
         std::thread::Builder::new()
             .stack_size(16384)
             .name("sender".into())
@@ -242,7 +248,9 @@ fn run(
                 } else {
                     led::LedState::StreamingDegradedSim
                 });
-                let mut s = sender::Sender::new(gateway, hostname, id_for_sender, led_for_sender, adxl);
+                let mut s = sender::Sender::new(
+                    gateway, hostname, id_for_sender, led_for_sender, adxl, clock_for_sender,
+                );
                 s.run();
             })
             .context("spawn sender thread")?;

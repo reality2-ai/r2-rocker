@@ -38,6 +38,11 @@ pub const EVT_SENSOR_ACCELERATION: u32 = fnv1a_32(b"r2.sensor.acceleration");
 pub const EVT_SENSOR_BATTERY:      u32 = fnv1a_32(b"r2.sensor.battery");
 pub const EVT_SENSOR_STATUS:       u32 = fnv1a_32(b"r2.sensor.status");
 pub const EVT_SENSOR_EVENT_LOG:    u32 = fnv1a_32(b"r2.sensor.event.log");
+pub const EVT_SENSOR_SYNC_PONG:    u32 = fnv1a_32(b"r2.sensor.sync_pong");
+// Dashboard → sensor events handled on the streaming TCP socket
+// (SPEC-R2-ROCKER-TIMESYNC §4, SPEC-R2-ROCKER-WIRE §4).
+pub const EVT_DASH_SYNC_PULSE:       u32 = fnv1a_32(b"r2.dash.sync_pulse");
+pub const EVT_DASH_SET_CLOCK_OFFSET: u32 = fnv1a_32(b"r2.dash.set_clock_offset");
 
 // ── R2-WIRE compact frame ────────────────────────────────────────────────
 
@@ -177,6 +182,96 @@ impl<'a> CborWriter<'a> {
     pub fn text(&mut self, s: &str) {
         self.head(MT_TEXT, s.len() as u64);
         self.put_slice(s.as_bytes());
+    }
+}
+
+// ── Minimal CBOR / frame decoder (inbound dashboard → sensor) ────────────
+//
+// Only enough to dispatch the small command set we currently receive on
+// the streaming socket. Grows when new events land.
+
+/// Decode the 12-byte R2-WIRE compact-frame header out of `frame`
+/// (the bytes AFTER the 2-byte TCP length prefix). Returns
+/// `(event_hash, payload)` on success.
+pub fn decode_compact_frame(frame: &[u8]) -> Option<(u32, &[u8])> {
+    if frame.len() < 12 {
+        return None;
+    }
+    let event_hash = u32::from_be_bytes([frame[4], frame[5], frame[6], frame[7]]);
+    Some((event_hash, &frame[12..]))
+}
+
+/// Parse `r2.dash.sync_pulse` — a CBOR map `{0: req_id, 1: dash_ts_ms}` per
+/// SPEC-R2-ROCKER-WIRE §4.5. We only need `req_id` to echo it back in the
+/// pong; `dash_ts_ms` is opaque to the sensor.
+pub fn parse_sync_pulse_req_id(payload: &[u8]) -> Option<u32> {
+    let mut p = 0;
+    if payload.len() <= p { return None; }
+    let head = payload[p]; p += 1;
+    if head & 0xE0 != MT_MAP { return None; }
+    if payload.len() <= p { return None; }
+    let kh = payload[p]; p += 1;
+    if kh != 0x00 { return None; } // expecting key 0 first per spec
+    let (mag, mt, used) = read_cbor_int_at(&payload[p..])?;
+    if mt != MT_UINT { return None; }
+    let _ = p + used;
+    u32::try_from(mag).ok()
+}
+
+/// Parse `r2.dash.set_clock_offset` — a CBOR map `{0: i64 delta_ms}` per
+/// SPEC-R2-ROCKER-TIMESYNC §4.1. Returns the signed delta, or `None` if
+/// the payload doesn't match.
+pub fn parse_set_clock_offset(payload: &[u8]) -> Option<i64> {
+    let mut p = 0;
+    // Map header. Accept any short-form map (length 1..=23); we only look
+    // at the {0: …} entry, ignore any others. Encoded heads 0xA1..=0xB7.
+    if payload.len() <= p { return None; }
+    let head = payload[p]; p += 1;
+    if head & 0xE0 != MT_MAP { return None; }
+    // Read key
+    if payload.len() <= p { return None; }
+    let kh = payload[p]; p += 1;
+    // Want short-form uint key == 0 (single byte 0x00).
+    if kh != 0x00 { return None; }
+    // Read value as signed int (CBOR uint or negint).
+    let (mag, mt, used) = read_cbor_int_at(&payload[p..])?;
+    p += used;
+    let _ = p; // remaining bytes ignored
+    match mt {
+        MT_UINT   => i64::try_from(mag).ok(),
+        MT_NEGINT => Some(-1i64 - (mag as i64)),
+        _ => None,
+    }
+}
+
+/// Read a CBOR-encoded integer (uint or negint) starting at `buf[0]`.
+/// Returns `(magnitude_u64, major_type, bytes_used)` or `None` on malformed
+/// input. The caller maps the major type to a signed value.
+fn read_cbor_int_at(buf: &[u8]) -> Option<(u64, u8, usize)> {
+    if buf.is_empty() { return None; }
+    let head = buf[0];
+    let mt = head & 0xE0;
+    if mt != MT_UINT && mt != MT_NEGINT { return None; }
+    let arg = head & 0x1F;
+    match arg {
+        0..=23 => Some((arg as u64, mt, 1)),
+        24 => {
+            if buf.len() < 2 { return None; }
+            Some((buf[1] as u64, mt, 2))
+        }
+        25 => {
+            if buf.len() < 3 { return None; }
+            Some((u16::from_be_bytes([buf[1], buf[2]]) as u64, mt, 3))
+        }
+        26 => {
+            if buf.len() < 5 { return None; }
+            Some((u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as u64, mt, 5))
+        }
+        27 => {
+            if buf.len() < 9 { return None; }
+            Some((u64::from_be_bytes([buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], buf[8]]), mt, 9))
+        }
+        _ => None, // indefinite-length and reserved heads — not used by our dashboard
     }
 }
 

@@ -16,18 +16,23 @@ use esp_idf_svc::sys::{
     esp_random, esp_read_mac, ESP_OK,
 };
 use log::{info, warn};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::adxl355::Adxl355;
+use crate::clock::Clock;
 use crate::identity::Identity;
 use crate::led::LedHandle;
 use crate::sim::{AccelSim, BatterySim};
 use crate::wire::{
-    frame_for_tcp, CborWriter, EVT_SENSOR_ACCELERATION, EVT_SENSOR_ANNOUNCE,
-    EVT_SENSOR_BATTERY, EVT_SENSOR_STATUS,
+    decode_compact_frame, frame_for_tcp, parse_set_clock_offset, parse_sync_pulse_req_id,
+    CborWriter,
+    EVT_DASH_SET_CLOCK_OFFSET, EVT_DASH_SYNC_PULSE, EVT_SENSOR_ACCELERATION,
+    EVT_SENSOR_ANNOUNCE, EVT_SENSOR_BATTERY, EVT_SENSOR_STATUS, EVT_SENSOR_SYNC_PONG,
 };
 
 const SAMPLE_RATE_HZ: u32 = 100;
@@ -81,6 +86,10 @@ pub struct Sender {
     /// wire as `r2.sensor.status` so the dashboard's virtual LEDs
     /// mirror the physical RGB LED.
     led: LedHandle,
+    /// Synchronised clock — every emitted `ts_ms` flows through this
+    /// per SPEC-R2-ROCKER-TIMESYNC. NVS-backed offset is applied
+    /// transparently inside `Clock::ts_ms`.
+    clock: Arc<Clock>,
     boot_instant: Instant,
     /// OTA-rollback gate (SPEC-R2-ROCKER-SENSOR §12.2): cleared until
     /// the first successful TCP frame round-trip, then we tell the
@@ -101,6 +110,7 @@ impl Sender {
         identity: Arc<Identity>,
         led: LedHandle,
         adxl: Option<Adxl355<'static>>,
+        clock: Arc<Clock>,
     ) -> Self {
         let fw_ver = build_fw_ver(adxl.is_some());
         Self {
@@ -111,6 +121,7 @@ impl Sender {
             battery: BatterySim::lipo_default(),
             identity,
             led,
+            clock,
             boot_instant: Instant::now(),
             app_validated: false,
             fw_ver,
@@ -147,6 +158,38 @@ impl Sender {
 
         self.send_announce(&mut stream).context("send_announce")?;
 
+        // Spawn an inbound-frame reader on a try_cloned half of the socket.
+        // Dispatches dashboard → sensor commands. Frames that need to
+        // round-trip a reply (sync_pulse → sync_pong) are pushed back
+        // through `outbound_rx` so the main writer loop emits them on
+        // the same socket — avoids two threads racing the writer side.
+        let (outbound_tx, outbound_rx) = mpsc::channel::<Vec<u8>>();
+        let stop_reader = Arc::new(AtomicBool::new(false));
+        let _reader_handle = {
+            let read_stream = stream
+                .try_clone()
+                .context("try_clone TCP stream for reader thread")?;
+            // 2-second read timeout so the reader notices stop_reader
+            // promptly when session() exits without inbound traffic.
+            read_stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .ok();
+            let stop = stop_reader.clone();
+            let clock = self.clock.clone();
+            let out_tx = outbound_tx.clone();
+            std::thread::Builder::new()
+                .stack_size(4096)
+                .name("sender-rx".into())
+                .spawn(move || inbound_reader_loop(read_stream, stop, clock, out_tx))
+                .context("spawn sender-rx thread")?
+        };
+        // RAII-ish: signal the reader to stop when session() returns.
+        struct StopOnDrop(Arc<AtomicBool>);
+        impl Drop for StopOnDrop {
+            fn drop(&mut self) { self.0.store(true, Ordering::Relaxed); }
+        }
+        let _stop_guard = StopOnDrop(stop_reader.clone());
+
         let sample_period_ms = (1000 / SAMPLE_RATE_HZ).max(1) as u64;
         let mut next_sample = Instant::now();
         let mut next_battery = Instant::now() + Duration::from_millis(BATTERY_PERIOD_MS);
@@ -177,6 +220,22 @@ impl Sender {
                 next_status += Duration::from_millis(STATUS_PERIOD_MS);
             }
 
+            // Drain outbound frames from the reader thread (sync_pong
+            // replies, future dashboard-triggered emissions). Non-
+            // blocking; if the channel is empty we just keep going.
+            loop {
+                match outbound_rx.try_recv() {
+                    Ok(frame) => {
+                        if let Err(e) = stream.write_all(&frame) {
+                            warn!("sender: outbound write failed: {} — dropping session", e);
+                            return Err(e).context("outbound write");
+                        }
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => break,
+                }
+            }
+
             // Sleep until the next due event.
             let next = next_sample.min(next_battery).min(next_status);
             if next > now {
@@ -192,7 +251,7 @@ impl Sender {
     // ── Frame builders ──────────────────────────────────────────────
 
     fn ts_ms(&self) -> u32 {
-        self.boot_instant.elapsed().as_millis() as u32
+        self.clock.ts_ms()
     }
 
     fn random_msg_id(&self) -> u16 {
@@ -355,6 +414,93 @@ impl Sender {
         stream.write_all(&frame[..n])?;
         info!("sender: battery {} mV ({}%)", mv, pct);
         Ok(())
+    }
+}
+
+/// Inbound-frame loop on the streaming TCP socket.
+/// Reads u16-prefixed R2-WIRE compact frames, dispatches by event hash.
+/// Replies that need to round-trip on the same socket (`sync_pong`) are
+/// handed to the writer-thread via `out_tx` instead of written directly
+/// — two threads writing to the same socket would race the byte stream.
+/// Exits when `stop` is set (writer side has signalled session end) OR
+/// when the dashboard closes its half of the socket (EOF).
+fn inbound_reader_loop(
+    mut stream: TcpStream,
+    stop: Arc<AtomicBool>,
+    clock: Arc<Clock>,
+    out_tx: mpsc::Sender<Vec<u8>>,
+) {
+    let mut len_buf = [0u8; 2];
+    let mut frame_buf = Vec::with_capacity(64);
+
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        // Read the 2-byte length prefix. EAGAIN/Timeout → loop and re-check
+        // stop; clean EOF / TCP error → exit.
+        match stream.read_exact(&mut len_buf) {
+            Ok(()) => {}
+            Err(e) if matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) => continue,
+            Err(_) => return,
+        }
+        let frame_len = u16::from_be_bytes(len_buf) as usize;
+        if frame_len < 12 || frame_len > 4096 {
+            warn!("[sender-rx] suspicious frame length {} — closing reader", frame_len);
+            return;
+        }
+        frame_buf.resize(frame_len, 0);
+        if stream.read_exact(&mut frame_buf).is_err() {
+            return;
+        }
+        let Some((event_hash, payload)) = decode_compact_frame(&frame_buf) else {
+            continue; // malformed — skip
+        };
+        match event_hash {
+            EVT_DASH_SET_CLOCK_OFFSET => {
+                if let Some(delta_ms) = parse_set_clock_offset(payload) {
+                    info!("[sender-rx] r2.dash.set_clock_offset delta_ms={:+}", delta_ms);
+                    clock.apply_delta(delta_ms);
+                } else {
+                    warn!("[sender-rx] malformed set_clock_offset payload");
+                }
+            }
+            EVT_DASH_SYNC_PULSE => {
+                let Some(req_id) = parse_sync_pulse_req_id(payload) else {
+                    warn!("[sender-rx] malformed sync_pulse payload");
+                    continue;
+                };
+                let sensor_ts_ms = clock.ts_ms_i64();
+                // r2.sensor.sync_pong payload: {0: req_id, 1: sensor_ts_ms}
+                let mut body = [0u8; 32];
+                let body_len = {
+                    let mut w = CborWriter::new(&mut body);
+                    w.map(2);
+                    w.key(0); w.u(req_id as u64);
+                    w.key(1); w.u(sensor_ts_ms as u64);
+                    w.pos()
+                };
+                let mut frame = [0u8; 48];
+                let n = frame_for_tcp(
+                    &mut frame,
+                    (req_id & 0xFFFF) as u16,
+                    EVT_SENSOR_SYNC_PONG,
+                    &body[..body_len],
+                );
+                if out_tx.send(frame[..n].to_vec()).is_err() {
+                    // Writer is gone — session is ending. Reader exits.
+                    return;
+                }
+            }
+            other => {
+                // Ack, cal-req, etc. land here until later phases wire them up.
+                info!("[sender-rx] unhandled event hash 0x{:08X} ({} byte payload)",
+                      other, payload.len());
+            }
+        }
     }
 }
 

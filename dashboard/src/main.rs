@@ -21,10 +21,11 @@ use sha2::{Digest, Sha256};
 use clap::Parser;
 use r2_bootstrap::{BootstrapConfig, BootstrapEvent};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, Mutex, RwLock};
@@ -44,6 +45,10 @@ const SENSOR_EVENT_LOG:    u32 = r2_fnv::fnv1a_32(b"r2.sensor.event.log");
 const SENSOR_CAL_RESP:     u32 = r2_fnv::fnv1a_32(b"r2.sensor.cal.sample.resp");
 const SENSOR_SYNC_PONG:    u32 = r2_fnv::fnv1a_32(b"r2.sensor.sync_pong");
 const SENSOR_ANNOUNCE:     u32 = r2_fnv::fnv1a_32(b"r2.sensor.announce");
+
+// Dashboard → sensor commands (SPEC-R2-ROCKER-TIMESYNC §4).
+const DASH_SYNC_PULSE:        u32 = r2_fnv::fnv1a_32(b"r2.dash.sync_pulse");
+const DASH_SET_CLOCK_OFFSET:  u32 = r2_fnv::fnv1a_32(b"r2.dash.set_clock_offset");
 
 // Legacy M10-demo names retained so a mixed deployment with prior-gen
 // sensors still parses. Remove when M10 sensors retire.
@@ -234,6 +239,254 @@ struct SensorPeer {
     /// or `boot_ts_ms` because the announce only fires on TCP
     /// (re)connect, which already happened before the viewer arrived.
     last_announce: Option<Vec<u8>>,
+    /// Per-peer time-sync state per SPEC-R2-ROCKER-TIMESYNC §3.
+    /// Updated by both the sync_pulse-sender task and the sync_pong
+    /// handler in the read loop, hence Mutex-wrapped.
+    sync: Arc<Mutex<PeerSyncState>>,
+}
+
+/// Cristian's-algorithm time-sync state, per peer. The dashboard sends
+/// `r2.dash.sync_pulse` on a schedule and processes incoming
+/// `r2.sensor.sync_pong` to refine an exponentially-smoothed offset
+/// estimate. When the estimate stabilises (or drifts past a threshold)
+/// the dashboard pushes `r2.dash.set_clock_offset` so the sensor's
+/// emitted `ts_ms` snaps onto the wall-clock timeline.
+#[derive(Debug)]
+struct PeerSyncState {
+    connected_at: Instant,
+    /// req_id → dashboard wall-clock at send time. Lookup on pong arrival
+    /// gives us T1 for Cristian's math.
+    pending: HashMap<u32, u64>,
+    /// Recent offset_estimate values (in ms, as f64). Used for the
+    /// stability check at calibration time.
+    estimates: VecDeque<f64>,
+    /// Exponential-smoothed residual offset, in ms. None until the
+    /// first pong has been processed. Reset to 0 after each
+    /// set_clock_offset push so it represents the residual on top of
+    /// what the sensor has already applied.
+    smoothed_offset_ms: Option<f64>,
+    /// Total delta_ms pushed to this peer so far. Logged in timesync.log
+    /// so analysis can reconstruct the boundary timing.
+    cumulative_pushed_ms: i64,
+    /// Has the initial calibration push happened yet?
+    baseline_pushed: bool,
+    /// Monotonically increasing req_id (wraps at u32 — irrelevant for
+    /// our purposes since pending is rotated every sync round).
+    next_req_id: u32,
+}
+
+impl PeerSyncState {
+    fn new() -> Self {
+        Self {
+            connected_at: Instant::now(),
+            pending: HashMap::new(),
+            estimates: VecDeque::with_capacity(5),
+            smoothed_offset_ms: None,
+            cumulative_pushed_ms: 0,
+            baseline_pushed: false,
+            next_req_id: 1,
+        }
+    }
+}
+
+/// Build a dashboard → sensor R2-WIRE compact frame, TCP-framed (2-byte
+/// length prefix). Mirrors the firmware's `wire::frame_for_tcp`, minus
+/// the `mcu_origin` flag (we're the controller).
+fn build_dash_frame(event_hash: u32, msg_id: u16, payload: &[u8]) -> Vec<u8> {
+    let frame_len = 12 + payload.len();
+    let mut out = Vec::with_capacity(2 + frame_len);
+    out.extend_from_slice(&(frame_len as u16).to_be_bytes());
+    out.push(0x00); // version=0, msg_type=Event=0, flags=0
+    out.push((5 << 4) | (3 & 0x0F)); // ttl=5, k=3
+    out.extend_from_slice(&msg_id.to_be_bytes());
+    out.extend_from_slice(&event_hash.to_be_bytes());
+    out.extend_from_slice(&[0u8; 4]); // target = broadcast
+    out.extend_from_slice(payload);
+    out
+}
+
+/// Encode `r2.dash.sync_pulse` payload `{0: req_id, 1: dash_ts_ms}`.
+fn encode_sync_pulse(req_id: u32, dash_ts_ms: u64) -> Vec<u8> {
+    let mut buf = [0u8; 32];
+    let used = {
+        let mut enc = r2_cbor::Encoder::new(&mut buf);
+        let _ = enc.map(2);
+        let _ = enc.kv(0, &r2_cbor::Value::UInt(req_id as u64));
+        let _ = enc.kv(1, &r2_cbor::Value::UInt(dash_ts_ms));
+        enc.len()
+    };
+    buf[..used].to_vec()
+}
+
+/// Encode `r2.dash.set_clock_offset` payload `{0: delta_ms}` (i64 signed).
+fn encode_set_clock_offset(delta_ms: i64) -> Vec<u8> {
+    let mut buf = [0u8; 16];
+    let used = {
+        let mut enc = r2_cbor::Encoder::new(&mut buf);
+        let _ = enc.map(1);
+        let v = if delta_ms >= 0 {
+            r2_cbor::Value::UInt(delta_ms as u64)
+        } else {
+            r2_cbor::Value::NegInt(delta_ms)
+        };
+        let _ = enc.kv(0, &v);
+        enc.len()
+    };
+    buf[..used].to_vec()
+}
+
+/// Decode `r2.sensor.sync_pong` payload `{0: req_id, 1: sensor_ts_ms}`.
+/// Returns `(req_id, sensor_ts_ms)` on success.
+fn decode_sync_pong(payload: &[u8]) -> Option<(u32, u64)> {
+    let val = decode_cbor_payload(payload)?;
+    let req_id = val.get("0").and_then(|v| v.as_u64())? as u32;
+    let sensor_ts_ms = val.get("1").and_then(|v| v.as_u64())?;
+    Some((req_id, sensor_ts_ms))
+}
+
+/// Current wall-clock ms since UNIX epoch — the dashboard's reference
+/// timeline for sync_pulse / set_clock_offset math.
+fn dash_wall_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// SPEC-R2-ROCKER-TIMESYNC §3.1 + §3.2 — process an inbound sync_pong,
+/// update the peer's smoothed offset, and push `r2.dash.set_clock_offset`
+/// on the calibration or drift-threshold triggers.
+async fn handle_sync_pong(
+    addr: SocketAddr,
+    req_id: u32,
+    sensor_ts_ms: u64,
+    state: &Arc<AppState>,
+) {
+    // Look up the matching pending pulse (T1) and the peer's mutable
+    // sync state in one step. Then unconditionally drop the peers read
+    // lock before pushing further frames so we don't hold it across an
+    // await that could re-enter the same peer map.
+    let (sync_arc, cmd_tx_opt) = {
+        let peers = state.peers.read().await;
+        match peers.get(&addr) {
+            Some(p) => (p.sync.clone(), Some(p.tx.clone())),
+            None    => return, // peer disappeared between read loop and here
+        }
+    };
+    let mut s = sync_arc.lock().await;
+
+    let t1 = match s.pending.remove(&req_id) {
+        Some(t) => t,
+        None => {
+            // Stale or unexpected req_id — pruned by the 120 s window in
+            // the sender task, or duplicated pong. Either way ignore.
+            return;
+        }
+    };
+    let t3 = dash_wall_ms();
+    let rtt = t3.saturating_sub(t1) as f64;
+    // Cristian's: offset = T1 + RTT/2 - T2
+    let offset_estimate = (t1 as f64) + rtt / 2.0 - (sensor_ts_ms as f64);
+
+    // Exponential smoothing per spec §3.1 (α = 0.2).
+    const ALPHA: f64 = 0.2;
+    let smoothed = match s.smoothed_offset_ms {
+        Some(prev) => ALPHA * offset_estimate + (1.0 - ALPHA) * prev,
+        None       => offset_estimate,
+    };
+    s.smoothed_offset_ms = Some(smoothed);
+
+    // Track recent raw estimates for the stability check.
+    if s.estimates.len() == 5 {
+        s.estimates.pop_front();
+    }
+    s.estimates.push_back(offset_estimate);
+
+    let elapsed = s.connected_at.elapsed();
+    eprintln!(
+        "[time-sync] {} rtt={:.1}ms est={:+.1}ms smoothed={:+.1}ms (round {}, {:.0}s since connect)",
+        addr,
+        rtt,
+        offset_estimate,
+        smoothed,
+        s.estimates.len(),
+        elapsed.as_secs_f64()
+    );
+
+    // Decide whether to push a correction (SPEC-R2-ROCKER-TIMESYNC §3.2).
+    let push_decision: Option<(i64, &'static str)> = if !s.baseline_pushed {
+        // Initial baseline. Need ≥ 5 rounds and a stable estimate
+        // (std-dev of the last 3 estimates < 5 ms).
+        if s.estimates.len() >= 5 && std_dev_last_n(&s.estimates, 3) < 5.0 {
+            Some((smoothed.round() as i64, "baseline"))
+        } else {
+            None
+        }
+    } else if smoothed.abs() >= 10.0 {
+        // Drift correction.
+        Some((smoothed.round() as i64, "drift"))
+    } else {
+        None
+    };
+
+    if let Some((delta_ms, reason)) = push_decision {
+        s.cumulative_pushed_ms = s.cumulative_pushed_ms.wrapping_add(delta_ms);
+        s.baseline_pushed = true;
+        // After pushing, the residual is zero by construction.
+        s.smoothed_offset_ms = Some(0.0);
+        s.estimates.clear();
+        let cumulative = s.cumulative_pushed_ms;
+        drop(s); // release the per-peer lock before awaiting the cmd send
+
+        let payload = encode_set_clock_offset(delta_ms);
+        let frame = build_dash_frame(
+            DASH_SET_CLOCK_OFFSET,
+            (req_id & 0xFFFF) as u16, // reuse the pong's req_id for trace
+            &payload,
+        );
+        if let Some(tx) = cmd_tx_opt {
+            if tx.send(frame).await.is_err() {
+                eprintln!("[time-sync] {} push failed — cmd channel closed", addr);
+            } else {
+                eprintln!(
+                    "[time-sync] {} pushed set_clock_offset delta={:+} ms ({}); cumulative={}",
+                    addr, delta_ms, reason, cumulative
+                );
+                append_timesync_log(addr, delta_ms, reason, cumulative);
+            }
+        }
+    }
+}
+
+fn std_dev_last_n(estimates: &VecDeque<f64>, n: usize) -> f64 {
+    let take = estimates.len().min(n);
+    if take < 2 {
+        return f64::INFINITY;
+    }
+    let slice: Vec<f64> = estimates.iter().rev().take(take).copied().collect();
+    let mean = slice.iter().sum::<f64>() / (take as f64);
+    let var = slice.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (take as f64);
+    var.sqrt()
+}
+
+/// Append one line to the per-process timesync log per SPEC §3.3.
+/// JSON-per-line at the path under /tmp; later we'll move it into
+/// `<data_root>/<experiment_id>/timesync.log` once data-root config
+/// lands.
+fn append_timesync_log(addr: SocketAddr, delta_ms: i64, reason: &str, cumulative_ms: i64) {
+    use std::io::Write;
+    let line = serde_json::json!({
+        "ts_ms": dash_wall_ms(),
+        "peer": addr.to_string(),
+        "delta_ms": delta_ms,
+        "cumulative_ms": cumulative_ms,
+        "reason": reason,
+    }).to_string();
+    let path = "/tmp/r2-rocker-timesync.log";
+    match std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        Ok(mut f) => { let _ = writeln!(f, "{}", line); }
+        Err(e)    => eprintln!("[time-sync] failed to write {}: {}", path, e),
+    }
 }
 
 /// One R2-WIRE frame as it arrived on the TCP listener, plus metadata
@@ -742,15 +995,60 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
 
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
 
+    let sync_state = Arc::new(Mutex::new(PeerSyncState::new()));
     {
         let mut peers = state.peers.write().await;
         peers.insert(addr, SensorPeer {
             addr,
-            tx: cmd_tx,
+            tx: cmd_tx.clone(),
             name: None,
             last_announce: None,
+            sync: sync_state.clone(),
         });
     }
+
+    // Per-peer sync_pulse task. Per SPEC-R2-ROCKER-TIMESYNC §3.1 cadence:
+    // 1 Hz for the first 30 s after this TCP connect, then 30 s thereafter.
+    // Exits when the cmd_tx send fails (peer disconnected, channel closed).
+    let sync_tx = cmd_tx.clone();
+    let sync_state_for_task = sync_state.clone();
+    let sync_addr = addr;
+    let _sync_handle = tokio::spawn(async move {
+        let fast_until = Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let interval = if Instant::now() < fast_until {
+                std::time::Duration::from_secs(1)
+            } else {
+                std::time::Duration::from_secs(30)
+            };
+            // Acquire a req_id and record the dashboard-side T1 before
+            // sending, so the pong handler can look it up by req_id.
+            let (req_id, dash_ts) = {
+                let mut s = sync_state_for_task.lock().await;
+                let id = s.next_req_id;
+                s.next_req_id = s.next_req_id.wrapping_add(1);
+                let t1 = dash_wall_ms();
+                s.pending.insert(id, t1);
+                // Prune very old entries (>120 s) to avoid leaking
+                // memory if pongs are persistently dropped.
+                let cutoff = t1.saturating_sub(120_000);
+                s.pending.retain(|_, t| *t >= cutoff);
+                (id, t1)
+            };
+            let payload = encode_sync_pulse(req_id, dash_ts);
+            let frame = build_dash_frame(
+                DASH_SYNC_PULSE,
+                (req_id & 0xFFFF) as u16,
+                &payload,
+            );
+            if sync_tx.send(frame).await.is_err() {
+                // cmd_rx side closed — peer is gone.
+                eprintln!("[time-sync] {} cmd channel closed; sync task exiting", sync_addr);
+                return;
+            }
+            tokio::time::sleep(interval).await;
+        }
+    });
 
     let _timestamp_start = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -834,6 +1132,20 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
                         } else {
                             None
                         };
+
+                        // SPEC-R2-ROCKER-TIMESYNC §3 — handle sync_pong inline,
+                        // update peer's smoothed offset, push set_clock_offset
+                        // when stable or when drift threshold exceeded.
+                        if event_hash == Some(SENSOR_SYNC_PONG) && frame.len() > 12 {
+                            if let Some((req_id, sensor_ts_ms)) = decode_sync_pong(&frame[12..]) {
+                                handle_sync_pong(
+                                    addr,
+                                    req_id,
+                                    sensor_ts_ms,
+                                    &read_state,
+                                ).await;
+                            }
+                        }
 
                         if event_hash == Some(SENSOR_ANNOUNCE) {
                             let payload = if frame.len() > 12 {
