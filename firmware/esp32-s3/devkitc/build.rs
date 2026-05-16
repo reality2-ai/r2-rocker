@@ -7,14 +7,57 @@ fn main() {
     println!("cargo:rerun-if-changed=sdkconfig.defaults");
     println!("cargo:rerun-if-changed=wifi_config.toml");
     println!("cargo:rerun-if-changed=build.rs");
+    // Re-run the build script when the source tree or git state changes,
+    // so R2_GIT_SHA / R2_BUILD_TIMESTAMP track the current build (and
+    // the ESP-IDF `PROJECT_VER` string baked into the boot banner stays
+    // in sync with the actual binary). Without these, build.rs ran once
+    // on first build, baked stale values into env vars, and never re-ran
+    // — every subsequent `cargo build` produced a fresh `.bin` whose
+    // announce/boot strings pointed at the *previous* commit.
+    println!("cargo:rerun-if-changed=src");
+    println!("cargo:rerun-if-changed=Cargo.toml");
+    let manifest_dir_for_git = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
+    track_git_state(&manifest_dir_for_git);
 
-    let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
+    let manifest_dir = manifest_dir_for_git.clone();
 
     stage_partitions_csv(&manifest_dir);
     load_wifi_config(&manifest_dir);
     stamp_build_metadata();
 
     embuild::espidf::sysenv::output();
+}
+
+/// Emit `cargo:rerun-if-changed` directives for the git files whose
+/// contents the stamped env vars depend on: `HEAD` (branch switch),
+/// the branch ref the current HEAD points at (commits on this branch),
+/// and `index` (staged-vs-tree status — affects the `-dirty` suffix).
+/// Repo root is three levels above `firmware/esp32-s3/<carrier>/`.
+fn track_git_state(manifest_dir: &str) {
+    let repo_root = PathBuf::from(manifest_dir)
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .map(Path::to_path_buf);
+    let Some(repo_root) = repo_root else { return };
+
+    let git_dir = repo_root.join(".git");
+    let head = git_dir.join("HEAD");
+    if head.exists() {
+        println!("cargo:rerun-if-changed={}", head.display());
+    }
+    let index = git_dir.join("index");
+    if index.exists() {
+        println!("cargo:rerun-if-changed={}", index.display());
+    }
+    if let Ok(content) = fs::read_to_string(&head) {
+        if let Some(ref_path) = content.strip_prefix("ref: ").map(str::trim) {
+            let ref_file = git_dir.join(ref_path);
+            if ref_file.exists() {
+                println!("cargo:rerun-if-changed={}", ref_file.display());
+            }
+        }
+    }
 }
 
 /// Stamp git short SHA + build timestamp as compile-time env vars so the

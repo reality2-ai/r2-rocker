@@ -760,8 +760,31 @@ shall:
 
 ### 13.2 Bulk OTA
 
-Bulk OTA across multiple peers shall be sequential by default to avoid
-saturating the hotspot. A future "rolling parallel" mode MAY be added.
+The dashboard exposes a fleet-wide "Update All Firmware" affordance
+in the Devices view. v0.2 implementation:
+
+* The browser file-picker accepts a single `.bin`; the filename SHOULD
+  follow the `r2-rocker-firmware-<fw_ver>.bin` convention used by
+  `tools/build-firmware.sh`.
+* If the filename's `<fw_ver>` segment parses, the webapp compares
+  it against each peer's announced `fw_ver` and skips peers already on
+  that version. Operator sees a confirmation dialog reporting
+  `<targets>` to push and `<skipped>` already matching.
+* If the filename does NOT parse (operator renamed it), the dialog
+  warns and offers to push to every peer.
+* Pushes run in **parallel** via `Promise.allSettled` over the
+  existing per-sensor `POST /api/ota/{addr}` route — the dashboard has
+  no fleet-level endpoint. Failure of one peer does not abort the
+  others; each peer's error is logged client-side and shown via the
+  existing OTA `/ws/status` event stream.
+* Concurrency is uncapped for the v0.1 fleet size (≤ ~4 sensors). If
+  the fleet grows the webapp SHOULD cap concurrency at 2 to keep the
+  hotspot uplink from saturating; the original spec's "sequential by
+  default, rolling parallel later" guidance still applies in spirit.
+
+Fleet-wide reset works the same way via `POST /api/sensor/{addr}/reset`:
+"Reset All Sensors" button on the Devices view, confirmation dialog,
+`Promise.allSettled` over peers.
 
 ---
 

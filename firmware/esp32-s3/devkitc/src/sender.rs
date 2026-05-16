@@ -432,15 +432,21 @@ impl Sender {
             self.accel_sim.sample(t_s)
         };
 
-        // Sample once so the wire ts_ms and the on-disk ts_ms match.
-        let ts_ms = self.ts_ms();
+        // Sample once so the wire ts_ms and the on-disk ts_ms come
+        // from the same clock read. The wire path uses u32 today (see
+        // §3 of SPEC-R2-ROCKER-WIRE); the SD path widens to i64 so the
+        // CSV column is self-contained — operators reading the file
+        // post-hoc shouldn't have to undo a u32 truncation just to
+        // recover the wall-clock value.
+        let ts_ms_i64 = self.clock.ts_ms_i64();
+        let ts_ms = ts_ms_i64 as u32;
 
         // Durable copy first (SPEC-R2-ROCKER-SENSOR §7.2). Best-effort:
         // log + continue on write error so the wire path stays alive
         // even with a flaky/full card. v0.1 omits the in-RAM retry
         // queue + ERROR escalation that §6.7 calls for.
         if let Some(ref mut ring) = self.ring {
-            if let Err(e) = ring.append(seq, ts_ms, x, y, z) {
+            if let Err(e) = ring.append(seq, ts_ms_i64, x, y, z) {
                 warn!("[ring] append seq={} failed: {}", seq, e);
             }
         }

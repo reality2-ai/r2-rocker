@@ -22,6 +22,7 @@
 //! default build.
 
 pub mod hive_id;
+pub mod log_tcp;
 pub mod ota_tcp;
 pub mod reset_tcp;
 pub mod wifi_sta;

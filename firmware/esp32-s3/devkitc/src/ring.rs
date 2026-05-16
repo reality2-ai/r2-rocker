@@ -1,18 +1,28 @@
 //! SD ring-segment writer (SPEC-R2-ROCKER-SENSOR §6.2–6.5).
 //!
-//! On boot, scan `<mount>/r2/` for `log.NNNN.bin` segments, identify the
-//! highest-numbered, read its last 20-byte record to recover `tail_seq`,
-//! and continue writing into that segment. Rotate to a new segment when
-//! the current one hits `segment_size_bytes` (8 MiB default). Delete the
-//! oldest segment when the count would exceed `ring_segments` (12
-//! default → 96 MiB ≈ 14 hours at 100 Hz).
+//! On boot, scan the SD mount root for `logNNNN.csv` segments, identify
+//! the highest-numbered, read the first 10 bytes of its last record
+//! (the `seq` column) to recover `tail_seq`, and continue writing into
+//! that segment. Rotate to a new segment when the current one hits
+//! `segment_size_bytes` (8 MiB default). Delete the oldest segment when
+//! the count would exceed `ring_segments` (12 default → 96 MiB ≈ 7 h at
+//! 100 Hz given the CSV record size).
 //!
-//! Record format (§6.2), 20 bytes fixed:
-//!   offset 0..3   seq    u32 LE
-//!   offset 4..7   ts_ms  u32 LE   (already-synchronised per TIMESYNC §2.2)
-//!   offset 8..11  x      i32 LE
-//!   offset 12..15 y      i32 LE
-//!   offset 16..19 z      i32 LE
+//! Record format (§6.2 v0.2), fixed-width CSV — 62 bytes per row:
+//!
+//! ```text
+//!     seq         ts_ms       x          y          z   \n
+//!   "        0,     0,         0,         0,         0\n"
+//!   "       10,  1234,       -42,        17,        -3\n"
+//!   ^         ^             ^           ^           ^
+//!   |---10----|------14-----|-----11----|-----11----|-----11----| + 4 commas + 1 LF = 62
+//! ```
+//!
+//! Columns are right-aligned and space-padded so every record is
+//! exactly 62 bytes. This keeps `seek(record_index * 62)` valid for
+//! boot recovery while remaining trivially parseable by pandas /
+//! Excel / `awk` (any CSV reader with `skipinitialspace=True` or
+//! whitespace-tolerant numeric coercion).
 //!
 //! v0.1 limitations (to track in follow-ups):
 //!   * `segment_size_mb` / `ring_segments` are hardcoded; spec calls
@@ -29,12 +39,26 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
-/// Bytes per record per spec §6.2.
-const RECORD_BYTES: u64 = 20;
-/// Default segment size in bytes (8 MiB ≈ 70 minutes at 100 Hz / 20-byte records).
+/// Bytes per record per spec §6.2 (v0.2 CSV layout). `RECORD_FMT` and
+/// this constant must agree exactly; mismatch breaks boot recovery's
+/// seek-arithmetic.
+const RECORD_BYTES: u64 = 62;
+/// Column widths for the right-aligned CSV layout. The `seq` column
+/// width is also used as the parse window during boot recovery.
+const W_SEQ:   usize = 10;
+const W_TS_MS: usize = 14;
+const W_AXIS:  usize = 11;
+/// Default segment size in bytes (8 MiB ≈ 35 minutes at 100 Hz with
+/// 62-byte CSV records).
 const SEGMENT_SIZE_BYTES: u64 = 8 * 1024 * 1024;
 /// Ring depth — oldest segment deleted when count would exceed this.
 const RING_SEGMENTS: usize = 12;
+/// fsync cadence. The capturing logger writes to FATFS's in-RAM cache;
+/// without `sync_all()` the data and FAT directory entries never reach
+/// the card and pulling the SD card mid-run yields an empty file.
+/// 100 records ≈ 1 s at 100 Hz — a reasonable bound on worst-case data
+/// loss on hot SD-pull. `rotate()` and `Drop` also sync.
+const SYNC_EVERY_N_RECORDS: u32 = 100;
 /// Subdirectory under the SD mount point. Spec §6.1 places segments
 /// under `/r2/` but ESP-IDF's FATFS layer has been unreliable about
 /// creating subdirectories from `std::fs::create_dir_all` (returns Ok
@@ -45,21 +69,21 @@ const RING_SEGMENTS: usize = 12;
 /// subdir reliably.
 const RING_DIR: &str = "";
 
-/// Open ring + writable handle to the current segment. `Drop` flushes
-/// nothing extra — the kernel-side cache and FAT driver handle that.
-/// Call `sync()` periodically (or before sleep) if you want a hard
-/// barrier; v0.1 doesn't.
+/// Open ring + writable handle to the current segment. Periodic
+/// `sync_all()` is called every `SYNC_EVERY_N_RECORDS` appends and on
+/// rotate to keep FATFS's RAM cache from swallowing data on hot SD
+/// removal.
 pub struct Ring {
     base: PathBuf,
     current: File,
     current_num: u32,
     current_bytes: u64,
     tail_seq: u32,
+    records_since_sync: u32,
 }
 
 impl Ring {
-    /// Open the ring at `<mount_point>/r2/`. Creates the directory if
-    /// missing. Performs boot recovery per §6.5.
+    /// Open the ring at the SD mount point. Performs boot recovery per §6.5.
     pub fn open(mount_point: &str) -> Result<Self> {
         let base = PathBuf::from(mount_point).join(RING_DIR);
         fs::create_dir_all(&base)
@@ -76,13 +100,18 @@ impl Ring {
                 if n_records == 0 {
                     (highest, 0u32)
                 } else {
-                    // Read the seq field of the last record (first 4 bytes).
+                    // The seq column is the first W_SEQ bytes of the
+                    // last record. Right-aligned ASCII decimal; trim
+                    // leading spaces and parse.
                     let mut f = File::open(&path)
                         .with_context(|| format!("open {:?} for tail-seq scan", path))?;
                     f.seek(SeekFrom::Start((n_records - 1) * RECORD_BYTES))?;
-                    let mut buf = [0u8; 4];
+                    let mut buf = [0u8; W_SEQ];
                     f.read_exact(&mut buf)?;
-                    (highest, u32::from_le_bytes(buf))
+                    let seq = parse_seq_field(&buf).with_context(|| {
+                        format!("parse seq from {:?} (last record)", path)
+                    })?;
+                    (highest, seq)
                 }
             }
             None => (1, 0),
@@ -135,6 +164,7 @@ impl Ring {
             current_num,
             current_bytes,
             tail_seq,
+            records_since_sync: 0,
         })
     }
 
@@ -145,13 +175,15 @@ impl Ring {
     }
 
     /// Append a single record. Rotates the segment if the next write
-    /// would exceed the segment-size threshold. Errors propagate to the
-    /// caller; the sender's policy is "log and continue" for now (§6.7).
+    /// would exceed the segment-size threshold. Calls `sync_all()` every
+    /// `SYNC_EVERY_N_RECORDS` writes so a hot SD-pull doesn't lose more
+    /// than ~1 s of samples. Errors propagate to the caller; the
+    /// sender's policy is "log and continue" for now (§6.7).
     #[allow(dead_code)]
     pub fn append(
         &mut self,
         seq: u32,
-        ts_ms: u32,
+        ts_ms: i64,
         x: i32,
         y: i32,
         z: i32,
@@ -159,15 +191,46 @@ impl Ring {
         if self.current_bytes.saturating_add(RECORD_BYTES) > SEGMENT_SIZE_BYTES {
             self.rotate()?;
         }
-        let mut rec = [0u8; 20];
-        rec[0..4].copy_from_slice(&seq.to_le_bytes());
-        rec[4..8].copy_from_slice(&ts_ms.to_le_bytes());
-        rec[8..12].copy_from_slice(&x.to_le_bytes());
-        rec[12..16].copy_from_slice(&y.to_le_bytes());
-        rec[16..20].copy_from_slice(&z.to_le_bytes());
-        self.current.write_all(&rec).context("ring append write")?;
-        self.current_bytes += RECORD_BYTES;
+
+        // Format into a stack buffer first so we can assert the layout
+        // stayed 62 bytes wide and avoid silent corruption from a value
+        // exceeding its column width. Width here is the *minimum*: the
+        // formatter does not truncate, so an overflow shows up as a
+        // wider line and a debug_assert.
+        let mut buf = [0u8; RECORD_BYTES as usize];
+        let n = {
+            let mut cur = &mut buf[..];
+            write!(
+                cur,
+                "{:>w_seq$},{:>w_ts$},{:>w_a$},{:>w_a$},{:>w_a$}\n",
+                seq, ts_ms, x, y, z,
+                w_seq = W_SEQ,
+                w_ts = W_TS_MS,
+                w_a = W_AXIS,
+            ).context("ring append format")?;
+            (RECORD_BYTES as usize) - cur.len()
+        };
+        debug_assert_eq!(
+            n, RECORD_BYTES as usize,
+            "ring CSV row width drift: seq={} ts_ms={} x={} y={} z={}",
+            seq, ts_ms, x, y, z,
+        );
+
+        self.current.write_all(&buf[..n]).context("ring append write")?;
+        self.current_bytes += n as u64;
         self.tail_seq = seq;
+
+        self.records_since_sync = self.records_since_sync.saturating_add(1);
+        if self.records_since_sync >= SYNC_EVERY_N_RECORDS {
+            // Best-effort: a failed fsync gets a warn and we keep going.
+            // The next rotation or boot still has the data on disk if
+            // the failure was transient; if it isn't, the SD card is
+            // failing and §6.7 escalation applies.
+            if let Err(e) = self.current.sync_all() {
+                warn!("[ring] periodic sync_all failed: {} — continuing", e);
+            }
+            self.records_since_sync = 0;
+        }
         Ok(())
     }
 
@@ -200,7 +263,7 @@ impl Ring {
                 let _ = fs::remove_file(&path);
                 continue;
             }
-            // Read the seq field of the LAST record. If that <= through_seq,
+            // Read the seq column of the LAST record. If that <= through_seq,
             // every record in the segment has been acked.
             let last_seq = match read_last_seq(&path, n_records) {
                 Ok(s) => s,
@@ -247,6 +310,7 @@ impl Ring {
         self.current = new_current;
         self.current_num = next_num;
         self.current_bytes = 0;
+        self.records_since_sync = 0;
         info!("[ring] rotated to segment {}", next_num);
 
         // Enforce ring depth. Always keep the segment we just opened —
@@ -272,12 +336,32 @@ impl Ring {
     }
 }
 
+impl Drop for Ring {
+    fn drop(&mut self) {
+        // Last-chance flush on shutdown. esp_restart() will drop us;
+        // without this, anything in the FATFS RAM cache since the last
+        // periodic sync is lost.
+        if let Err(e) = self.current.sync_all() {
+            warn!("[ring] drop-time sync_all failed: {}", e);
+        }
+    }
+}
+
 fn read_last_seq(path: &std::path::Path, n_records: u64) -> Result<u32> {
     let mut f = File::open(path)?;
     f.seek(SeekFrom::Start((n_records - 1) * RECORD_BYTES))?;
-    let mut buf = [0u8; 4];
+    let mut buf = [0u8; W_SEQ];
     f.read_exact(&mut buf)?;
-    Ok(u32::from_le_bytes(buf))
+    parse_seq_field(&buf)
+}
+
+/// Trim ASCII spaces and parse a u32 from the first column of a record.
+fn parse_seq_field(buf: &[u8]) -> Result<u32> {
+    let s = std::str::from_utf8(buf).context("seq field not UTF-8")?;
+    let trimmed = s.trim();
+    trimmed
+        .parse::<u32>()
+        .with_context(|| format!("seq field {:?} not a u32", trimmed))
 }
 
 fn enumerate_segments(base: &PathBuf) -> Result<Vec<u32>> {
@@ -293,17 +377,17 @@ fn enumerate_segments(base: &PathBuf) -> Result<Vec<u32>> {
     Ok(out)
 }
 
-// Spec §6.1 calls for `log.NNNN.bin` but ESP-IDF's FATFS LFN handling
-// rejects multi-dot filenames; we use `logNNNN.bin` (strict 8.3) on
-// disk. Naming-only deviation; the wire / record formats and the boot-
-// recovery logic don't change.
+// v0.2: `.csv` extension so the file format is obvious on inspection.
+// Strict 8.3 (single dot) keeps ESP-IDF's FATFS happy. The old `.bin`
+// segments from v0.1 are not scanned — any leftover on a card from a
+// prior build is ignored (and operator can `rm` if desired).
 fn segment_name(num: u32) -> String {
-    format!("log{:04}.bin", num)
+    format!("log{:04}.csv", num)
 }
 
 fn parse_segment_name(name: &str) -> Option<u32> {
     name.strip_prefix("log")
-        .and_then(|s| s.strip_suffix(".bin"))
+        .and_then(|s| s.strip_suffix(".csv"))
         .and_then(|s| s.parse().ok())
 }
 
@@ -313,18 +397,44 @@ mod tests {
 
     #[test]
     fn parses_segment_name() {
-        assert_eq!(parse_segment_name("log0001.bin"), Some(1));
-        assert_eq!(parse_segment_name("log0042.bin"), Some(42));
-        assert_eq!(parse_segment_name("log9999.bin"), Some(9999));
+        assert_eq!(parse_segment_name("log0001.csv"), Some(1));
+        assert_eq!(parse_segment_name("log0042.csv"), Some(42));
+        assert_eq!(parse_segment_name("log9999.csv"), Some(9999));
         assert_eq!(parse_segment_name("log0001.txt"), None);
-        assert_eq!(parse_segment_name("data.0001.bin"), None);
+        assert_eq!(parse_segment_name("log0001.bin"), None);
+        assert_eq!(parse_segment_name("data.0001.csv"), None);
         assert_eq!(parse_segment_name(""), None);
     }
 
     #[test]
     fn formats_segment_name() {
-        assert_eq!(segment_name(1), "log0001.bin");
-        assert_eq!(segment_name(42), "log0042.bin");
-        assert_eq!(segment_name(9999), "log9999.bin");
+        assert_eq!(segment_name(1), "log0001.csv");
+        assert_eq!(segment_name(42), "log0042.csv");
+        assert_eq!(segment_name(9999), "log9999.csv");
+    }
+
+    #[test]
+    fn record_width_constant_matches_format() {
+        let mut buf = [0u8; 256];
+        let n = {
+            let mut cur = &mut buf[..];
+            write!(
+                cur,
+                "{:>w_seq$},{:>w_ts$},{:>w_a$},{:>w_a$},{:>w_a$}\n",
+                0u32, 0i64, 0i32, 0i32, 0i32,
+                w_seq = W_SEQ,
+                w_ts = W_TS_MS,
+                w_a = W_AXIS,
+            ).unwrap();
+            buf.len() - cur.len()
+        };
+        assert_eq!(n as u64, RECORD_BYTES);
+    }
+
+    #[test]
+    fn parses_seq_field_right_aligned() {
+        assert_eq!(parse_seq_field(b"         0").unwrap(), 0);
+        assert_eq!(parse_seq_field(b"       100").unwrap(), 100);
+        assert_eq!(parse_seq_field(b"4294967295").unwrap(), u32::MAX);
     }
 }

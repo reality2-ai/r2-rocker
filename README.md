@@ -149,22 +149,24 @@ After the first-time setup, normal use is:
 #    credentials are reused.
 ./tools/setup-hotspot.sh
 
-# 2. Build the firmware and package it ready to flash AND ready to
-#    push wirelessly. Produces TWO files: one for cabled flashing,
-#    one archived under firmware/esp32-s3/releases/ for posterity.
-./tools/build-firmware.sh
+# 2. Build the firmware for your carrier (devkitc or xiao — defaults
+#    to devkitc). Produces TWO files: one for cabled flashing, one
+#    archived under firmware/esp32-s3/<carrier>/releases/ for posterity.
+./tools/build-firmware.sh devkitc
 
 # 3. Flash a fresh sensor over USB. The DevKitC's USB-OTG port shows
 #    up as /dev/ttyACM0 on Linux. Only needed once per chip — after
 #    that, updates push wirelessly.
-cd firmware/esp32-s3 && source ~/export-esp.sh
+cd firmware/esp32-s3/devkitc && source ~/export-esp.sh
 cargo espflash flash --release --port /dev/ttyACM0
-cd ../..
+cd ../../..
 
 # 4. Start the dashboard. Prints a banner with version + ports.
+#    The dashboard also serves the web app from `webapp/` at the
+#    root of the same HTTP port — no separate webapp server needed.
 cargo run --release -p r2-dashboard
 
-# 5. Open http://localhost:8080/v/ in your browser.
+# 5. Open http://localhost:8080/ in your browser.
 # 6. Click "Connect Sensors" and watch the LEDs.
 ```
 
@@ -190,15 +192,22 @@ Once a sensor has been flashed once over USB, you don't need the
 cable again:
 
 ```bash
-./tools/build-firmware.sh        # produces a new .bin
+./tools/build-firmware.sh devkitc        # produces a new .bin
 ```
 
 In the dashboard, switch to the **Devices** tab, click *Update
 Firmware* on the sensor's card, and pick the new `.bin` file
-(`firmware/esp32-s3/target/xtensa-esp32s3-espidf/release/r2-rocker-firmware.bin`).
+(`firmware/esp32-s3/devkitc/target/xtensa-esp32s3-espidf/release/r2-rocker-firmware.bin`).
 The sensor receives the image, checks its integrity, writes the
 inactive partition, reboots into the new firmware, and rejoins.
 Takes about 15 seconds.
+
+To update every sensor at once, click **Update All Firmware…** at
+the top of the Devices view and pick the same `.bin`. Sensors
+already running that build (matched by the filename's `fw_ver`
+stamp) are skipped; the rest get the push in parallel. The
+companion **Reset All Sensors** button does the same fan-out
+for a fleet reboot.
 
 If the new firmware is broken — can't join WiFi, or can't reach the
 dashboard — the bootloader notices on the next boot and rolls back
@@ -206,9 +215,77 @@ to the previous version automatically. So you can't accidentally
 brick a sensor over the air.
 
 Every wireless-update build is also archived under
-`firmware/esp32-s3/releases/` with the version string in the
-filename, so you can always find the exact bytes a given sensor is
-running.
+`firmware/esp32-s3/<carrier>/releases/` with the version string in
+the filename, so you can always find the exact bytes a given sensor
+is running.
+
+## Building a new firmware version by hand
+
+`tools/build-firmware.sh` wraps three steps. If you'd rather run
+them yourself (or are debugging the build):
+
+```bash
+# Step 1: source the ESP toolchain into the current shell.
+source ~/export-esp.sh
+
+# Step 2: compile. The carrier subdirectory you `cd` into is what
+#         picks devkitc vs xiao pin maps; the firmware crate is the
+#         same code, parameterised by a per-carrier Cargo manifest.
+cd firmware/esp32-s3/devkitc
+cargo build --release
+
+# Step 3: convert the ELF into an ESP image (the .bin format the
+#         OTA flow understands). `espflash flash` does this
+#         internally; `espflash save-image` just writes the
+#         conversion out to disk without flashing.
+espflash save-image --chip esp32s3 \
+    target/xtensa-esp32s3-espidf/release/r2-rocker-firmware \
+    target/xtensa-esp32s3-espidf/release/r2-rocker-firmware.bin
+```
+
+The resulting `target/xtensa-esp32s3-espidf/release/r2-rocker-firmware.bin`
+is what `/api/ota/{addr}` accepts. The release archive copy under
+`releases/` is purely for posterity — the build script copies it
+there but it's not on the OTA path.
+
+The `fw_ver` string the firmware reports in its announce (and that
+the dashboard's device card shows) is stamped by the firmware's
+`build.rs` from `git rev-parse HEAD` + `date -u`. Edit any source
+file, commit, or modify the index and `build.rs` re-runs on the
+next `cargo build` so the stamp tracks the actual binary. The
+"App version" line in the ESP-IDF boot banner is **separate** — it
+comes from a CMake-generated source file that only refreshes on a
+full IDF reconfigure (i.e. after `cargo clean`). Use the announce
+string in the dashboard, not the boot banner, as the source of
+truth for what's running.
+
+## Rebuilding the web app from source
+
+The web app at `webapp/` is plain HTML + JS, plus a `pkg/`
+sub-directory containing a WebAssembly bundle compiled from
+`crates/r2-wasm`. The dashboard binary serves `webapp/` over HTTP
+(port 8080) — nothing in this directory is bundled into a separate
+build artefact, so an `index.html` edit is live on the next page
+reload (the service worker caches assets; bump `CACHE` in
+`webapp/sw.js` to force-refresh every connected browser).
+
+To rebuild the WebAssembly bundle (only needed when `crates/r2-wasm`
+or any of its R2-stack dependencies change):
+
+```bash
+# One-time: install wasm-pack if you don't have it.
+cargo install wasm-pack
+
+# Rebuild webapp/pkg/ from crates/r2-wasm/.
+wasm-pack build crates/r2-wasm --target web --release \
+    --out-dir ../../webapp/pkg
+```
+
+Output lands at `webapp/pkg/`. The HTML in `webapp/index.html`
+imports `./pkg/r2_wasm.js`. There is no separate dev server — open
+the dashboard's HTTP port (`http://localhost:8080/`) and you have
+the freshly-rebuilt viewer. Hard-refresh the browser (or bump the
+service worker cache key) if a stale cached version sticks.
 
 ## Where to look when something doesn't work
 

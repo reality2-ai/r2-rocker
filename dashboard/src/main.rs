@@ -26,7 +26,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, Mutex, RwLock};
 
@@ -579,6 +579,10 @@ async fn main() {
             let ws_state = state.clone();
             move |ws| ws_status_handler(ws, ws_state)
         }))
+        // Per-sensor live log tail. Opens a TCP connection to the sensor's
+        // log_tcp listener (port 21045) and pipes lines back as WS text
+        // frames. Used by the per-card "↓ Logs" panel in the webapp.
+        .route("/ws/logs/{addr}", get(ws_logs_handler))
         // Phase 5d: TG public key + KeyHolder enrolment endpoints.
         .route("/api/keyholder/tg-pub", get(tg_pub_handler))
         .route("/api/enrol-init", post(enrol_init_handler))
@@ -1757,6 +1761,80 @@ async fn handle_ws_status(mut socket: WebSocket, state: Arc<AppState>) {
         }
     }
     eprintln!("[ws/status] viewer disconnected");
+}
+
+/// `/ws/logs/{addr}` — per-sensor live log tail.
+///
+/// Opens a TCP socket to `<addr>:21045` (the firmware's `log_tcp`
+/// listener) and pipes each newline-terminated line back to the WS
+/// client as a text frame. Closes when either side disconnects.
+///
+/// `addr` may be either a bare IP or `ip:port`; the sensor port suffix
+/// is stripped since the log listener is on the well-known port.
+async fn ws_logs_handler(
+    Path(addr): Path<String>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_ws_logs(socket, addr))
+}
+
+async fn handle_ws_logs(mut socket: WebSocket, addr: String) {
+    let ip_only: &str = addr.split(':').next().unwrap_or(&addr);
+    let target = format!("{}:21045", ip_only);
+    eprintln!("[ws/logs] viewer requested tail of {}", target);
+
+    let stream = match tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        TcpStream::connect(&target),
+    )
+    .await
+    {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            let _ = socket
+                .send(Message::Text(
+                    format!("[ws/logs] connect to {} failed: {}\n", target, e).into(),
+                ))
+                .await;
+            return;
+        }
+        Err(_) => {
+            let _ = socket
+                .send(Message::Text(
+                    format!("[ws/logs] connect to {} timed out\n", target).into(),
+                ))
+                .await;
+            return;
+        }
+    };
+
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+
+    loop {
+        tokio::select! {
+            inbound = socket.recv() => {
+                match inbound {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Err(_)) => break,
+                    _ => {} // ignore client → server messages
+                }
+            }
+            n = reader.read_line(&mut line) => {
+                match n {
+                    Ok(0) => break, // sensor closed the socket
+                    Ok(_) => {
+                        if socket.send(Message::Text(line.clone().into())).await.is_err() {
+                            break;
+                        }
+                        line.clear();
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+    }
+    eprintln!("[ws/logs] tail of {} closed", target);
 }
 
 fn encode_raw_frame_envelope(rf: &RawFrame) -> Vec<u8> {

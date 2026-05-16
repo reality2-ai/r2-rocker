@@ -417,17 +417,17 @@ The firmware writes segments directly under the SD-card mount point
 
 ```
 /sdcard/
-├─ log0001.bin      ← sample segment 1 (oldest)
-├─ log0002.bin      ← sample segment 2
-├─ log0003.bin      ← sample segment 3 (current write target)
+├─ log0001.csv      ← sample segment 1 (oldest)
+├─ log0002.csv      ← sample segment 2
+├─ log0003.csv      ← sample segment 3 (current write target)
 ├─ meta.bin         ← head_seq, tail_seq, last_acked_seq snapshot
 └─ fw.bak/          ← OTA rollback image (optional, §12.8)
 ```
 
-Segments are named `logNNNN.bin` with a 4-digit zero-padded counter,
+Segments are named `logNNNN.csv` with a 4-digit zero-padded counter,
 incrementing forever (no reuse).
 
-**v0.1 implementation deviations from the original spec layout**:
+**v0.1 → v0.2 implementation deviations from the original spec layout**:
 
 * Original spec placed segments under `/r2/`. The implementation puts
   them at the mount root because ESP-IDF's FATFS layer doesn't
@@ -438,32 +438,65 @@ incrementing forever (no reuse).
   ESP-IDF's `mkdir` path is shown to be reliable (or we route around it
   via direct FATFS calls).
 * Original spec named segments `log.NNNN.bin` (two dots — a base, a
-  counter, and an extension). The implementation uses `logNNNN.bin`
-  (single dot, strict 8.3-compatible) because ESP-IDF's FATFS LFN
-  support rejects multi-dot filenames with EINVAL. Naming-only
-  deviation; the on-disk record format is unchanged.
+  counter, and an extension). The implementation uses `logNNNN.csv`
+  (single dot, strict 8.3-compatible, `.csv` extension reflecting the
+  v0.2 fixed-width-CSV record format) because ESP-IDF's FATFS LFN
+  support rejects multi-dot filenames with EINVAL.
+* Original spec specified a fixed 20-byte binary record. v0.2 stores
+  fixed-width CSV (see §6.2). The motivation is that a pulled SD card
+  is now readable in any text editor / pandas / Excel without the
+  university having to write a custom parser — and the standalone
+  `ts_ms` value in each row is interpretable without a side file.
 
 ### 6.2 Record format
 
-Each sample is appended as a fixed-size 20-byte record (per WIRE D-12):
+Each sample is appended as a fixed-width CSV row of exactly 62 bytes:
 
-```
-offset 0..3   seq    u32 little-endian
-offset 4..7   ts_ms  u32 little-endian
-offset 8..11  x      i32 little-endian
-offset 12..15 y      i32 little-endian
-offset 16..19 z      i32 little-endian
+```text
+       seq,         ts_ms,          x,          y,          z\n
+^----10----^^-----14-----^^----11----^^----11----^^----11----^
 ```
 
-No record framing or padding; segment files are pure concatenations of
-20-byte records.
+Columns:
+
+| Column | Width | Type      | Notes                                                      |
+|--------|-------|-----------|------------------------------------------------------------|
+| `seq`  | 10    | u32 ASCII | Right-aligned, space-padded. Matches the wire `seq` field. |
+| `ts_ms`| 14    | i64 ASCII | Right-aligned, space-padded. Sign character counts toward the 14 chars when negative. Carries the synchronised clock value per SPEC-R2-ROCKER-TIMESYNC §2.2 — interpretable standalone (no side file needed). |
+| `x,y,z`| 11 ea | i32 ASCII | Right-aligned, space-padded. Raw ADXL355 LSB values (±8 388 607 at ±2 g range). |
+
+Columns are separated by single commas (`,`) and rows by a single
+newline (`\n`). No CRLF. No header row. Every row is exactly 62 bytes
+so `seek(record_index × 62)` remains valid for boot recovery.
+
+Readers MAY use any whitespace-tolerant CSV reader. For pandas:
+`pd.read_csv(path, header=None, names=['seq','ts_ms','x','y','z'],
+skipinitialspace=True)`.
+
+### 6.2.1 fsync cadence
+
+FATFS-on-ESP-IDF buffers writes in RAM. Without an explicit `fsync`,
+data — and even the FAT directory entries linking to it — can be
+absent from the card when the operator pulls it without an orderly
+shutdown. The firmware shall therefore call `sync_all()` on the
+current segment:
+
+* every **100 records** (≈ 1 s at 100 Hz);
+* on every **segment rotation** (before closing the outgoing
+  segment);
+* on **`Drop`** (e.g. before `esp_restart()`).
+
+This bounds worst-case loss on hot SD removal to roughly one second of
+samples. The cadence is not configurable in v0.2 — operator-supervised
+rig tolerates the fixed value; making it NVS-tunable is a follow-up if
+the cost per fsync turns out to dominate sample-rate margin.
 
 ### 6.3 Segment rotation
 
 A new segment shall be opened when the current segment reaches
-`segment_size_bytes` (default 8 MiB = 419,430 samples ≈ 70 minutes at
-100 Hz). The default is configurable via NVS key `segment_size_mb`
-(u8, default 8).
+`segment_size_bytes` (default 8 MiB ≈ 135,316 records ≈ 22.5 minutes
+at 100 Hz given the 62-byte CSV record). The default is configurable
+via NVS key `segment_size_mb` (u8, default 8).
 
 The firmware shall retain at most `ring_segments` segments (default 12,
 NVS-tunable). When opening a new segment causes the count to exceed
@@ -485,14 +518,21 @@ A snapshot of `(head_seq, tail_seq, last_acked_seq)` is also written to
 
 On boot, the firmware shall:
 
-1. Enumerate `/r2/log.*.bin` segments, sort by segment number.
-2. Open the highest-numbered segment, seek to end, divide by 20 to
-   determine the sample count, read the last record to obtain `tail_seq`
-   (the highest `seq` written).
+1. Enumerate `logNNNN.csv` segments at the SD mount root, sort by
+   segment number.
+2. Open the highest-numbered segment, divide its size by 62 to obtain
+   the record count, seek to `(count - 1) × 62`, read the first 10
+   bytes (the `seq` column), trim whitespace, parse as u32 to obtain
+   `tail_seq`.
 3. Set the in-RAM `seq` counter to `tail_seq + 1`.
 4. Read `last_acked_seq` from NVS; if absent, fall back to
    `/r2/meta.bin`; if both absent, treat as 0 (full retransmission of
    the ring on next connect).
+
+Leftover `.bin` segments from prior firmware versions are ignored on
+boot; operators may delete them manually. They do not block fresh
+`.csv` segments because the segment counter sequence is independent
+across format generations.
 
 ### 6.6 Reconnect replay
 

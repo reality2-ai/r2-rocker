@@ -24,11 +24,10 @@ use esp_idf_svc::hal::delay::FreeRtos;
 use esp_idf_svc::hal::gpio::IOPin;
 use esp_idf_svc::hal::modem::Modem;
 use esp_idf_svc::hal::peripherals::Peripherals;
-use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::sys::{esp_restart, link_patches};
 use log::{error, info, warn};
-use r2_esp::{beacon, l2cap, ota_tcp, reset_tcp, wifi_prov, wifi_sta};
+use r2_esp::{beacon, l2cap, log_tcp, ota_tcp, reset_tcp, wifi_prov, wifi_sta};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 /// Canonical R2-BEACON class string (locked at SPEC-R2-ROCKER-DASHBOARD §6.3
@@ -45,7 +44,13 @@ const PRESENCE_PORT: u16 = 21044;
 
 fn main() -> Result<()> {
     link_patches();
-    EspLogger::initialize_default();
+    // Install the capturing logger early so every subsequent `info!`
+    // / `warn!` is captured for the WiFi-side log fan-out. The TCP
+    // listener itself is started AFTER WiFi is up (below, alongside
+    // ota_tcp / reset_tcp) — if we bind to 0.0.0.0:21045 before lwIP
+    // is initialised the bind never returns and no log_tcp activity
+    // ever appears on UART.
+    log_tcp::install_logger();
 
     info!("================================================");
     info!("r2-rocker firmware v{} (Phase 6 — BLE bootstrap)", env!("CARGO_PKG_VERSION"));
@@ -211,6 +216,11 @@ fn run(
         // Refuses while an OTA is in flight (ota_tcp::ota_in_progress()).
         reset_tcp::start_listener();
         info!("[RESET] receive listener started on TCP 21044");
+
+        // Dev log fan-out on TCP 21045. Bind happens here (post-WiFi)
+        // rather than at the top of main() — see comment on
+        // log_tcp::install_logger above.
+        log_tcp::start_listener();
 
         // UDP presence — closes the dashboard's bootstrap loop. Spawn a
         // short-lived task that sends ~5 packets at 1 s intervals. UDP

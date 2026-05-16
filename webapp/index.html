@@ -121,6 +121,15 @@
   .main {
     display: grid;
     grid-template-columns: 1fr 280px;
+    /* Without `align-items: start`, the grid stretches both columns
+       to match the taller one. When the sidebar (Run Control +
+       Connection Log) is tall, that forced the first row of sensor
+       cards to grow to match — making 2 sensors appear oddly
+       elongated compared to a 3rd that wraps to a new row below.
+       Letting each column take its natural height keeps every
+       chart card the same size regardless of how many sensors
+       are present. */
+    align-items: start;
     gap: 16px;
     padding: 16px;
     max-width: 1600px;
@@ -274,10 +283,42 @@
     margin: 0 auto;
   }
 
-  @media (max-width: 900px) {
-    .main { grid-template-columns: 1fr; }
-    .sensors-area.dual { grid-template-columns: 1fr; }
+  /* Mobile + tablet portrait. Bumped from the original 900px so iPad
+     portrait (1024 CSS px) and similar fall into the stacked layout
+     instead of squashing every card into the left half while the
+     280 px sidebar grabs the right half. Each device — chart card
+     OR fleet card — stacks one above the other. */
+  @media (max-width: 1024px) {
+    .main {
+      grid-template-columns: 1fr;
+      padding: 12px;
+    }
+    /* Sidebar (Run Control, status, connection log) above the
+       sensor charts on mobile — operator's thumb is at the bottom
+       of the screen, so the *content* they're watching belongs
+       lower and the *controls they reach for* belong higher. */
+    .sidebar { order: -1; }
+    .sensors-area,
+    .sensors-area.dual {
+      grid-template-columns: 1fr;
+    }
+    .sensor-card:only-child { grid-column: 1; }
+    .devices-area {
+      grid-template-columns: 1fr;
+    }
     .chart-container { height: 220px; }
+    .header {
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 12px 16px;
+    }
+    .header-controls {
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .devices-main { padding: 12px; }
+    .devices-summary { flex-wrap: wrap; gap: 10px; }
+    .devices-bulk-actions { flex-wrap: wrap; }
   }
 
   /* ── Phase 8a: Devices view ─────────────────────────────────────────── */
@@ -444,6 +485,39 @@
   .btn-reset:hover { background: rgba(245, 158, 11, 0.12); }
   .btn-reset:disabled { opacity: 0.5; cursor: not-allowed; }
 
+  /* Tertiary action — live log tail (slate outline). */
+  .btn-logs {
+    flex: 0 0 auto;
+    background: transparent;
+    color: #94a3b8;
+    border: 1px solid #334155;
+    border-radius: 6px;
+    padding: 7px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .btn-logs:hover { background: rgba(148, 163, 184, 0.10); }
+  .btn-logs.open { color: #4a9eff; border-color: #4a9eff; }
+
+  .device-log-panel {
+    margin-top: 10px;
+    background: #080b10;
+    border: 1px solid #1e293b;
+    border-radius: 6px;
+    padding: 8px 10px;
+    max-height: 180px;
+    overflow-y: auto;
+    font-family: 'SF Mono', Consolas, monospace;
+    font-size: 11px;
+    line-height: 1.55;
+    color: #94a3b8;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .device-log-panel::-webkit-scrollbar { width: 5px; }
+  .device-log-panel::-webkit-scrollbar-track { background: transparent; }
+  .device-log-panel::-webkit-scrollbar-thumb { background: #2a3050; border-radius: 3px; }
+
   .devices-summary {
     display: flex;
     gap: 18px;
@@ -456,6 +530,37 @@
     border-radius: 8px;
   }
   .devices-summary strong { color: #e2e8f0; }
+
+  /* Fleet-wide actions row above the device cards. Mirrors the
+     per-card .btn-update / .btn-reset styling so the relationship
+     is visually obvious (the fleet action is just the card action
+     applied to every card). */
+  .devices-bulk-actions {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+  .btn-bulk-update,
+  .btn-bulk-reset {
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .btn-bulk-update {
+    background: #475569;
+    color: #f1f5f9;
+    border: 0;
+  }
+  .btn-bulk-update:hover { background: #64748b; }
+  .btn-bulk-reset {
+    background: transparent;
+    color: #f59e0b;
+    border: 1px solid #b45309;
+  }
+  .btn-bulk-reset:hover { background: rgba(245, 158, 11, 0.12); }
+  .btn-bulk-update:disabled,
+  .btn-bulk-reset:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>
 </head>
 <body>
@@ -485,6 +590,10 @@
     <span><strong id="dsStale" style="color:#facc15;">0</strong> stale</span>
     <span><strong id="dsOffline" style="color:#64748b;">0</strong> offline</span>
     <span><strong id="dsNeedsUpdate" style="color:#ec4899;">0</strong> needs update</span>
+  </div>
+  <div class="devices-bulk-actions">
+    <button class="btn-bulk-update" id="bulkUpdateBtn" onclick="requestUpdateAll()">⬆ Update All Firmware…</button>
+    <button class="btn-bulk-reset"  id="bulkResetBtn"  onclick="requestResetAll()">↻ Reset All Sensors</button>
   </div>
   <div class="devices-area" id="devicesArea">
     <div class="card" id="devicesPlaceholder" style="color:#475569; text-align:center; padding:40px;">
@@ -541,6 +650,20 @@
     <div class="log-entries" id="logEntries"></div>
   </div>
 </div>
+
+<script>
+// Service worker — caches index.html + /pkg/* so the dashboard shell
+// loads from cache after the first visit. /api/* and /ws/* are
+// passed through to the network. Bump CACHE in sw.js to force a
+// refresh across every connected browser.
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch((err) => {
+      console.warn('[sw] registration failed:', err);
+    });
+  });
+}
+</script>
 
 <script type="module">
 const MAX_POINTS = 200;
@@ -1468,9 +1591,18 @@ function renderDevices() {
         <div class="device-actions">
           <button class="btn-update" onclick="requestFirmwareUpdate('${escapeAttr(s.key)}')">⬆ Update Firmware</button>
           <button class="btn-reset" onclick="requestReset('${escapeAttr(s.key)}')">↻ Reset Sensor</button>
+          <button class="btn-logs ${s.logsOpen ? 'open' : ''}" onclick="toggleLogs('${escapeAttr(s.key)}')">${s.logsOpen ? '↑ Logs' : '↓ Logs'}</button>
         </div>
+        ${s.logsOpen ? `<div class="device-log-panel" data-log-key="${escapeAttr(s.key)}">${escapeText((s._logsLines ?? []).join(''))}</div>` : ''}
       </div>`;
   }).join('');
+
+  // Pin the live-log panel to the bottom after each repaint so new lines
+  // are always visible. (The card is re-rendered once a second, so any
+  // manual scrollback is overwritten anyway.)
+  for (const panel of area.querySelectorAll('.device-log-panel')) {
+    panel.scrollTop = panel.scrollHeight;
+  }
 
   updateDevicesSummary(peers);
 }
@@ -1639,6 +1771,180 @@ async function requestReset(addr) {
   }, 4000);
 }
 
+// Bulk operations across every known peer. The dashboard has no
+// fleet-level endpoint — these are just client-side fan-outs of the
+// existing /api/sensor/{addr}/reset and /api/ota/{addr} routes. We
+// run requests in parallel; OTA per-sensor at ~1.4 MB each, so for
+// two sensors this is fine and gets the job done faster than serial.
+// If the fleet grows past ~4 sensors we may need to cap concurrency.
+async function requestResetAll() {
+  const peers = [...sensors.values()];
+  if (peers.length === 0) return;
+  if (!confirm(`Reset all ${peers.length} sensor(s)?`)) return;
+
+  for (const sensor of peers) sensor.pendingReset = true;
+  renderDevicesIfVisible();
+  updateSensorList();
+
+  await Promise.allSettled(peers.map(async (sensor) => {
+    try {
+      await fetch(`/api/sensor/${encodeURIComponent(sensor.key)}/reset`, { method: 'POST' });
+    } catch (err) {
+      console.warn(`[reset-all] ${sensor.key} failed:`, err);
+    }
+  }));
+
+  // Same 10s failsafe as requestReset — sensors should be back well
+  // before this, and the `pendingReset` flag clears on first fresh
+  // status frame anyway.
+  setTimeout(() => {
+    for (const sensor of peers) sensor.pendingReset = false;
+    renderDevicesIfVisible();
+    updateSensorList();
+  }, 10_000);
+}
+
+async function requestUpdateAll() {
+  const allPeers = [...sensors.values()];
+  if (allPeers.length === 0) return;
+
+  const picker = document.createElement('input');
+  picker.type = 'file';
+  picker.accept = '.bin';
+  picker.onchange = async (ev) => {
+    const file = ev.target.files?.[0];
+    picker.remove();
+    if (!file) return;
+
+    // Filename convention: r2-rocker-firmware-<fw_ver>.bin where
+    // <fw_ver> matches the string baked into the binary and reported
+    // in r2.sensor.announce. If the filename parses, skip any peer
+    // already on that version. If it doesn't parse (operator
+    // renamed the file), push to every peer.
+    const match = file.name.match(/^r2-rocker-firmware-(.+)\.bin$/);
+    const targetFwVer = match ? match[1] : null;
+
+    const targets = targetFwVer
+      ? allPeers.filter((s) => s.fwVer !== targetFwVer)
+      : allPeers;
+
+    if (targets.length === 0) {
+      alert(`All ${allPeers.length} sensor(s) already on ${targetFwVer}.`);
+      return;
+    }
+
+    const skipped = allPeers.length - targets.length;
+    const msg = targetFwVer
+      ? (skipped > 0
+          ? `Push ${targetFwVer} to ${targets.length} sensor(s)? (${skipped} already on this version)`
+          : `Push ${targetFwVer} to ${targets.length} sensor(s)?`)
+      : `Push this firmware to ${targets.length} sensor(s)? (filename doesn't carry a version stamp; pushing to every peer)`;
+    if (!confirm(msg)) return;
+
+    // Flip every target's LED to "OTA in progress" up front so the
+    // operator sees the action take effect immediately. The
+    // pendingOta failsafe in handleOtaEvent normally only arms via
+    // the /ws/status 'uploading' event — replicate that here so
+    // bulk pushes show the same calm-tech indicator.
+    for (const sensor of targets) {
+      sensor.pendingOta = true;
+      if (sensor._otaFailsafe) clearTimeout(sensor._otaFailsafe);
+      sensor._otaFailsafe = setTimeout(() => {
+        if (sensor.pendingOta) {
+          sensor.pendingOta = false;
+          renderDevicesIfVisible();
+          updateSensorList();
+        }
+      }, 90_000);
+    }
+    renderDevicesIfVisible();
+    updateSensorList();
+
+    await Promise.allSettled(targets.map(async (sensor) => {
+      try {
+        const res = await fetch(`/api/ota/${encodeURIComponent(sensor.key)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: file,
+        });
+        if (!res.ok) {
+          const out = await res.json().catch(() => ({}));
+          console.warn(`[ota-all] ${sensor.key} HTTP ${res.status}:`, out);
+        }
+      } catch (err) {
+        console.warn(`[ota-all] ${sensor.key} fetch error:`, err);
+      }
+    }));
+  };
+  document.body.appendChild(picker);
+  picker.click();
+  // Self-destruct the picker after a minute if the user dismisses
+  // the file dialog without picking anything.
+  setTimeout(() => picker.remove(), 60_000);
+}
+
+// Per-sensor live log tail. Opens a WebSocket to the dashboard's
+// /ws/logs/{addr} proxy, which in turn opens TCP to <ip>:21045 on the
+// sensor. Lines stream back as text frames; we keep a rolling 500-line
+// buffer per sensor on the `sensors` map so the panel survives the
+// once-a-second renderDevices() repaint without state on the DOM.
+const LOG_BUFFER_MAX = 500;
+
+function toggleLogs(addr) {
+  const sensor = sensors.get(addr);
+  if (!sensor) return;
+
+  if (sensor.logsOpen) {
+    if (sensor._logsWs) {
+      try { sensor._logsWs.close(); } catch (_) {}
+      sensor._logsWs = null;
+    }
+    sensor.logsOpen = false;
+    renderDevicesIfVisible();
+    return;
+  }
+
+  sensor.logsOpen = true;
+  sensor._logsLines = sensor._logsLines ?? [];
+  // Use same-origin WS so we inherit any future TLS. addr is `ip` (no
+  // port) — Devices-view keys peers by IP.
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const url = `${proto}//${location.host}/ws/logs/${encodeURIComponent(addr)}`;
+  let ws;
+  try {
+    ws = new WebSocket(url);
+  } catch (err) {
+    sensor._logsLines.push(`[ws/logs] open failed: ${err}\n`);
+    renderDevicesIfVisible();
+    return;
+  }
+  sensor._logsWs = ws;
+
+  ws.onopen = () => {
+    sensor._logsLines.push(`[ws/logs] connected to ${addr}:21045\n`);
+    if (sensor._logsLines.length > LOG_BUFFER_MAX)
+      sensor._logsLines.splice(0, sensor._logsLines.length - LOG_BUFFER_MAX);
+    renderDevicesIfVisible();
+  };
+  ws.onmessage = (ev) => {
+    sensor._logsLines.push(String(ev.data));
+    if (sensor._logsLines.length > LOG_BUFFER_MAX)
+      sensor._logsLines.splice(0, sensor._logsLines.length - LOG_BUFFER_MAX);
+    if (sensor.logsOpen) renderDevicesIfVisible();
+  };
+  ws.onclose = () => {
+    if (sensor._logsWs === ws) sensor._logsWs = null;
+    sensor._logsLines.push('[ws/logs] disconnected\n');
+    if (sensor.logsOpen) renderDevicesIfVisible();
+  };
+  ws.onerror = () => {
+    sensor._logsLines.push('[ws/logs] socket error\n');
+    if (sensor.logsOpen) renderDevicesIfVisible();
+  };
+
+  renderDevicesIfVisible();
+}
+
 // Keep online/stale/offline classification fresh even when no events
 // arrive for a while — re-render once a second when Devices is visible.
 // Re-render every second so online/stale/offline classification refreshes
@@ -1660,6 +1966,9 @@ Object.assign(window, {
   closeBootstrapPanel,
   requestFirmwareUpdate,
   requestReset,
+  requestResetAll,
+  requestUpdateAll,
+  toggleLogs,
 });
 </script>
 </body>
