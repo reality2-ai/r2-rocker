@@ -27,6 +27,7 @@ use esp_idf_svc::io::vfs::MountedFatfs;
 use log::{info, warn};
 use std::sync::Arc;
 
+
 /// Mount point — every consumer of the SD ring (§6.1 onwards) opens
 /// files under `<MOUNT_POINT>/r2/log.NNNN.bin`.
 pub const MOUNT_POINT: &str = "/sdcard";
@@ -77,7 +78,18 @@ impl SdCard {
         };
 
         // 2. Probe the card. This is where "no card inserted" surfaces.
-        let card = match SdCardDriver::new_spi(host, &SdCardConfiguration::new()) {
+        //    Diagnostic config: slow 400 kHz init bus (rules out signal-
+        //    integrity issues on T-junctioned MOSI/MISO/SCK), generous
+        //    10 s command timeout in case the card is sluggish on its
+        //    first CMD0 after power-on.
+        let mut sd_cfg = SdCardConfiguration::new();
+        sd_cfg.speed_khz = 400;
+        sd_cfg.command_timeout_ms = 10_000;
+        info!(
+            "[SD] SdCardDriver::new_spi (speed_khz={}, command_timeout_ms={})",
+            sd_cfg.speed_khz, sd_cfg.command_timeout_ms
+        );
+        let card = match SdCardDriver::new_spi(host, &sd_cfg) {
             Ok(c) => c,
             Err(e) => {
                 warn!("[SD] SdCardDriver::new_spi failed: {e} — no card or bad SPI");
@@ -114,9 +126,16 @@ impl SdCard {
 
         // 5. Writable-FS probe. Tries to create a zero-byte file so a
         //    read-only or otherwise-degraded mount fails loudly here.
-        let probe = format!("{}/.r2-mounted", MOUNT_POINT);
+        //    Filename must not start with `.` — ESP-IDF's FATFS layer
+        //    rejects dotfile names with EINVAL even though FAT itself
+        //    has no notion of dotfiles. Use a plain name.
+        let probe = format!("{}/r2-probe.tmp", MOUNT_POINT);
         match std::fs::File::create(&probe) {
-            Ok(_) => info!("[SD] mounted at {} (probe file ok)", MOUNT_POINT),
+            Ok(_) => {
+                info!("[SD] mounted at {} (probe write ok)", MOUNT_POINT);
+                // Clean up; probe file isn't useful after this point.
+                let _ = std::fs::remove_file(&probe);
+            }
             Err(e) => {
                 warn!("[SD] mounted but probe write to {probe} failed: {e}");
                 return None;

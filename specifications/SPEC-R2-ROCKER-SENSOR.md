@@ -412,19 +412,36 @@ exceeds normal smoothing.
 The SD card shall be formatted FAT32 (or FATFS-compatible exFAT for
 cards > 32 GB) with allocation-unit size 32 kB.
 
-The firmware writes to a single directory `/r2/`:
+The firmware writes segments directly under the SD-card mount point
+(spec v0.1 deviation — see note below):
 
 ```
-/r2/
-├─ log.0001.bin     ← sample segment 1 (oldest)
-├─ log.0002.bin     ← sample segment 2
-├─ log.0003.bin     ← sample segment 3 (current write target)
+/sdcard/
+├─ log0001.bin      ← sample segment 1 (oldest)
+├─ log0002.bin      ← sample segment 2
+├─ log0003.bin      ← sample segment 3 (current write target)
 ├─ meta.bin         ← head_seq, tail_seq, last_acked_seq snapshot
 └─ fw.bak/          ← OTA rollback image (optional, §12.8)
 ```
 
-Segments are named `log.NNNN.bin` with a 4-digit zero-padded counter,
+Segments are named `logNNNN.bin` with a 4-digit zero-padded counter,
 incrementing forever (no reuse).
+
+**v0.1 implementation deviations from the original spec layout**:
+
+* Original spec placed segments under `/r2/`. The implementation puts
+  them at the mount root because ESP-IDF's FATFS layer doesn't
+  reliably create subdirectories from `std::fs::create_dir_all` — the
+  call returns Ok without actually creating the directory, then
+  subsequent file opens fail with EINVAL. Cosmetic deviation; the
+  wire format and record layout are unchanged. To be revisited once
+  ESP-IDF's `mkdir` path is shown to be reliable (or we route around it
+  via direct FATFS calls).
+* Original spec named segments `log.NNNN.bin` (two dots — a base, a
+  counter, and an extension). The implementation uses `logNNNN.bin`
+  (single dot, strict 8.3-compatible) because ESP-IDF's FATFS LFN
+  support rejects multi-dot filenames with EINVAL. Naming-only
+  deviation; the on-disk record format is unchanged.
 
 ### 6.2 Record format
 

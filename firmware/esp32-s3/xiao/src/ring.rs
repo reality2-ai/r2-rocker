@@ -35,8 +35,15 @@ const RECORD_BYTES: u64 = 20;
 const SEGMENT_SIZE_BYTES: u64 = 8 * 1024 * 1024;
 /// Ring depth — oldest segment deleted when count would exceed this.
 const RING_SEGMENTS: usize = 12;
-/// Directory under the SD mount point.
-const RING_DIR: &str = "r2";
+/// Subdirectory under the SD mount point. Spec §6.1 places segments
+/// under `/r2/` but ESP-IDF's FATFS layer has been unreliable about
+/// creating subdirectories from `std::fs::create_dir_all` (returns Ok
+/// without actually creating the directory, then subsequent file opens
+/// fail with EINVAL). For v0.1 we put segments at the mount root —
+/// cosmetic spec deviation, no functional impact. Will revisit once
+/// either ESP-IDF or our usage of it can be trusted to create the
+/// subdir reliably.
+const RING_DIR: &str = "";
 
 /// Open ring + writable handle to the current segment. `Drop` flushes
 /// nothing extra — the kernel-side cache and FAT driver handle that.
@@ -81,16 +88,35 @@ impl Ring {
             None => (1, 0),
         };
 
-        // Open the current segment append-only. If it's already at or
-        // past the rotation threshold, append() will roll over on the
-        // first write call — no special-case here.
+        // Open the current segment for writing. ESP-IDF's FATFS layer
+        // is picky about flag combinations:
+        //   * `OpenOptions::append(true)`           → EINVAL
+        //   * `create(true) + write(true)`  (no truncate) → EINVAL
+        //   * `File::create` (O_CREAT|O_TRUNC|O_WRONLY)   → ok
+        //   * `OpenOptions::write(true)`  (no create)     → ok
+        // So branch on existence: `File::create` for fresh segments,
+        // plain `write(true)` open for existing ones — followed by
+        // explicit seek-to-end so we don't overwrite resumed data.
         let path = base.join(segment_name(current_num));
-        let current = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .with_context(|| format!("open {:?} for append", path))?;
-        let current_bytes = fs::metadata(&path)?.len();
+        let path_exists = fs::metadata(&path).is_ok();
+        let mut current = if path_exists {
+            OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .with_context(|| format!("open existing {:?} for write", path))?
+        } else {
+            File::create(&path)
+                .with_context(|| format!("create new {:?}", path))?
+        };
+        let current_bytes = if path_exists {
+            fs::metadata(&path)?.len()
+        } else {
+            0
+        };
+        if current_bytes > 0 {
+            current.seek(SeekFrom::End(0))
+                .with_context(|| format!("seek end on {:?}", path))?;
+        }
 
         info!(
             "[ring] opened {:?} — seg {} ({} bytes, ~{} records), \
@@ -212,11 +238,12 @@ impl Ring {
 
         let next_num = self.current_num.checked_add(1).unwrap_or(1);
         let path = self.base.join(segment_name(next_num));
-        let new_current = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .with_context(|| format!("open {:?} for rotated append", path))?;
+        // Fresh segment — File::create (CREATE | WRITE | TRUNCATE) avoids
+        // the EINVAL-on-append issue in ESP-IDF's FATFS. Truncation is
+        // safe because segment numbers strictly increase, so this file
+        // doesn't exist yet under normal operation.
+        let new_current = File::create(&path)
+            .with_context(|| format!("create {:?} for rotated segment", path))?;
         self.current = new_current;
         self.current_num = next_num;
         self.current_bytes = 0;
@@ -266,12 +293,16 @@ fn enumerate_segments(base: &PathBuf) -> Result<Vec<u32>> {
     Ok(out)
 }
 
+// Spec §6.1 calls for `log.NNNN.bin` but ESP-IDF's FATFS LFN handling
+// rejects multi-dot filenames; we use `logNNNN.bin` (strict 8.3) on
+// disk. Naming-only deviation; the wire / record formats and the boot-
+// recovery logic don't change.
 fn segment_name(num: u32) -> String {
-    format!("log.{:04}.bin", num)
+    format!("log{:04}.bin", num)
 }
 
 fn parse_segment_name(name: &str) -> Option<u32> {
-    name.strip_prefix("log.")
+    name.strip_prefix("log")
         .and_then(|s| s.strip_suffix(".bin"))
         .and_then(|s| s.parse().ok())
 }
@@ -282,18 +313,18 @@ mod tests {
 
     #[test]
     fn parses_segment_name() {
-        assert_eq!(parse_segment_name("log.0001.bin"), Some(1));
-        assert_eq!(parse_segment_name("log.0042.bin"), Some(42));
-        assert_eq!(parse_segment_name("log.9999.bin"), Some(9999));
-        assert_eq!(parse_segment_name("log.0001.txt"), None);
+        assert_eq!(parse_segment_name("log0001.bin"), Some(1));
+        assert_eq!(parse_segment_name("log0042.bin"), Some(42));
+        assert_eq!(parse_segment_name("log9999.bin"), Some(9999));
+        assert_eq!(parse_segment_name("log0001.txt"), None);
         assert_eq!(parse_segment_name("data.0001.bin"), None);
         assert_eq!(parse_segment_name(""), None);
     }
 
     #[test]
     fn formats_segment_name() {
-        assert_eq!(segment_name(1), "log.0001.bin");
-        assert_eq!(segment_name(42), "log.0042.bin");
-        assert_eq!(segment_name(9999), "log.9999.bin");
+        assert_eq!(segment_name(1), "log0001.bin");
+        assert_eq!(segment_name(42), "log0042.bin");
+        assert_eq!(segment_name(9999), "log9999.bin");
     }
 }

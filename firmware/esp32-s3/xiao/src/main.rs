@@ -265,6 +265,11 @@ fn run(
                         return;
                     }
                 };
+                // SD first so its CS line is driven high before the
+                // ADXL355 attach generates SCK pulses on the shared bus.
+                // See the equivalent block in devkitc/src/main.rs for the
+                // full rationale.
+                let _sd = sd::SdCard::try_mount(bus.clone(), cs_sd);
                 let adxl = match adxl355::Adxl355::new(bus.clone(), cs_adxl) {
                     Ok(a) => Some(a),
                     Err(e) => {
@@ -272,7 +277,6 @@ fn run(
                         None
                     }
                 };
-                let _sd = sd::SdCard::try_mount(bus.clone(), cs_sd);
                 let ring = if _sd.is_some() {
                     match ring::Ring::open(sd::MOUNT_POINT) {
                         Ok(r) => {

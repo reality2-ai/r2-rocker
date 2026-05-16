@@ -135,9 +135,12 @@ where
 const FRAME_MS: u64 = 33; // ~30 Hz tick — smooth pulses at low CPU cost
 const HEARTBEAT_BPM: f32 = 60.0;
 /// Global brightness cap applied after `render()`. The DevKitC's onboard
-/// WS2812 has no diffuser — at full RGB it's painfully bright in a room.
-/// 0.20 keeps it ambient/glanceable without losing colour discrimination.
-const BRIGHTNESS: f32 = 0.20;
+/// WS2812 has no diffuser — at full RGB it's painfully bright. 0.70 is
+/// the operator-visible level for an exposed board in normal room light
+/// (bench setting); drop lower (e.g. 0.15-0.20) for stacked / enclosed
+/// deployments where the LED is close to the eye or seen through a
+/// translucent housing.
+const BRIGHTNESS: f32 = 0.70;
 
 fn run_led_loop(
     led: &mut Ws2812Esp32Rmt<'_>,

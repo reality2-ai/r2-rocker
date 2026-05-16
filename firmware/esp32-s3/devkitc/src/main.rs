@@ -259,6 +259,17 @@ fn run(
                         return;
                     }
                 };
+                // Best-effort SD mount on the shared bus FIRST, before the
+                // ADXL355 attaches. The ADXL355 attach runs an init
+                // sequence (soft reset + WHO_AM_I retries) that generates
+                // SCK pulses on the shared bus. If the SD card's CS line
+                // hasn't been claimed by its driver yet, the card sees
+                // those clock pulses without a valid CS and can end up
+                // in an indeterminate state from which CMD0 silently
+                // times out. Registering the SD device first lets
+                // sdspi_host_init_device drive GPIO9 high before any
+                // ADXL355 transactions hit the bus.
+                let _sd = sd::SdCard::try_mount(bus.clone(), cs_sd);
                 let adxl = match adxl355::Adxl355::new(bus.clone(), cs_adxl) {
                     Ok(a) => Some(a),
                     Err(e) => {
@@ -266,11 +277,6 @@ fn run(
                         None
                     }
                 };
-                // Best-effort SD mount on the shared bus. None on failure;
-                // sensor remains useful in streaming-only mode. The mount
-                // guard `_sd` is kept alive for the lifetime of the
-                // sender thread (drop unmounts the FS).
-                let _sd = sd::SdCard::try_mount(bus.clone(), cs_sd);
                 // If the SD path is up, open the ring writer + run boot
                 // recovery (SPEC-R2-ROCKER-SENSOR §6.5). The Sender
                 // takes ownership and uses `Ring::append` on every
