@@ -158,6 +158,12 @@ fn run(
                 Some(w) => (true, Some(w)),
                 None    => {
                     warn!("[boot] wifi_sta::connect returned None — falling through to BLE-only");
+                    // Couldn't join the configured AP (gone / wrong PSK /
+                    // out of range). Drop the LED to BLE-advertise blue
+                    // so the operator can see at a glance we're now
+                    // looking for a fresh #wifi_offer over Bluetooth
+                    // rather than still trying to associate.
+                    led_handle.set(led::LedState::Advertising);
                     (false, None)
                 }
             }

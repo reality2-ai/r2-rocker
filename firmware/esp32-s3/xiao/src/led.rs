@@ -182,7 +182,7 @@ fn render(state: LedState, low_battery: bool, elapsed: Duration) -> RGB8 {
                 rgb(0, 0, 0)
             }
         }
-        LedState::Advertising  => scale(rgb(0x00, 0x40, 0xFF), pulse(elapsed, 1.0)),
+        LedState::Advertising  => scale(rgb(0x00, 0x00, 0xFF), pulse(elapsed, 1.0)),
         LedState::BleConnected => scale(rgb(0x00, 0xC0, 0xC0), pulse(elapsed, 0.4)),
         // Phase 5L v0.1: render WiFi-connecting same as BLE-connected. The
         // spec calls for cyan→yellow flicker; needs a two-colour blend

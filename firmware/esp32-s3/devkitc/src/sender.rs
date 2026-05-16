@@ -144,6 +144,13 @@ impl Sender {
     pub fn run(&mut self) -> ! {
         let mut backoff = RECONNECT_BACKOFF_MS_INIT;
         loop {
+            // Reflect "trying to reach the dashboard" on the LED before
+            // every connect attempt. session() flips it back to a
+            // Streaming* state once the TCP connect succeeds. Without
+            // this the LED stays green through the entire reconnect
+            // window (e.g. when the dashboard cycles the hotspot) and
+            // the operator can't tell that the link is actually down.
+            self.led.set(crate::led::LedState::WifiConnecting);
             match self.session() {
                 Ok(()) => {
                     warn!("sender: session ended cleanly — reconnecting");
@@ -184,6 +191,14 @@ impl Sender {
             .set_write_timeout(Some(Duration::from_secs(5)))
             .ok();
         info!("sender: TCP up to {}", self.gateway);
+
+        // TCP is up — restore the streaming-state LED. `real_adxl`
+        // decides green-heartbeat vs amber-heartbeat (sim fallback).
+        self.led.set(if self.adxl.is_some() {
+            crate::led::LedState::StreamingLive
+        } else {
+            crate::led::LedState::StreamingDegradedSim
+        });
 
         self.send_announce(&mut stream).context("send_announce")?;
 

@@ -52,6 +52,14 @@ pub struct BootstrapConfig {
     pub psk: Option<String>,
     pub scan_secs: u64,
     pub target_class: String,
+    /// When true, the engine tears down any existing matching hotspot
+    /// before bringing one up, even if one is already active on the
+    /// right adapter. Sensors currently joined to that hotspot lose
+    /// WiFi and fall back to BLE advertising — which is the only
+    /// path back into the bootstrap flow if the operator wants to
+    /// re-push credentials to an already-streaming sensor. Set this
+    /// when the operator re-presses "Connect Sensors".
+    pub cycle_hotspot: bool,
 }
 
 /// Events emitted during the bootstrap process.
@@ -391,6 +399,15 @@ async fn setup_wifi_credentials(
             Ok((s.clone(), p.clone(), our_ip))
         }
         _ => {
+            if config.cycle_hotspot {
+                let _ = progress_tx.send(BootstrapEvent::Log(
+                    "Cycling hotspot — bringing it down so connected sensors fall back to BLE...".into()
+                )).await;
+                bring_down_matching_hotspot();
+                // Brief settle window so NetworkManager processes the down
+                // transition before we ask it to bring a fresh one up.
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
             let _ = progress_tx.send(BootstrapEvent::Log(
                 "No SSID/PSK provided — creating WiFi hotspot...".into()
             )).await;
@@ -404,10 +421,59 @@ async fn setup_wifi_credentials(
     }
 }
 
+/// Take down any currently-active AP-mode connection whose SSID is our
+/// `HOTSPOT_SSID`. Sensors joined to it will lose WiFi within a few
+/// seconds; firmware-side keepalive failure forces them back to BLE
+/// advertising where `run_bootstrap` can re-push credentials.
+fn bring_down_matching_hotspot() {
+    let out = match Command::new("nmcli")
+        .args(["-t", "-f", "NAME,TYPE,STATE", "con", "show", "--active"])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return,
+    };
+    let s = String::from_utf8_lossy(&out.stdout);
+    for line in s.lines() {
+        let parts: Vec<&str> = line.splitn(3, ':').collect();
+        if parts.len() < 3 { continue; }
+        let (name, typ, state) = (parts[0], parts[1], parts[2]);
+        if typ != "802-11-wireless" || state != "activated" { continue; }
+        // Confirm it's an AP — never tear down a station-mode connection.
+        let mode_out = Command::new("nmcli")
+            .args(["-t", "-g", "802-11-wireless.mode", "con", "show", name])
+            .output().ok();
+        let mode = mode_out
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        if mode != "ap" { continue; }
+        // Confirm SSID matches our well-known hotspot — don't break
+        // the operator's own LAN hotspot if they happen to be hosting one.
+        let ssid_out = Command::new("nmcli")
+            .args(["-t", "-g", "802-11-wireless.ssid", "con", "show", name])
+            .output().ok();
+        let ssid = ssid_out
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        if ssid != HOTSPOT_SSID { continue; }
+        eprintln!("[bootstrap] cycling hotspot '{}'", name);
+        let _ = Command::new("nmcli").args(["con", "down", name]).output();
+    }
+}
+
 /// Query which sensor IPs currently have active TCP data connections to the dashboard.
 ///
 /// Runs `ss -tnp` and extracts remote IPs from connections owned by `r2-dashboard`
 /// on `EVENT_PORT`. Returns an empty set if the command fails.
+///
+/// Filters out sockets with backed-up Send-Q. When a sensor disappears
+/// abruptly (chip reset, WiFi drop), the dashboard's read-timeout
+/// closes its end but the kernel TCP entry lingers in `ESTAB` for the
+/// retransmit-timeout window (~15 min default) — leaving ghost
+/// connections that look "streaming" to this scan. Real streaming
+/// connections have Send-Q ≈ 0 because the sensor ACKs the
+/// dashboard's pong/ack frames immediately; a non-zero Send-Q means
+/// nothing has been ACKed in a while and the peer is effectively gone.
 fn get_active_sensor_ips(port: u16) -> HashSet<String> {
     let output = Command::new("sh")
         .args(["-c", &format!(
@@ -420,12 +486,16 @@ fn get_active_sensor_ips(port: u16) -> HashSet<String> {
     let mut ips = HashSet::new();
     for line in s.lines() {
         // Line format: "ESTAB 0 0 local_ip:port remote_ip:remote_port ..."
+        // Columns: State, Recv-Q, Send-Q, Local, Peer, [Process].
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 5 {
-            let remote = parts[4]; // e.g. "10.42.0.140:54628"
-            if let Some(ip) = remote.rsplitn(2, ':').nth(1) {
-                ips.insert(ip.to_string());
-            }
+        if parts.len() < 5 { continue; }
+        // Skip ghost ESTABs with stuck Send-Q (sensor gone, kernel
+        // still retrying retransmits).
+        let send_q: u32 = parts[2].parse().unwrap_or(0);
+        if send_q > 0 { continue; }
+        let remote = parts[4];
+        if let Some(ip) = remote.rsplitn(2, ':').nth(1) {
+            ips.insert(ip.to_string());
         }
     }
     ips
@@ -976,6 +1046,13 @@ fn create_hotspot() -> Result<(String, String, Option<String>)> {
     if let Some((ssid, psk, ip)) = find_active_hotspot_on(&free_iface) {
         return Ok((ssid, psk, ip));
     }
+
+    // Note: callers that want to cycle the hotspot (e.g. operator
+    // re-pressing "Connect Sensors" to force every currently-connected
+    // sensor to drop WiFi and re-bootstrap) call `cycle_hotspot` BEFORE
+    // calling this function, so by the time we get here the previous
+    // hotspot is already down and the fall-through below creates a
+    // fresh one.
 
     // If a hotspot is active on the wrong adapter, tear it down first.
     // Otherwise NM will refuse to start a second hotspot on the spare

@@ -665,6 +665,13 @@ async fn bootstrap_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
         // on the wire to 0x6A3B0860. Sensor firmware (Phase 6) MUST
         // advertise the same string. See SPEC-R2-ROCKER-DASHBOARD §6.3.
         target_class: "nz.ac.auckland.rocker.sensor".to_string(),
+        // Always cycle the hotspot on a fresh bootstrap press. Sensors
+        // currently joined to the existing hotspot will lose WiFi for
+        // a few seconds and fall back to BLE advertising, which is the
+        // only path through which `run_bootstrap` can re-push
+        // credentials. Without this, pressing "Connect Sensors" while
+        // a sensor is already streaming does nothing for that sensor.
+        cycle_hotspot: true,
     };
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<BootstrapEvent>(64);

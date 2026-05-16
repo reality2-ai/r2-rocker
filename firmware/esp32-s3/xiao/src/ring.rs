@@ -59,6 +59,11 @@ const RING_SEGMENTS: usize = 12;
 /// 100 records ≈ 1 s at 100 Hz — a reasonable bound on worst-case data
 /// loss on hot SD-pull. `rotate()` and `Drop` also sync.
 const SYNC_EVERY_N_RECORDS: u32 = 100;
+/// Diagnostic heartbeat cadence. Every N appends, the ring logs one
+/// line with current segment + byte count so an operator tailing
+/// `log_tcp` can confirm the writer is making progress without
+/// having to pull the SD card. 6000 ≈ once per minute at 100 Hz.
+const HEARTBEAT_EVERY_N_RECORDS: u32 = 6000;
 /// Subdirectory under the SD mount point. Spec §6.1 places segments
 /// under `/r2/` but ESP-IDF's FATFS layer has been unreliable about
 /// creating subdirectories from `std::fs::create_dir_all` (returns Ok
@@ -80,6 +85,7 @@ pub struct Ring {
     current_bytes: u64,
     tail_seq: u32,
     records_since_sync: u32,
+    records_since_heartbeat: u32,
 }
 
 impl Ring {
@@ -165,6 +171,7 @@ impl Ring {
             current_bytes,
             tail_seq,
             records_since_sync: 0,
+            records_since_heartbeat: 0,
         })
     }
 
@@ -230,6 +237,18 @@ impl Ring {
                 warn!("[ring] periodic sync_all failed: {} — continuing", e);
             }
             self.records_since_sync = 0;
+        }
+
+        self.records_since_heartbeat = self.records_since_heartbeat.saturating_add(1);
+        if self.records_since_heartbeat >= HEARTBEAT_EVERY_N_RECORDS {
+            info!(
+                "[ring] heartbeat — seg {} @ {} bytes ({} records), tail_seq={}",
+                self.current_num,
+                self.current_bytes,
+                self.current_bytes / RECORD_BYTES,
+                self.tail_seq,
+            );
+            self.records_since_heartbeat = 0;
         }
         Ok(())
     }
@@ -311,6 +330,7 @@ impl Ring {
         self.current_num = next_num;
         self.current_bytes = 0;
         self.records_since_sync = 0;
+        self.records_since_heartbeat = 0;
         info!("[ring] rotated to segment {}", next_num);
 
         // Enforce ring depth. Always keep the segment we just opened —
