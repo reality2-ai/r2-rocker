@@ -21,6 +21,7 @@
 //! or `riscv32*-esp-espidf`). It is excluded from the workspace's
 //! default build.
 
+pub mod data_tcp;
 pub mod hive_id;
 pub mod log_tcp;
 pub mod ota_tcp;

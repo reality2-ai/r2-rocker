@@ -44,6 +44,11 @@ pub const EVT_SENSOR_SYNC_PONG:    u32 = fnv1a_32(b"r2.sensor.sync_pong");
 pub const EVT_DASH_ACK:              u32 = fnv1a_32(b"r2.dash.ack");
 pub const EVT_DASH_SYNC_PULSE:       u32 = fnv1a_32(b"r2.dash.sync_pulse");
 pub const EVT_DASH_SET_CLOCK_OFFSET: u32 = fnv1a_32(b"r2.dash.set_clock_offset");
+// Capture session events (SPEC-R2-ROCKER-CAPTURE §3).
+pub const EVT_DASH_CAPTURE_START:    u32 = fnv1a_32(b"r2.dash.capture.start");
+pub const EVT_DASH_CAPTURE_MARK:     u32 = fnv1a_32(b"r2.dash.capture.mark");
+pub const EVT_DASH_CAPTURE_STOP:     u32 = fnv1a_32(b"r2.dash.capture.stop");
+pub const EVT_SENSOR_CAPTURE_STATE:  u32 = fnv1a_32(b"r2.sensor.capture.state");
 
 // ── R2-WIRE compact frame ────────────────────────────────────────────────
 
@@ -258,6 +263,91 @@ pub fn parse_set_clock_offset(payload: &[u8]) -> Option<i64> {
     match mt {
         MT_UINT   => i64::try_from(mag).ok(),
         MT_NEGINT => Some(-1i64 - (mag as i64)),
+        _ => None,
+    }
+}
+
+/// Parse `r2.dash.capture.mark` — a CBOR map `{0: i64 ts_ms, 1: str name}` per
+/// SPEC-R2-ROCKER-CAPTURE §3. Returns `(ts_ms, name)` on success. `name`
+/// is validated downstream by the capture sentant against the
+/// `[A-Za-z0-9_-]{1,32}` charset (§3 last paragraph) — this parser
+/// just hands back whatever bytes the dashboard sent.
+pub fn parse_capture_mark<'a>(payload: &'a [u8]) -> Option<(i64, &'a str)> {
+    let mut p = 0;
+    if payload.len() <= p { return None; }
+    let head = payload[p]; p += 1;
+    if head & 0xE0 != MT_MAP { return None; }
+    let n_entries = (head & 0x1F) as usize;
+    if n_entries < 2 { return None; }
+
+    let mut ts_ms: Option<i64> = None;
+    let mut name: Option<&'a str> = None;
+
+    // Parse exactly the first two map entries we expect; any extras are
+    // tolerated but unused.
+    for _ in 0..n_entries {
+        if payload.len() <= p { return None; }
+        let kh = payload[p]; p += 1;
+        // We expect single-byte uint keys 0 and 1.
+        if kh & 0xE0 != MT_UINT { return None; }
+        let key = (kh & 0x1F) as u8;
+        if payload.len() <= p { return None; }
+        let vh = payload[p];
+        let mt = vh & 0xE0;
+        match (key, mt) {
+            (0, MT_UINT) | (0, MT_NEGINT) => {
+                let (mag, mt2, used) = read_cbor_int_at(&payload[p..])?;
+                p += used;
+                ts_ms = Some(match mt2 {
+                    MT_UINT   => i64::try_from(mag).ok()?,
+                    MT_NEGINT => -1i64 - (mag as i64),
+                    _ => return None,
+                });
+            }
+            (1, MT_TEXT) => {
+                let (mag, _mt2, used) = read_cbor_string_head_at(&payload[p..])?;
+                p += used;
+                let len = mag as usize;
+                if payload.len() < p + len { return None; }
+                let s = core::str::from_utf8(&payload[p..p + len]).ok()?;
+                p += len;
+                name = Some(s);
+            }
+            _ => {
+                // Skip an unknown key/value pair. We only handle uint and
+                // text values in this parser; if the dashboard sends
+                // something else, refuse the whole frame so we don't
+                // mis-attribute fields.
+                return None;
+            }
+        }
+    }
+
+    Some((ts_ms?, name?))
+}
+
+/// Read a CBOR string head (MT_BYTES or MT_TEXT) and return its byte
+/// length. Helper for `parse_capture_mark`.
+fn read_cbor_string_head_at(buf: &[u8]) -> Option<(u64, u8, usize)> {
+    if buf.is_empty() { return None; }
+    let head = buf[0];
+    let mt = head & 0xE0;
+    if mt != MT_TEXT && mt != MT_BYTES { return None; }
+    let arg = head & 0x1F;
+    match arg {
+        0..=23 => Some((arg as u64, mt, 1)),
+        24 => {
+            if buf.len() < 2 { return None; }
+            Some((buf[1] as u64, mt, 2))
+        }
+        25 => {
+            if buf.len() < 3 { return None; }
+            Some((u16::from_be_bytes([buf[1], buf[2]]) as u64, mt, 3))
+        }
+        26 => {
+            if buf.len() < 5 { return None; }
+            Some((u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as u64, mt, 5))
+        }
         _ => None,
     }
 }

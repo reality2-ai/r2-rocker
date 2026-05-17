@@ -324,6 +324,13 @@ whichever occurs first (per WIRE §4.1).
 | `/api/bootstrap/status` | GET | `{running: bool, log: [...]}` snapshot |
 | `/api/ota` | POST `{pk, url, sha256}` | Trigger OTA (§13) |
 | `/api/reset/:pk` | POST `{factory: bool}` | Forward to sensor |
+| `/api/capture/start` | POST `{}` | Issue an immediate sync_pulse round (per SPEC-R2-ROCKER-CAPTURE §7.1), then fan out `r2.dash.capture.start` to every connected peer. |
+| `/api/capture/mark` | POST `{name: str}` | Fan out `r2.dash.capture.mark` to every connected peer with the dashboard's chosen `ts_ms` (one value, shared across the fleet so filenames match). |
+| `/api/capture/stop` | POST `{}` | Fan out `r2.dash.capture.stop`. |
+| `/api/data/{addr}/list` | GET | Open a TCP connection to `<addr>:21047` and issue `LIST`. Returns a JSON-mapped CBOR response of `[{name, size, mtime}]`. |
+| `/api/data/{addr}/file/{name}` | GET, DELETE | `GET` opens TCP 21047 and proxies the file bytes through. `DELETE` issues `DEL`. |
+| `/api/data/{addr}/all` | DELETE | `DEL_ALL` against the named sensor. |
+| `/api/data/merged` | GET `?file=<basename>` | Heap-merges the same-named capture from every connected sensor into a single long-format CSV (`ts_ms, sensor, x, y, z` ascending). |
 | `/ws/raw` | WebSocket | **Binary** R2-WIRE frames forwarded verbatim from sensors (canonical Phase-5d transport) |
 | `/ws/status` | WebSocket | **Text JSON** status events: bootstrap progress, hotspot up/down, server-side errors |
 
@@ -408,13 +415,23 @@ signal this to viewers).
 The dashboard SHALL ensure a WiFi hotspot is active before starting
 discovery:
 
-1. Check NetworkManager for a hotspot connection on the configured
-   adapter (default `wlan0` on Pi, configurable per host).
-2. If active, reuse it.
-3. If not, create one via `nmcli connection add type wifi mode ap`
-   with SSID `r2-rocker-<6 hex>` and a random WPA2-PSK regenerated
-   only if no prior `r2-rocker` profile exists.
-4. Wait for the hotspot to be ready (carrier up, IP assigned).
+1. **Cycle the existing hotspot, if any.** When the bootstrap loop
+   is (re)started, the dashboard sets
+   `BootstrapConfig.cycle_hotspot = true`, which tells the engine to
+   tear down the active `r2-rocker-*` AP-mode connection on the
+   spare adapter before bringing one up. Any sensor still latched
+   to the old hotspot loses WiFi and falls back to BLE — the only
+   path through which `run_bootstrap` can re-push credentials to a
+   sensor that was already streaming. Without this, pressing
+   "Connect Sensors" while a sensor is already happily connected
+   is a no-op for that sensor.
+2. Check NetworkManager for a hotspot connection on the spare
+   adapter (the dashboard refuses to host the hotspot on the
+   internet-carrying adapter — see §14 / `find_free_wifi_interface`).
+3. If active and matches the desired SSID, reuse it.
+4. If not, create one via `nmcli dev wifi hotspot ifname …` with
+   the fixed SSID `R2-rocker` and `HOTSPOT_PSK`.
+5. Wait for the hotspot to be ready (carrier up, IP assigned).
 
 The hotspot's gateway IP (typically 10.42.0.1 with NetworkManager) is
 the value embedded in `#wifi_offer.gateway_ip`.
@@ -826,13 +843,17 @@ unauthenticated rate limit. Webapp polls every 60 s.
 
 ```
 GET /api/firmware/{carrier}/binary
-→ 302 redirect to the GitHub asset URL (when source = "github")
-→ application/octet-stream stream of the file (when source = "local")
+→ application/octet-stream stream of the .bin bytes
 ```
 
-Public repo + a 302 keeps the dashboard out of the data path for
-GitHub-hosted assets. The webapp's `fetch()` follows the redirect
-and gets the bytes from GitHub's CDN directly.
+The dashboard always **proxies** the bytes (rather than 302-ing the
+browser to GitHub directly). v0.2 originally used a 302 to keep the
+dashboard out of the data path, but GitHub release-download URLs
+don't set `Access-Control-Allow-Origin`, so a redirect from a
+webapp `fetch()` gets blocked by CORS. Proxying the bytes — same
+origin from the browser's perspective — sidesteps that. For
+`source: github` the dashboard streams via `curl -sSL`; for
+`source: local` it reads the file off disk.
 
 **Release-mode firmware build:**
 

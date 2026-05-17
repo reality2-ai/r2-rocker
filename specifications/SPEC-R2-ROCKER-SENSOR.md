@@ -417,12 +417,23 @@ The firmware writes segments directly under the SD-card mount point
 
 ```
 /sdcard/
-├─ log0001.csv      ← sample segment 1 (oldest)
-├─ log0002.csv      ← sample segment 2
-├─ log0003.csv      ← sample segment 3 (current write target)
+├─ log0001.csv      ← rolling-ring segment 1 (oldest)
+├─ log0002.csv      ← rolling-ring segment 2
+├─ log0003.csv      ← rolling-ring segment 3 (current write target)
 ├─ meta.bin         ← head_seq, tail_seq, last_acked_seq snapshot
+├─ captures/       ← named experimental captures (SPEC-R2-ROCKER-CAPTURE)
+│  ├─ 0001779000000000-run-01.csv
+│  └─ 0001779000003000-run-02.csv
 └─ fw.bak/          ← OTA rollback image (optional, §12.8)
 ```
+
+The rolling ring (`logNNNN.csv`) and the named captures
+(`captures/<ts16>-<name>.csv`, per SPEC-R2-ROCKER-CAPTURE)
+**SHALL** coexist. The ring is the always-on durable backstop
+for the live stream and writes raw (uncalibrated) samples; the
+captures directory holds operator-named experimental runs with
+calibration offsets applied. Neither one is conditional on the
+other being present.
 
 Segments are named `logNNNN.csv` with a 4-digit zero-padded counter,
 incrementing forever (no reuse).

@@ -4,14 +4,21 @@
 //!   * UART / USB-Serial-JTAG console output is preserved (the inner
 //!     EspLogger is called for every record).
 //!   * Each formatted log line is also broadcast to every connected
-//!     TCP client on port 21045.
+//!     TCP client on port 21046.
 //!
 //! Connect from a workstation on the hotspot:
-//!     `nc <sensor-ip> 21045`  →  live tail
+//!     `nc <sensor-ip> 21046`  →  live tail
 //!
 //! Used by the dashboard's per-sensor "Logs" panel via a WS proxy.
 //! Per-client queue is bounded; the log path can never block on a
 //! slow reader (overflowing lines are dropped silently).
+//!
+//! Port choice: 21045 was the original allocation but it collides
+//! with the canonical R2 Console / GraphQL port (R2-TRANSPORT §5
+//! port table, R2-CONSOLE §3.2). 21046 is the first port above
+//! the canonical R2 21042..21045 block and remains within the
+//! rocker's contiguous allocation. Per
+//! `audits/2026-05-18-post-v0.1.0-conformance.md` Finding F.
 
 use esp_idf_svc::log::EspLogger;
 use log::{Log, Metadata, Record};
@@ -21,7 +28,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::Mutex;
 
-const LOG_PORT: u16 = 21045;
+const LOG_PORT: u16 = 21046;
 /// Per-subscriber bounded queue. Lines beyond this drop silently — the
 /// log path must never backpressure the writer (which could deadlock
 /// the system if a slow client is sluggish).
@@ -94,7 +101,7 @@ pub fn install_logger() {
 }
 
 /// Spawn the TCP listener thread. Call once WiFi is up so the bind
-/// against `0.0.0.0:21045` actually succeeds. Idempotent — subsequent
+/// against `0.0.0.0:21046` actually succeeds. Idempotent — subsequent
 /// calls are no-ops.
 pub fn start_listener() {
     if LISTENER_STARTED.swap(true, Ordering::SeqCst) {

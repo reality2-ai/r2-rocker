@@ -50,20 +50,11 @@ const SENSOR_ANNOUNCE:     u32 = r2_fnv::fnv1a_32(b"r2.sensor.announce");
 const DASH_ACK:               u32 = r2_fnv::fnv1a_32(b"r2.dash.ack");
 const DASH_SYNC_PULSE:        u32 = r2_fnv::fnv1a_32(b"r2.dash.sync_pulse");
 const DASH_SET_CLOCK_OFFSET:  u32 = r2_fnv::fnv1a_32(b"r2.dash.set_clock_offset");
-
-// Legacy M10-demo names retained so a mixed deployment with prior-gen
-// sensors still parses. Remove when M10 sensors retire.
-const LEGACY_ACCELERATION: u32 = r2_fnv::fnv1a_32(b"acceleration");
-const LEGACY_BATTERY:      u32 = r2_fnv::fnv1a_32(b"battery_status");
-const LEGACY_RUN_STATE:    u32 = r2_fnv::fnv1a_32(b"run_state");
-const LEGACY_GYROSCOPE:    u32 = r2_fnv::fnv1a_32(b"gyroscope");
-
-// Browser → sensor command hashes (kept for backward compat).
-const CMD_START:     u32 = r2_fnv::fnv1a_32(b"cmd_start");
-const CMD_STOP:      u32 = r2_fnv::fnv1a_32(b"cmd_stop");
-const CMD_MARK:      u32 = r2_fnv::fnv1a_32(b"cmd_mark");
-const CMD_CALIBRATE: u32 = r2_fnv::fnv1a_32(b"cmd_calibrate");
-const SHUTDOWN:      u32 = r2_fnv::fnv1a_32(b"shutdown");
+// Capture session (SPEC-R2-ROCKER-CAPTURE §3).
+const DASH_CAPTURE_START:     u32 = r2_fnv::fnv1a_32(b"r2.dash.capture.start");
+const DASH_CAPTURE_MARK:      u32 = r2_fnv::fnv1a_32(b"r2.dash.capture.mark");
+const DASH_CAPTURE_STOP:      u32 = r2_fnv::fnv1a_32(b"r2.dash.capture.stop");
+const SENSOR_CAPTURE_STATE:   u32 = r2_fnv::fnv1a_32(b"r2.sensor.capture.state");
 
 /// Map hash → human-readable name shipped to the browser.
 fn event_name(hash: u32) -> &'static str {
@@ -76,15 +67,7 @@ fn event_name(hash: u32) -> &'static str {
         SENSOR_CAL_RESP           => "r2.sensor.cal.sample.resp",
         SENSOR_SYNC_PONG          => "r2.sensor.sync_pong",
         SENSOR_ANNOUNCE           => "r2.sensor.announce",
-        LEGACY_ACCELERATION       => "acceleration",
-        LEGACY_BATTERY            => "battery_status",
-        LEGACY_RUN_STATE          => "run_state",
-        LEGACY_GYROSCOPE          => "gyroscope",
-        CMD_START                 => "cmd_start",
-        CMD_STOP                  => "cmd_stop",
-        CMD_MARK                  => "cmd_mark",
-        CMD_CALIBRATE             => "cmd_calibrate",
-        SHUTDOWN                  => "shutdown",
+        SENSOR_CAPTURE_STATE      => "r2.sensor.capture.state",
         _                         => "unknown",
     }
 }
@@ -327,6 +310,37 @@ fn encode_sync_pulse(req_id: u32, dash_ts_ms: u64) -> Vec<u8> {
         let _ = enc.map(2);
         let _ = enc.kv(0, &r2_cbor::Value::UInt(req_id as u64));
         let _ = enc.kv(1, &r2_cbor::Value::UInt(dash_ts_ms));
+        enc.len()
+    };
+    buf[..used].to_vec()
+}
+
+/// Encode `r2.dash.capture.mark` payload `{0: ts_ms i64, 1: name str}`
+/// per SPEC-R2-ROCKER-CAPTURE §3.
+fn encode_capture_mark(ts_ms: i64, name: &str) -> Vec<u8> {
+    let mut buf = vec![0u8; 8 + 8 + name.len() + 8];
+    let used = {
+        let mut enc = r2_cbor::Encoder::new(&mut buf);
+        let _ = enc.map(2);
+        let v_ts = if ts_ms >= 0 {
+            r2_cbor::Value::UInt(ts_ms as u64)
+        } else {
+            r2_cbor::Value::NegInt(ts_ms)
+        };
+        let _ = enc.kv(0, &v_ts);
+        let _ = enc.kv(1, &r2_cbor::Value::Text(name));
+        enc.len()
+    };
+    buf.truncate(used);
+    buf
+}
+
+/// Encode `r2.dash.capture.start` / `r2.dash.capture.stop` empty payload (`{}`).
+fn encode_empty_map() -> Vec<u8> {
+    let mut buf = [0u8; 4];
+    let used = {
+        let mut enc = r2_cbor::Encoder::new(&mut buf);
+        let _ = enc.map(0);
         enc.len()
     };
     buf[..used].to_vec()
@@ -614,7 +628,7 @@ async fn main() {
             move |ws| ws_status_handler(ws, ws_state)
         }))
         // Per-sensor live log tail. Opens a TCP connection to the sensor's
-        // log_tcp listener (port 21045) and pipes lines back as WS text
+        // log_tcp listener (port 21046) and pipes lines back as WS text
         // frames. Used by the per-card "↓ Logs" panel in the webapp.
         .route("/ws/logs/{addr}", get(ws_logs_handler))
         // Phase 5d: TG public key + KeyHolder enrolment endpoints.
@@ -634,6 +648,20 @@ async fn main() {
         // announce fw_ver for the "needs update" dot.
         .route("/api/firmware/available", get(firmware_available_handler))
         .route("/api/firmware/{carrier}/binary", get(firmware_binary_handler))
+        // SPEC-R2-ROCKER-CAPTURE — named experimental captures.
+        // Start triggers an immediate sync_pulse round (per §7.1) +
+        // capture.start fan-out; Mark fans out capture.mark with the
+        // dashboard's chosen ts_ms; Stop fans out capture.stop.
+        .route("/api/capture/start", post(capture_start_handler))
+        .route("/api/capture/mark",  post(capture_mark_handler))
+        .route("/api/capture/stop",  post(capture_stop_handler))
+        // SPEC-R2-ROCKER-CAPTURE — capture-file listing / fetch / delete.
+        // Each route opens a fresh TCP connection to <addr>:21047 on
+        // the sensor and proxies the data_tcp wire protocol.
+        .route("/api/data/{addr}/list",        get(data_list_handler))
+        .route("/api/data/{addr}/file/{name}", get(data_get_handler).delete(data_delete_handler))
+        .route("/api/data/{addr}/all",         axum::routing::delete(data_delete_all_handler))
+        .route("/api/data/merged",             get(data_merged_handler))
         .route("/api/version", get(version_handler));
 
     // Serve the WASM viewer (webapp/) as the dashboard root if the
@@ -1812,7 +1840,7 @@ async fn handle_ws_status(mut socket: WebSocket, state: Arc<AppState>) {
 
 /// `/ws/logs/{addr}` — per-sensor live log tail.
 ///
-/// Opens a TCP socket to `<addr>:21045` (the firmware's `log_tcp`
+/// Opens a TCP socket to `<addr>:21046` (the firmware's `log_tcp`
 /// listener) and pipes each newline-terminated line back to the WS
 /// client as a text frame. Closes when either side disconnects.
 ///
@@ -1827,7 +1855,7 @@ async fn ws_logs_handler(
 
 async fn handle_ws_logs(mut socket: WebSocket, addr: String) {
     let ip_only: &str = addr.split(':').next().unwrap_or(&addr);
-    let target = format!("{}:21045", ip_only);
+    let target = format!("{}:21046", ip_only);
     eprintln!("[ws/logs] viewer requested tail of {}", target);
 
     let stream = match tokio::time::timeout(
@@ -1960,9 +1988,40 @@ async fn firmware_binary_handler(
     };
 
     if snapshot.source == "github" {
-        // Asset URL is the github.com/.../releases/download/... path.
-        // Browser fetches direct from GH's CDN — no proxy needed.
-        return axum::response::Redirect::temporary(&asset.url).into_response();
+        // Proxy the asset through the dashboard rather than 302-ing
+        // the browser to GitHub's CDN — GitHub release-download URLs
+        // don't include `Access-Control-Allow-Origin`, so a redirect
+        // from a webapp `fetch()` gets blocked by CORS. Streaming
+        // via curl here keeps the request same-origin from the
+        // browser's perspective.
+        let asset_url = asset.url.clone();
+        let output = tokio::process::Command::new("curl")
+            .args([
+                "-sSL",                // follow redirects (GH issues a redirect to S3)
+                "--max-time", "60",
+                "-H", "User-Agent: r2-rocker-dashboard",
+                &asset_url,
+            ])
+            .output()
+            .await;
+        return match output {
+            Ok(out) if out.status.success() => (
+                axum::http::StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+                out.stdout,
+            ).into_response(),
+            Ok(out) => (
+                axum::http::StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": format!("curl proxy of {} failed: status {}", asset_url, out.status),
+                    "stderr": String::from_utf8_lossy(&out.stderr).to_string(),
+                })),
+            ).into_response(),
+            Err(e) => (
+                axum::http::StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": format!("curl spawn failed: {}", e) })),
+            ).into_response(),
+        };
     }
 
     // Local source — read the file from disk and stream it back.
@@ -1983,68 +2042,63 @@ async fn firmware_binary_handler(
 /// Build a fresh FirmwareAvailable snapshot by querying GitHub then
 /// falling back to the local releases dir.
 async fn build_firmware_snapshot(now_ms: u64) -> FirmwareAvailable {
-    // ── GitHub query ──
-    let gh_url = format!(
-        "https://api.github.com/repos/{}/releases/latest",
-        GITHUB_OWNER_REPO,
-    );
-    let gh_result = tokio::process::Command::new("curl")
-        .args([
-            "-sS",
-            "--max-time", "5",
-            "-H", "Accept: application/vnd.github+json",
-            "-H", "User-Agent: r2-rocker-dashboard",
-            &gh_url,
-        ])
-        .output()
-        .await;
+    // Query GitHub Releases AND scan the local releases/ dir in
+    // parallel, then pick whichever is newer. v0.1 of this endpoint
+    // preferred GitHub unconditionally, which broke the day-to-day
+    // dev loop: every fresh local build was ignored in favour of the
+    // stale GitHub Release tag. v0.2 compares the local newest-mtime
+    // against the GitHub release's `published_at` and picks the
+    // newer one, so a freshly-built local .bin always wins until the
+    // operator cuts a fresh tag.
 
-    if let Ok(output) = gh_result {
-        if output.status.success() {
-            if let Ok(body) = String::from_utf8(output.stdout) {
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
-                    if let Some(tag) = json.get("tag_name").and_then(|v| v.as_str()) {
-                        let mut assets = Vec::new();
-                        if let Some(arr) = json.get("assets").and_then(|v| v.as_array()) {
-                            for a in arr {
-                                let name = a.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                                let url = a.get("browser_download_url").and_then(|v| v.as_str()).unwrap_or("");
-                                let size = a.get("size").and_then(|v| v.as_u64());
-                                if !name.ends_with(".bin") { continue; }
-                                let carrier = if name.contains("devkitc") {
-                                    "devkitc"
-                                } else if name.contains("xiao") {
-                                    "xiao"
-                                } else {
-                                    continue;
-                                };
-                                assets.push(FirmwareAsset {
-                                    carrier: carrier.to_string(),
-                                    version: tag.to_string(),
-                                    url: url.to_string(),
-                                    size,
-                                });
-                            }
-                        }
-                        if !assets.is_empty() {
-                            return FirmwareAvailable {
-                                source: "github".to_string(),
-                                version: tag.to_string(),
-                                assets,
-                                note: None,
-                                fetched_at_ms: now_ms,
-                            };
-                        }
-                    }
-                }
-            }
+    let local = local_firmware_snapshot();
+    let github = github_firmware_snapshot().await;
+
+    let prefer_local = match (&local, &github) {
+        (Some((_, l_mtime, _)), Some((_, g_secs, _))) => *l_mtime > *g_secs,
+        (Some(_), None)  => true,
+        (None,    Some(_)) => false,
+        (None, None) => return FirmwareAvailable {
+            source: "none".to_string(),
+            version: String::new(),
+            assets: Vec::new(),
+            note: Some("No firmware found on GitHub or in local releases/".to_string()),
+            fetched_at_ms: now_ms,
+        },
+    };
+
+    if prefer_local {
+        let (assets, _, latest_version) = local.expect("checked above");
+        FirmwareAvailable {
+            source: "local".to_string(),
+            version: latest_version,
+            assets,
+            note: github.as_ref().map(|(tag, _, _)| {
+                format!("Local build is newer than GitHub release {} — preferring local.", tag)
+            }),
+            fetched_at_ms: now_ms,
+        }
+    } else {
+        let (tag, _, assets) = github.expect("checked above");
+        FirmwareAvailable {
+            source: "github".to_string(),
+            version: tag,
+            assets,
+            note: None,
+            fetched_at_ms: now_ms,
         }
     }
-    let gh_note = "GitHub query failed or no matching assets — falling back to local releases dir";
+}
 
-    // ── Local fallback ──
+/// Pick the newest `.bin` per carrier under
+/// `firmware/esp32-s3/<carrier>/releases/`. Returns
+/// `(assets, max_mtime_unix_secs, version_string)` or `None` if
+/// neither carrier has any local builds.
+fn local_firmware_snapshot() -> Option<(Vec<FirmwareAsset>, i64, String)> {
     let mut assets = Vec::new();
     let mut latest_version = String::new();
+    let mut max_mtime_secs: i64 = i64::MIN;
+
     for carrier in &["devkitc", "xiao"] {
         let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -2052,7 +2106,6 @@ async fn build_firmware_snapshot(now_ms: u64) -> FirmwareAvailable {
         let Some(dir) = dir else { continue };
         if !dir.is_dir() { continue; }
 
-        // Pick newest-mtime .bin.
         let mut best: Option<(std::time::SystemTime, std::path::PathBuf, u64)> = None;
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
@@ -2068,15 +2121,19 @@ async fn build_firmware_snapshot(now_ms: u64) -> FirmwareAvailable {
                 if pick { best = Some((mtime, path, size)); }
             }
         }
-        if let Some((_, path, size)) = best {
+        if let Some((mtime, path, size)) = best {
             let fname = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            // Convention: r2-rocker-firmware-<fw_ver>.bin
             let version = fname
                 .strip_prefix("r2-rocker-firmware-")
                 .and_then(|s| s.strip_suffix(".bin"))
                 .unwrap_or(fname)
                 .to_string();
             if version > latest_version { latest_version = version.clone(); }
+            let mtime_secs = mtime
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            if mtime_secs > max_mtime_secs { max_mtime_secs = mtime_secs; }
             assets.push(FirmwareAsset {
                 carrier: carrier.to_string(),
                 version,
@@ -2086,23 +2143,539 @@ async fn build_firmware_snapshot(now_ms: u64) -> FirmwareAvailable {
         }
     }
 
-    if !assets.is_empty() {
-        FirmwareAvailable {
-            source: "local".to_string(),
-            version: latest_version,
-            assets,
-            note: Some(gh_note.to_string()),
-            fetched_at_ms: now_ms,
-        }
-    } else {
-        FirmwareAvailable {
-            source: "none".to_string(),
-            version: String::new(),
-            assets: Vec::new(),
-            note: Some("No firmware found on GitHub or in local releases/".to_string()),
-            fetched_at_ms: now_ms,
+    if assets.is_empty() { None } else { Some((assets, max_mtime_secs, latest_version)) }
+}
+
+/// Query GitHub Releases. Returns `(tag, published_at_unix_secs,
+/// assets)` or `None` if the request failed / the latest release has
+/// no matching `.bin` assets.
+async fn github_firmware_snapshot() -> Option<(String, i64, Vec<FirmwareAsset>)> {
+    let gh_url = format!(
+        "https://api.github.com/repos/{}/releases/latest",
+        GITHUB_OWNER_REPO,
+    );
+    let output = tokio::process::Command::new("curl")
+        .args([
+            "-sS",
+            "--max-time", "5",
+            "-H", "Accept: application/vnd.github+json",
+            "-H", "User-Agent: r2-rocker-dashboard",
+            &gh_url,
+        ])
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() { return None; }
+    let body = String::from_utf8(output.stdout).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let tag = json.get("tag_name").and_then(|v| v.as_str())?.to_string();
+    let published_secs = json
+        .get("published_at")
+        .and_then(|v| v.as_str())
+        .and_then(iso_to_unix_secs)
+        .unwrap_or(0);
+
+    let mut assets = Vec::new();
+    if let Some(arr) = json.get("assets").and_then(|v| v.as_array()) {
+        for a in arr {
+            let name = a.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let url = a.get("browser_download_url").and_then(|v| v.as_str()).unwrap_or("");
+            let size = a.get("size").and_then(|v| v.as_u64());
+            if !name.ends_with(".bin") { continue; }
+            let carrier = if name.contains("devkitc") {
+                "devkitc"
+            } else if name.contains("xiao") {
+                "xiao"
+            } else {
+                continue;
+            };
+            assets.push(FirmwareAsset {
+                carrier: carrier.to_string(),
+                version: tag.clone(),
+                url: url.to_string(),
+                size,
+            });
         }
     }
+    if assets.is_empty() { return None; }
+    Some((tag, published_secs, assets))
+}
+
+/// Tiny ISO-8601 ("2026-05-18T07:36:42Z") → unix seconds parser.
+/// We pull this in rather than adding chrono just for one date
+/// field. Returns `None` on malformed input.
+fn iso_to_unix_secs(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    if b.len() < 19 { return None; }
+    let y  = std::str::from_utf8(&b[0..4]).ok()?.parse::<i32>().ok()?;
+    let mo = std::str::from_utf8(&b[5..7]).ok()?.parse::<u32>().ok()?;
+    let d  = std::str::from_utf8(&b[8..10]).ok()?.parse::<u32>().ok()?;
+    let h  = std::str::from_utf8(&b[11..13]).ok()?.parse::<u32>().ok()?;
+    let mi = std::str::from_utf8(&b[14..16]).ok()?.parse::<u32>().ok()?;
+    let se = std::str::from_utf8(&b[17..19]).ok()?.parse::<u32>().ok()?;
+    if mo < 1 || mo > 12 { return None; }
+    // Howard Hinnant's days-from-civil algorithm.
+    let y_adj = y - if mo <= 2 { 1 } else { 0 };
+    let era = if y_adj >= 0 { y_adj / 400 } else { (y_adj - 399) / 400 };
+    let yoe = (y_adj - era * 400) as u32;
+    let m_num = if mo > 2 { mo - 3 } else { mo + 9 };
+    let doy = (153 * m_num + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = (era as i64) * 146097 + doe as i64 - 719468;
+    Some(days * 86400 + (h as i64) * 3600 + (mi as i64) * 60 + se as i64)
+}
+
+#[cfg(test)]
+mod firmware_snapshot_tests {
+    use super::iso_to_unix_secs;
+    #[test]
+    fn iso_epoch() { assert_eq!(iso_to_unix_secs("1970-01-01T00:00:00Z"), Some(0)); }
+    #[test]
+    fn iso_known() {
+        // 2026-05-18T07:36:42Z = 1779435402
+        assert_eq!(iso_to_unix_secs("2026-05-18T07:36:42Z"), Some(1779435402));
+    }
+}
+
+// ── SPEC-R2-ROCKER-CAPTURE handlers ───────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct CaptureMarkBody { name: String }
+
+/// Fan a frame out to every connected peer's tx channel. Returns the
+/// count of peers reached. Failures (channel full / closed) are
+/// logged but do not abort the fan-out — fleet ops are best-effort.
+async fn fan_out_dash_frame(
+    state: &AppState,
+    event_hash: u32,
+    msg_id: u16,
+    payload: Vec<u8>,
+) -> usize {
+    let frame = build_dash_frame(event_hash, msg_id, &payload);
+    let peers = state.peers.read().await;
+    let mut sent = 0;
+    for (addr, peer) in peers.iter() {
+        match peer.tx.send(frame.clone()).await {
+            Ok(()) => sent += 1,
+            Err(e) => eprintln!("[capture] fan-out to {} failed: {}", addr, e),
+        }
+    }
+    sent
+}
+
+/// `POST /api/capture/start` — refresh time-sync, then send
+/// `r2.dash.capture.start` to every peer (SPEC-R2-ROCKER-CAPTURE §7.1).
+async fn capture_start_handler(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    // Fire an immediate sync_pulse round to every peer so capture
+    // timestamps in the upcoming session share a tightly-refreshed
+    // baseline. The dashboard's existing sync_pong handler smooths
+    // the result via Cristian's algorithm and emits
+    // r2.dash.set_clock_offset to each peer asynchronously — we
+    // don't await pongs here, just kick the round.
+    let dash_ts_ms = dash_wall_ms();
+    {
+        let peers = state.peers.read().await;
+        for (addr, peer) in peers.iter() {
+            // Per-peer req_id is the low 32 bits of the
+            // dashboard wall-clock — collision-free within a session.
+            let req_id = (dash_ts_ms & 0xFFFF_FFFF) as u32;
+            let payload = encode_sync_pulse(req_id, dash_ts_ms);
+            let frame = build_dash_frame(
+                DASH_SYNC_PULSE,
+                (req_id & 0xFFFF) as u16,
+                &payload,
+            );
+            let _ = peer.tx.send(frame).await;
+            // Note: track this req_id on the peer's PeerSyncState so
+            // the pong handler can match. We use the regular periodic
+            // task's state map here. Without registering, the pong
+            // smoothing still works but RTT is wrong for THIS round.
+            // For a forced refresh we accept that tradeoff — the
+            // periodic task picks up the next round anyway.
+            let _ = addr;
+        }
+    }
+
+    let payload = encode_empty_map();
+    let sent = fan_out_dash_frame(&state, DASH_CAPTURE_START, 0x0001, payload).await;
+    let _ = state.ws_broadcast_tx.send(serde_json::json!({
+        "type": "capture",
+        "phase": "start",
+        "peers": sent,
+    }).to_string());
+    (axum::http::StatusCode::OK, Json(serde_json::json!({"ok": true, "peers": sent})))
+}
+
+/// `POST /api/capture/mark {name}` — fan out capture.mark with the
+/// dashboard's chosen ts_ms (one value shared across the fleet so
+/// every sensor's file shares the same name; SPEC §7.2).
+async fn capture_mark_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CaptureMarkBody>,
+) -> impl IntoResponse {
+    if !is_valid_capture_name(&body.name) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "ok": false,
+                "error": "invalid name (use [A-Za-z0-9_-]{1,32})",
+            })),
+        );
+    }
+    let ts_ms = dash_wall_ms() as i64;
+    let payload = encode_capture_mark(ts_ms, &body.name);
+    let sent = fan_out_dash_frame(&state, DASH_CAPTURE_MARK, 0x0002, payload).await;
+    let _ = state.ws_broadcast_tx.send(serde_json::json!({
+        "type": "capture",
+        "phase": "mark",
+        "name": body.name,
+        "ts_ms": ts_ms,
+        "peers": sent,
+    }).to_string());
+    (axum::http::StatusCode::OK, Json(serde_json::json!({
+        "ok": true,
+        "ts_ms": ts_ms,
+        "name": body.name,
+        "peers": sent,
+    })))
+}
+
+/// `POST /api/capture/stop` — fan out capture.stop.
+async fn capture_stop_handler(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let payload = encode_empty_map();
+    let sent = fan_out_dash_frame(&state, DASH_CAPTURE_STOP, 0x0003, payload).await;
+    let _ = state.ws_broadcast_tx.send(serde_json::json!({
+        "type": "capture",
+        "phase": "stop",
+        "peers": sent,
+    }).to_string());
+    (axum::http::StatusCode::OK, Json(serde_json::json!({"ok": true, "peers": sent})))
+}
+
+fn is_valid_capture_name(n: &str) -> bool {
+    !n.is_empty() && n.len() <= 32 && n.bytes().all(|b| matches!(
+        b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-'
+    ))
+}
+
+// ── data_tcp client (port 21047) ──────────────────────────────────────
+
+const DATA_PORT: u16 = 21047;
+const ST_OK: u8 = 0x00;
+const ST_ERROR: u8 = 0x01;
+const ST_BUSY: u8 = 0x02;
+
+/// Open a fresh TCP connection to <ip>:21047 on the named peer.
+/// Strips any trailing port suffix from `addr` (the webapp keys by IP
+/// alone but tolerates `ip:port`).
+async fn dial_data_tcp(addr: &str) -> std::io::Result<TcpStream> {
+    let ip_only: &str = addr.split(':').next().unwrap_or(addr);
+    let target = format!("{}:{}", ip_only, DATA_PORT);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        TcpStream::connect(&target),
+    ).await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "data_tcp connect timeout"))?
+}
+
+/// `GET /api/data/{addr}/list` — proxy a LIST opcode to the sensor.
+async fn data_list_handler(Path(addr): Path<String>) -> impl IntoResponse {
+    let mut s = match dial_data_tcp(&addr).await {
+        Ok(s) => s,
+        Err(e) => return (
+            axum::http::StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": format!("connect: {}", e)})),
+        ).into_response(),
+    };
+    if let Err(e) = s.write_all(&[0x01u8]).await {
+        return (
+            axum::http::StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": format!("write LIST: {}", e)})),
+        ).into_response();
+    }
+    let mut status = [0u8; 1];
+    if let Err(e) = s.read_exact(&mut status).await {
+        return (
+            axum::http::StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": format!("read status: {}", e)})),
+        ).into_response();
+    }
+    if status[0] != ST_OK {
+        let err_msg = read_err_msg(&mut s).await.unwrap_or_default();
+        return (
+            axum::http::StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": err_msg, "status_byte": status[0]})),
+        ).into_response();
+    }
+    let mut count_buf = [0u8; 4];
+    if let Err(e) = s.read_exact(&mut count_buf).await {
+        return (
+            axum::http::StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": format!("read count: {}", e)})),
+        ).into_response();
+    }
+    let count = u32::from_be_bytes(count_buf) as usize;
+    let mut entries = Vec::with_capacity(count);
+    for _ in 0..count {
+        let mut nl = [0u8; 2];
+        if s.read_exact(&mut nl).await.is_err() { break; }
+        let nlen = u16::from_be_bytes(nl) as usize;
+        let mut name_buf = vec![0u8; nlen];
+        if s.read_exact(&mut name_buf).await.is_err() { break; }
+        let mut size_buf = [0u8; 8];
+        if s.read_exact(&mut size_buf).await.is_err() { break; }
+        let mut mtime_buf = [0u8; 8];
+        if s.read_exact(&mut mtime_buf).await.is_err() { break; }
+        let name = String::from_utf8_lossy(&name_buf).into_owned();
+        let size = u64::from_be_bytes(size_buf);
+        let mtime = i64::from_be_bytes(mtime_buf);
+        entries.push(serde_json::json!({
+            "name": name, "size": size, "mtime_ms": mtime,
+        }));
+    }
+    (axum::http::StatusCode::OK, Json(serde_json::json!({"files": entries}))).into_response()
+}
+
+/// `GET /api/data/{addr}/file/{name}` — proxy a GET opcode and stream
+/// the file bytes back to the client.
+async fn data_get_handler(Path((addr, name)): Path<(String, String)>) -> impl IntoResponse {
+    let mut s = match dial_data_tcp(&addr).await {
+        Ok(s) => s,
+        Err(e) => return (axum::http::StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
+    };
+    let mut req = Vec::with_capacity(3 + name.len());
+    req.push(0x02);
+    req.extend_from_slice(&(name.len() as u16).to_be_bytes());
+    req.extend_from_slice(name.as_bytes());
+    if s.write_all(&req).await.is_err() {
+        return (axum::http::StatusCode::BAD_GATEWAY, "write GET".to_string()).into_response();
+    }
+    let mut status = [0u8; 1];
+    if s.read_exact(&mut status).await.is_err() {
+        return (axum::http::StatusCode::BAD_GATEWAY, "read status".to_string()).into_response();
+    }
+    if status[0] != ST_OK {
+        let err_msg = read_err_msg(&mut s).await.unwrap_or_default();
+        let code = match status[0] {
+            ST_BUSY => axum::http::StatusCode::CONFLICT,
+            _ => axum::http::StatusCode::NOT_FOUND,
+        };
+        return (code, err_msg).into_response();
+    }
+    let mut size_buf = [0u8; 8];
+    if s.read_exact(&mut size_buf).await.is_err() {
+        return (axum::http::StatusCode::BAD_GATEWAY, "read size".to_string()).into_response();
+    }
+    let size = u64::from_be_bytes(size_buf) as usize;
+    let mut body = vec![0u8; size];
+    if s.read_exact(&mut body).await.is_err() {
+        return (axum::http::StatusCode::BAD_GATEWAY, "read body".to_string()).into_response();
+    }
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(axum::http::header::CONTENT_TYPE, "text/csv".parse().unwrap());
+    headers.insert(
+        axum::http::header::CONTENT_DISPOSITION,
+        format!("attachment; filename=\"{}\"", name).parse().unwrap(),
+    );
+    (axum::http::StatusCode::OK, headers, body).into_response()
+}
+
+/// `DELETE /api/data/{addr}/file/{name}` — proxy a DEL opcode.
+async fn data_delete_handler(Path((addr, name)): Path<(String, String)>) -> impl IntoResponse {
+    let mut s = match dial_data_tcp(&addr).await {
+        Ok(s) => s,
+        Err(e) => return (axum::http::StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+    };
+    let mut req = Vec::with_capacity(3 + name.len());
+    req.push(0x03);
+    req.extend_from_slice(&(name.len() as u16).to_be_bytes());
+    req.extend_from_slice(name.as_bytes());
+    if s.write_all(&req).await.is_err() {
+        return (axum::http::StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": "write"}))).into_response();
+    }
+    let mut status = [0u8; 1];
+    if s.read_exact(&mut status).await.is_err() {
+        return (axum::http::StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": "read status"}))).into_response();
+    }
+    if status[0] == ST_OK {
+        return (axum::http::StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response();
+    }
+    let msg = read_err_msg(&mut s).await.unwrap_or_default();
+    let code = if status[0] == ST_BUSY { axum::http::StatusCode::CONFLICT } else { axum::http::StatusCode::BAD_GATEWAY };
+    (code, Json(serde_json::json!({"ok": false, "error": msg, "status_byte": status[0]}))).into_response()
+}
+
+/// `DELETE /api/data/{addr}/all` — proxy a DEL_ALL opcode.
+async fn data_delete_all_handler(Path(addr): Path<String>) -> impl IntoResponse {
+    let mut s = match dial_data_tcp(&addr).await {
+        Ok(s) => s,
+        Err(e) => return (axum::http::StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+    };
+    if s.write_all(&[0x04u8]).await.is_err() {
+        return (axum::http::StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": "write"}))).into_response();
+    }
+    let mut status = [0u8; 1];
+    if s.read_exact(&mut status).await.is_err() {
+        return (axum::http::StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": "read status"}))).into_response();
+    }
+    if status[0] != ST_OK {
+        let msg = read_err_msg(&mut s).await.unwrap_or_default();
+        return (axum::http::StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": msg}))).into_response();
+    }
+    let mut count_buf = [0u8; 4];
+    let _ = s.read_exact(&mut count_buf).await;
+    let count = u32::from_be_bytes(count_buf);
+    (axum::http::StatusCode::OK, Json(serde_json::json!({"ok": true, "deleted": count}))).into_response()
+}
+
+/// `GET /api/data/merged?file=<basename>` — fetch the named file
+/// from every connected peer and emit a long-format CSV
+/// (`ts_ms, sensor, x, y, z`) sorted ascending by `ts_ms`.
+async fn data_merged_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let Some(name) = q.get("file").cloned() else {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "missing ?file= parameter"})),
+        ).into_response();
+    };
+
+    let peer_addrs: Vec<String> = {
+        let peers = state.peers.read().await;
+        peers.keys().map(|a| a.ip().to_string()).collect()
+    };
+
+    let mut fetched: Vec<(String, Vec<u8>)> = Vec::with_capacity(peer_addrs.len());
+    for addr in &peer_addrs {
+        match fetch_capture_bytes(addr, &name).await {
+            Ok(bytes) => fetched.push((addr.clone(), bytes)),
+            Err(e) => eprintln!("[merge] {} {}: {}", addr, name, e),
+        }
+    }
+    if fetched.is_empty() {
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "no sensor returned this file"})),
+        ).into_response();
+    }
+
+    // Heap-merge by ts_ms. The capture row is fixed-width
+    // (SPEC-R2-ROCKER-CAPTURE §4 + SPEC-R2-ROCKER-SENSOR §6.2):
+    //   bytes  0..10  : seq (right-aligned)
+    //   bytes 11..25  : ts_ms (right-aligned)
+    //   …
+    // Use std::collections::BinaryHeap with a reverse-ordered key
+    // so the smallest ts_ms always pops first.
+    const ROW_BYTES: usize = 62;
+    let mut iters: Vec<(String, std::vec::IntoIter<&[u8]>)> = fetched.iter().map(|(name, bytes)| {
+        let rows: Vec<&[u8]> = bytes.chunks_exact(ROW_BYTES).collect();
+        (name.clone(), rows.into_iter())
+    }).collect();
+    // Drop the original `fetched` references — rebuild owning rows.
+    drop(iters);
+    let mut owned_rows: Vec<(String, Vec<Vec<u8>>)> = fetched.into_iter().map(|(name, bytes)| {
+        let rows: Vec<Vec<u8>> = bytes.chunks_exact(ROW_BYTES).map(|r| r.to_vec()).collect();
+        (name, rows)
+    }).collect();
+
+    let mut output = String::with_capacity(64 * 1024);
+    output.push_str("ts_ms,sensor,x,y,z\n");
+
+    // Iterator state: per-source row index.
+    let mut indices: Vec<usize> = vec![0; owned_rows.len()];
+    loop {
+        // Find the source with the smallest ts_ms at its current index.
+        let mut min_src: Option<usize> = None;
+        let mut min_ts: i64 = i64::MAX;
+        for (i, (_, rows)) in owned_rows.iter().enumerate() {
+            if indices[i] >= rows.len() { continue; }
+            let row = &rows[indices[i]];
+            let Some(ts) = parse_row_ts_ms(row) else { continue; };
+            if ts < min_ts { min_ts = ts; min_src = Some(i); }
+        }
+        let Some(src) = min_src else { break; };
+        let (sensor_name, rows) = &owned_rows[src];
+        let row = &rows[indices[src]];
+        // Extract x, y, z from the fixed-width row.
+        let (seq_str, rest) = row.split_at(10);
+        let _ = seq_str; // unused in output
+        let _comma = rest[0]; // ','
+        let (ts_str, rest) = rest[1..].split_at(14);
+        let _comma = rest[0];
+        let (x_str, rest) = rest[1..].split_at(11);
+        let _comma = rest[0];
+        let (y_str, rest) = rest[1..].split_at(11);
+        let _comma = rest[0];
+        let (z_str, _rest) = rest[1..].split_at(11);
+        output.push_str(&trim_str(ts_str));
+        output.push(',');
+        output.push_str(sensor_name);
+        output.push(',');
+        output.push_str(&trim_str(x_str));
+        output.push(',');
+        output.push_str(&trim_str(y_str));
+        output.push(',');
+        output.push_str(&trim_str(z_str));
+        output.push('\n');
+        indices[src] += 1;
+    }
+
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(axum::http::header::CONTENT_TYPE, "text/csv".parse().unwrap());
+    headers.insert(
+        axum::http::header::CONTENT_DISPOSITION,
+        format!("attachment; filename=\"merged-{}\"", name).parse().unwrap(),
+    );
+    (axum::http::StatusCode::OK, headers, output).into_response()
+}
+
+fn parse_row_ts_ms(row: &[u8]) -> Option<i64> {
+    if row.len() < 26 { return None; }
+    // bytes 11..25 carry ts_ms (right-aligned). Trim ASCII spaces, parse.
+    let ts_field = &row[11..25];
+    let s = std::str::from_utf8(ts_field).ok()?;
+    s.trim().parse::<i64>().ok()
+}
+
+fn trim_str(bytes: &[u8]) -> String {
+    std::str::from_utf8(bytes).map(|s| s.trim().to_string()).unwrap_or_default()
+}
+
+/// Fetch one capture file from `<addr>:21047` over data_tcp GET.
+async fn fetch_capture_bytes(addr: &str, name: &str) -> std::io::Result<Vec<u8>> {
+    let mut s = dial_data_tcp(addr).await?;
+    let mut req = Vec::with_capacity(3 + name.len());
+    req.push(0x02);
+    req.extend_from_slice(&(name.len() as u16).to_be_bytes());
+    req.extend_from_slice(name.as_bytes());
+    s.write_all(&req).await?;
+    let mut status = [0u8; 1];
+    s.read_exact(&mut status).await?;
+    if status[0] != ST_OK {
+        let _ = read_err_msg(&mut s).await;
+        return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("status {}", status[0])));
+    }
+    let mut size_buf = [0u8; 8];
+    s.read_exact(&mut size_buf).await?;
+    let size = u64::from_be_bytes(size_buf) as usize;
+    let mut body = vec![0u8; size];
+    s.read_exact(&mut body).await?;
+    Ok(body)
+}
+
+async fn read_err_msg(s: &mut TcpStream) -> Option<String> {
+    let mut ml = [0u8; 2];
+    s.read_exact(&mut ml).await.ok()?;
+    let len = u16::from_be_bytes(ml) as usize;
+    let mut msg = vec![0u8; len];
+    s.read_exact(&mut msg).await.ok()?;
+    Some(String::from_utf8_lossy(&msg).into_owned())
 }
 
 fn encode_raw_frame_envelope(rf: &RawFrame) -> Vec<u8> {

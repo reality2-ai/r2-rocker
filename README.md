@@ -23,6 +23,25 @@ The hardware is open. The protocol stack is open. The whole thing is
 designed to be handed off to a university group, who can run, modify,
 or extend it without depending on any third-party service.
 
+Although r2-rocker was built for this specific tyre-wear rig, the
+shape of the system — battery-powered ESP32 sensors streaming over
+a local WiFi hotspot to a controller-hosted dashboard with durable
+SD-card buffering, BLE bootstrap, OTA, and end-to-end signing —
+isn't tyre-rig-specific. Any sensor that can be wired to an ESP32
+(accelerometers, temperature, strain gauges, environmental,
+chemical, hall, magnetometer, microphone, current sense, …) fits
+the same template. Swap the ADXL355 driver in the firmware for
+your sensor of choice, adjust the wire schema, and the rest of the
+stack — hotspot, dashboard, web app, OTA, SD ring, time-sync,
+log fan-out — applies unchanged. WiFi-range coverage is the only
+hard constraint on physical deployment.
+
+The protocol stack underneath the rig is **Reality2 (R2)** — an
+open messaging substrate for distributed sentant-based systems. See
+[reality2.ai](https://www.reality2.ai) for the wider project that
+r2-rocker is built on; the R2 specs and reference crates this repo
+vendors live under [`crates/`](crates/) and [`specifications/`](specifications/).
+
 ## What you'll find in the box
 
 This project has three kinds of device:
@@ -46,13 +65,15 @@ optional — the controller's own browser counts as a viewer.
                 └──────────▲───────────────┘
                            │ encrypted
                            │
-                ┌──────────┴───────────┐
-                │  Controller          │   A Linux laptop or Pi on
-                │  (on the rig floor)  │   the lab bench.
-                │  · Hosts WiFi        │
-                │  · Holds the keys    │
-                │  · Stores the data   │
-                └──────────▲───────────┘
+                ┌──────────┴───────────┐         ┌────────────────────┐
+                │  Controller          │  HTTPS  │  GitHub repo +     │
+                │  (on the rig floor)  ├────────►│  Releases          │
+                │  · Hosts WiFi        │ (poll)  │  (latest .bin)     │
+                │  · Holds the keys    │         └────────────────────┘
+                │  · Stores the data   │         Optional — only needed
+                │  · Caches GitHub     │         to surface "new
+                │    firmware locally  │         firmware available"
+                └──────────▲───────────┘         and pull binaries.
                            │ WiFi (controller's hotspot)
                            │
                       ┌────┴────┐
@@ -86,7 +107,12 @@ cloud-app:
 - **Closed-network deployments work without any internet.** A
   controller laptop, two sensors, and a tablet on the controller's
   hotspot are a complete instrument. No cloud, no GitHub, no
-  third-party service.
+  third-party service. The GitHub link shown on the right of the
+  diagram above is *only* used by the dashboard to surface "new
+  firmware available" and pull binaries on demand; when the
+  controller is offline it falls back to firmware in
+  `firmware/esp32-s3/<carrier>/releases/` on its local disk and
+  the rig keeps running.
 
 ## Reference hardware
 
@@ -100,9 +126,21 @@ You need:
   capacity ≥ 4 GB). For local data buffering.
 - **One single-cell LiPo battery** per sensor (3.7 V, 1–2 Ah, JST-PH
   connector). Removable for off-rig charging.
-- **One Linux laptop or Raspberry Pi** as the controller. Two WiFi
-  adapters recommended — one to keep your usual internet, one
-  dedicated to the rig.
+- **One 3.3 V buck-boost regulator module** per sensor (Pololu
+  S7V8F3 or equivalent). Sits between the LiPo and the DevKitC's
+  3V3 rail so the chip sees a stable 3.3 V across the cell's full
+  3.0–4.2 V discharge curve — without it, both ends of the curve
+  cause flaky behaviour (chip resets near empty, SD/ADXL355
+  marginal at peak).
+- **One Linux laptop or Raspberry Pi** as the controller, with
+  **two WiFi adapters**: one for the lab's usual internet, one
+  dedicated to hosting the sensor hotspot. Strongly recommended,
+  not optional — the controller's bootstrap engine refuses to host
+  a hotspot on the internet-carrying adapter (it would knock the
+  controller off the lab network), so a single-WiFi machine can't
+  do both jobs at once. A cheap USB WiFi dongle alongside the
+  built-in radio is plenty. Wired ethernet for the internet side
+  also frees up the built-in WiFi for the hotspot.
 - **Female-to-female DuPont jumper wires** (about 6 per sensor, for
   the Pmod-to-DevKitC connection).
 
@@ -358,6 +396,7 @@ README:
 - **R2 / Reality2** — the underlying messaging protocol stack. It
   defines how devices identify themselves, encrypt traffic, route
   messages across intermittent networks, and bootstrap new members.
+  See [reality2.ai](https://www.reality2.ai) for the upstream project.
 - **OTA** — over-the-air firmware update. The "wireless update"
   feature.
 - **BLE** — Bluetooth Low Energy. Used briefly during sensor setup
@@ -392,7 +431,17 @@ The full normative specs are under [`specifications/`](specifications/):
 - `SPEC-R2-ROCKER-SYSTEM.md` — the system as a whole.
 - `SPEC-R2-ROCKER-WIRE.md` — the message format on the wire.
 - `SPEC-R2-ROCKER-SENSOR.md` — what the sensor firmware does.
+- `SPEC-R2-ROCKER-SENTANTS.md` — the **sentant + plugin catalog**
+  that makes up the sensor firmware (one row per building block,
+  with the events it consumes / produces). The intended workflow
+  is to compose the firmware from these descriptions — re-use a
+  sentant in another ESP32 sensor build by porting the file and
+  declaring its plugin dependencies.
 - `SPEC-R2-ROCKER-DASHBOARD.md` — what the controller does.
+- `SPEC-R2-ROCKER-TIMESYNC.md` — the time-sync hybrid model.
+- `SPEC-R2-ROCKER-SENSOR-HEALTH.md`,
+  `SPEC-R2-ROCKER-SENSOR-REMOTE-RESET.md`,
+  `SPEC-R2-ROCKER-SENSOR-LIVE-LOGS.md` — sensor-side feature specs.
 - `SPEC-R2-ROCKER-BRIDGE.md` — how the production and viewing trust
   groups talk to each other.
 - `HARDWARE-WIRING.md`, `SECRETS-POLICY.md` — operational specs.

@@ -9,6 +9,7 @@
 //!   4. On a valid offer: persist creds to NVS and reboot to apply.
 
 mod adxl355;
+mod capture;
 mod clock;
 mod identity;
 mod led;
@@ -27,7 +28,7 @@ use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::sys::{esp_restart, link_patches};
 use log::{error, info, warn};
-use r2_esp::{beacon, l2cap, log_tcp, ota_tcp, reset_tcp, wifi_prov, wifi_sta};
+use r2_esp::{beacon, data_tcp, l2cap, log_tcp, ota_tcp, reset_tcp, wifi_prov, wifi_sta};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 /// Canonical R2-BEACON class string (locked at SPEC-R2-ROCKER-DASHBOARD §6.3
@@ -47,7 +48,7 @@ fn main() -> Result<()> {
     // Install the capturing logger early so every subsequent `info!`
     // / `warn!` is captured for the WiFi-side log fan-out. The TCP
     // listener itself is started AFTER WiFi is up (below, alongside
-    // ota_tcp / reset_tcp) — if we bind to 0.0.0.0:21045 before lwIP
+    // ota_tcp / reset_tcp) — if we bind to 0.0.0.0:21046 before lwIP
     // is initialised the bind never returns and no log_tcp activity
     // ever appears on UART.
     log_tcp::install_logger();
@@ -213,10 +214,23 @@ fn run(
         reset_tcp::start_listener();
         info!("[RESET] receive listener started on TCP 21044");
 
-        // Dev log fan-out on TCP 21045. Bind happens here (post-WiFi)
+        // Dev log fan-out on TCP 21046. Bind happens here (post-WiFi)
         // rather than at the top of main() — see comment on
         // log_tcp::install_logger above.
         log_tcp::start_listener();
+
+        // Shared handle the sender's CaptureMgr writes ("we're now
+        // recording <filename>") and the data_tcp listener reads
+        // ("is the requested file currently being written?").
+        let current_recording = data_tcp::new_current_recording();
+
+        // Capture-files TCP listener on port 21047 (SPEC-R2-ROCKER-CAPTURE
+        // §6). The sender thread (spawned below) builds a CaptureMgr
+        // that takes a clone of `current_recording`; data_tcp reads
+        // that handle to refuse GET / DEL on the actively-recording
+        // file. data_tcp itself is no-op when no SD is mounted —
+        // `list_captures` just returns an empty list.
+        data_tcp::start_listener(sd::MOUNT_POINT, current_recording.clone());
 
         // UDP presence — closes the dashboard's bootstrap loop. Spawn a
         // short-lived task that sends ~5 packets at 1 s intervals. UDP
@@ -259,6 +273,7 @@ fn run(
         let id_for_sender = identity.clone();
         let led_for_sender = led_handle.clone();
         let clock_for_sender = clock.clone();
+        let current_recording_for_sender = current_recording.clone();
         std::thread::Builder::new()
             .stack_size(16384)
             .name("sender".into())
@@ -312,13 +327,25 @@ fn run(
                 } else {
                     None
                 };
+                // Named-capture state machine — only useful when the
+                // SD path is up, since captures land on the same card.
+                // CaptureMgr always runs. With no SD, `mark()` refuses
+                // (clear error in the log) but `start()` still
+                // computes the offset and `observe()` still applies
+                // it on the wire path — so the dashboard's Live
+                // chart still flatlines when the operator calibrates
+                // an SD-less sensor.
+                let capture = Some(capture::CaptureMgr::new(
+                    sd::MOUNT_POINT,
+                    current_recording_for_sender,
+                ));
                 led_for_sender.set(if adxl.is_some() {
                     led::LedState::StreamingLive
                 } else {
                     led::LedState::StreamingDegradedSim
                 });
                 let mut s = sender::Sender::new(
-                    gateway, hostname, id_for_sender, led_for_sender, adxl, clock_for_sender, ring,
+                    gateway, hostname, id_for_sender, led_for_sender, adxl, clock_for_sender, ring, capture,
                 );
                 s.run();
             })

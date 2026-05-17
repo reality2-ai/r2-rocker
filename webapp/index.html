@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <title>R2 Rocker Rig — WASM viewer</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <style>
@@ -229,7 +230,8 @@
   }
   .state-idle { background: #1e293b; color: #64748b; }
   .state-calibrating { background: #2d1f00; color: #fbbf24; }
-  .state-rocking { background: #002d1a; color: #34d399; }
+  .state-recording  { background: #002d1a; color: #34d399; }
+  .state-rocking    { background: #002d1a; color: #34d399; }
 
   .btn-group { display: flex; flex-direction: column; gap: 8px; }
   .btn {
@@ -276,11 +278,14 @@
   .log-entry .event { color: #34d399; }
   .log-entry .value { color: #fbbf24; }
 
-  /* Log row below main grid */
+  /* Log row below main grid. Padding matches `.devices-main` so the
+     Event Log card lines up exactly with the device cards above on
+     the Devices tab; `margin-top` adds the gap that was missing
+     between the cards and the log on that tab. */
   .log-row {
-    padding: 0 16px 16px;
+    padding: 0 24px 16px;
     max-width: 1600px;
-    margin: 0 auto;
+    margin: 16px auto 0;
   }
 
   /* Mobile + tablet portrait. Bumped from the original 900px so iPad
@@ -530,6 +535,82 @@
     border-radius: 8px;
   }
   .devices-summary strong { color: #e2e8f0; }
+  .devices-repo-link {
+    margin-left: auto;
+    color: #4a9eff;
+    text-decoration: none;
+    font-size: 13px;
+  }
+  .devices-repo-link:hover { text-decoration: underline; }
+
+  /* Run-name input inside the Run Control card (Live tab sidebar). */
+  .run-name-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+  .run-name-row label { color: #94a3b8; font-size: 12px; flex: 0 0 auto; }
+  .run-name-row input[type="text"] {
+    flex: 1 1 auto;
+    background: #0a0e17;
+    color: #e2e8f0;
+    border: 1px solid #334155;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-family: 'SF Mono', Consolas, monospace;
+    font-size: 12px;
+  }
+
+  /* Per-card capture file list */
+  .data-files {
+    margin-top: 8px;
+    background: #0a0e17;
+    border: 1px solid #1e293b;
+    border-radius: 6px;
+    max-height: 220px;
+    overflow-y: auto;
+    font-family: 'SF Mono', Consolas, monospace;
+    font-size: 12px;
+  }
+  .data-file-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 10px;
+    border-bottom: 1px solid #131a26;
+  }
+  .data-file-row:last-child { border-bottom: 0; }
+  .data-file-row .name { flex: 1; color: #cbd5e1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .data-file-row .meta { color: #475569; font-size: 11px; }
+  .data-file-row button {
+    background: transparent;
+    color: #94a3b8;
+    border: 1px solid #334155;
+    border-radius: 4px;
+    padding: 2px 8px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+  .data-file-row button.danger { color: #f87171; border-color: #7f1d1d; }
+  .data-file-row button:hover { background: rgba(148, 163, 184, 0.10); }
+  .data-empty { color: #475569; padding: 18px; text-align: center; font-size: 12px; }
+  .data-card-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .data-card-actions button {
+    flex: 1;
+    background: transparent;
+    color: #f59e0b;
+    border: 1px solid #b45309;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .data-card-actions button:hover { background: rgba(245, 158, 11, 0.12); }
 
   /* Fleet-wide actions row above the device cards. Mirrors the
      per-card .btn-update / .btn-reset styling so the relationship
@@ -585,6 +666,7 @@
     <div class="view-toggle" id="viewToggle">
       <button id="viewLive"    class="active" onclick="setView('live')">Live</button>
       <button id="viewDevices"               onclick="setView('devices')">Devices</button>
+      <button id="viewData"                  onclick="setView('data')">Data</button>
     </div>
     <button class="btn-connect" id="btn-connect" onclick="startBootstrap()">&#x1F50D; Connect Sensors</button>
     <div class="connection-status">
@@ -604,6 +686,9 @@
     <span><strong id="dsStale" style="color:#facc15;">0</strong> stale</span>
     <span><strong id="dsOffline" style="color:#64748b;">0</strong> offline</span>
     <span><strong id="dsNeedsUpdate" style="color:#ec4899;">0</strong> needs update</span>
+    <a class="devices-repo-link"
+       href="https://github.com/reality2-ai/r2-rocker#readme"
+       target="_blank" rel="noopener">↗ Project README</a>
   </div>
   <div class="devices-bulk-actions">
     <button class="btn-bulk-update" id="bulkPullLatestBtn" onclick="requestUpdateAllFromLatest()" hidden>✨ Update Outdated from Latest</button>
@@ -613,6 +698,19 @@
   <div class="devices-area" id="devicesArea">
     <div class="card" id="devicesPlaceholder" style="color:#475569; text-align:center; padding:40px;">
       No sensors known yet — wait for an announce or click <em>Connect Sensors</em>.
+    </div>
+  </div>
+</div>
+
+<!-- ── Data view (SPEC-R2-ROCKER-CAPTURE) ──────────────────────────── -->
+<div class="devices-main" id="dataMain" hidden>
+  <div class="devices-bulk-actions">
+    <button class="btn-bulk-update" id="dataMergedBtn" onclick="downloadMergedLatest()">💾 Download merged CSV (last marked)</button>
+    <button class="btn-bulk-reset"  id="dataDeleteAllBtn" onclick="requestDeleteAllFleet()">🗑 Delete all data across fleet</button>
+  </div>
+  <div class="devices-area" id="dataArea">
+    <div class="card" id="dataPlaceholder" style="color:#475569; text-align:center; padding:40px;">
+      No sensors known yet.
     </div>
   </div>
 </div>
@@ -629,13 +727,16 @@
   <div class="sidebar">
     <div class="card">
       <h2>Run Control</h2>
-      <div class="state-indicator state-idle" id="stateIndicator">IDLE</div>
-      <div class="btn-group">
-        <button class="btn btn-start" id="btnStart" onclick="sendCmd('start')">&#x25B6; Start</button>
-        <button class="btn btn-mark" id="btnMark" onclick="sendCmd('mark')" disabled>&#x2691; Mark</button>
-        <button class="btn btn-stop" id="btnStop" onclick="sendCmd('stop')" disabled>&#x25A0; Stop</button>
+      <div class="state-indicator state-idle" id="captureStateLabel">IDLE</div>
+      <div class="run-name-row">
+        <label for="runName">Run name:</label>
+        <input type="text" id="runName" placeholder="run-01" maxlength="32" />
       </div>
-      <div class="cal-status" id="calStatus">&mdash;</div>
+      <div class="btn-group">
+        <button class="btn btn-start" id="captureStartBtn" onclick="captureStart()">&#x25B6; Start</button>
+        <button class="btn btn-mark"  id="captureMarkBtn"  onclick="captureMark()" disabled>&#x2691; Mark</button>
+        <button class="btn btn-stop"  id="captureStopBtn"  onclick="captureStop()" disabled>&#x25A0; Stop</button>
+      </div>
     </div>
 
     <div class="card">
@@ -982,10 +1083,7 @@ const KNOWN_EVENT_NAMES = [
   'r2.sensor.event.log',
   'r2.sensor.cal.sample.resp',
   'r2.sensor.sync_pong',
-  // Legacy M10 names retained for mixed-deployment compat.
-  'acceleration',
-  'battery_status',
-  'run_state',
+  'r2.sensor.capture.state',
 ];
 
 async function bootstrapHive() {
@@ -1190,6 +1288,7 @@ function remapPayload(eventName, raw) {
     'r2.sensor.battery':     [['0','voltage_mv'],['1','percent'],['2','charging'],['3','ts_ms'],['10','temp_c']],
     'r2.sensor.announce':    [['0','device_pk'],['1','hostname'],['2','fw_ver'],['3','last_seq'],['4','boot_ts_ms'],['5','nonce'],['6','sig'],['10','mounting_role']],
     'r2.sensor.status':      [['0','state'],['1','uptime_ms'],['2','samples_total'],['3','samples_acked'],['4','sd_pct_used'],['5','rate_hz_active'],['6','range_active'],['7','data_source'],['10','error_code']],
+    'r2.sensor.capture.state': [['0','state'],['1','file']],
   };
   const map = SCHEMA[eventName];
   if (!map) return raw;
@@ -1212,22 +1311,11 @@ function handleEvent(msg) {
 
   switch (msg.event) {
     case 'r2.sensor.acceleration':
-    case 'acceleration': // legacy M10 schema
       if (sensor) {
         if (msg.device_name) setDeviceName(sensor, msg.device_name);
         handleAcceleration(msg, sensor);
       }
       return;  // don't log raw acceleration frames — too noisy at 10Hz
-    case 'run_state':
-      if (sensor) {
-        handleRunState(msg);
-        // Log the state name (payload.state is a number from the sensor)
-        if (msg.payload && msg.payload.state != null) {
-          const stateLabel = decodeStateNum(msg.payload.state);
-          addSensorLog(sensor, 'state → ' + stateLabel);
-        }
-      }
-      break;
     case 'r2.sensor.announce':
       if (sensor && msg.payload) {
         // Schema field is `hostname` (key 1) per remapPayload SCHEMA;
@@ -1249,34 +1337,7 @@ function handleEvent(msg) {
         updateSensorList();
       }
       return;
-    case 'sensor.connected':
-      if (sensor) {
-        if (msg.device_name) setDeviceName(sensor, msg.device_name);
-        addSensorLog(sensor, 'connected');
-        // Capture announce metadata for the Devices view (Phase 8a).
-        if (msg.payload) {
-          if (msg.payload.fw_ver)    sensor.fwVer    = msg.payload.fw_ver;
-          if (msg.payload.device_pk) sensor.devicePk = msg.payload.device_pk;
-          if (msg.payload.boot_ts_ms != null) sensor.bootTsMs = msg.payload.boot_ts_ms;
-        }
-        sensor.online = true;
-        sensor.lastSeen = Date.now();
-        renderDevicesIfVisible();
-        // Do NOT call applyState here. The sensor.connected event fires for
-        // three different cases that need different treatment:
-        //   1. First connect: sensor is idle → handled by run_state broadcast
-        //   2. Reconnect: sensor reset to idle → handled by run_state broadcast
-        //   3. New browser joining existing session: WS replay — must NOT reset
-        //      a live session already in rocking state for an existing browser.
-        //
-        // State sync is driven by the sensor's run_state broadcast (sent by
-        // the sensor immediately after connect). This decouples the TCP
-        // event (which fires for all three cases) from FSM transitions.
-      }
-      addLog(msg);
-      return;
     case 'r2.sensor.battery':
-    case 'battery_status':
       if (sensor && msg.payload) {
         sensor.battery = {
           voltage_mv: msg.payload.voltage_mv ?? null,
@@ -1309,6 +1370,22 @@ function handleEvent(msg) {
         updateSensorList(); // keep sidebar dot's colour in sync with fsmState
       }
       addLog(msg);
+      return;
+    case 'r2.sensor.capture.state':
+      if (sensor && msg.payload) {
+        // SPEC-R2-ROCKER-CAPTURE §3: state ∈ {0 idle, 1 calibrating, 2 recording},
+        // optional `file` echoed back when recording.
+        const st = msg.payload.state ?? 0;
+        sensor.captureState = ['idle', 'calibrating', 'recording'][st] || 'idle';
+        sensor.captureFile  = msg.payload.file ?? null;
+        // Whenever a peer finishes recording, refresh its file list so
+        // the new file shows up without an explicit poll. Also refresh
+        // on transition INTO recording so the operator sees the
+        // freshly-opened file size growing.
+        scheduleDataRefresh(sensor.key);
+        updateCaptureUiFromFleet();
+        renderDataViewIfVisible();
+      }
       return;
   }
   // Any event we didn't return early from updates lastSeen too — useful
@@ -1493,13 +1570,212 @@ function setView(name) {
   // regressions came from `.main { display: grid; }` overriding `[hidden]`.
   const live    = document.getElementById('liveMain');
   const devices = document.getElementById('devicesMain');
+  const data    = document.getElementById('dataMain');
   live.hidden    = (name !== 'live');
   devices.hidden = (name !== 'devices');
+  if (data) data.hidden = (name !== 'data');
   live.style.display    = (name === 'live')    ? 'grid'  : 'none';
   devices.style.display = (name === 'devices') ? 'block' : 'none';
+  if (data) data.style.display = (name === 'data') ? 'block' : 'none';
   document.getElementById('viewLive').classList.toggle('active',    name === 'live');
   document.getElementById('viewDevices').classList.toggle('active', name === 'devices');
+  const dataBtn = document.getElementById('viewData');
+  if (dataBtn) dataBtn.classList.toggle('active', name === 'data');
   if (name === 'devices') renderDevices();
+  if (name === 'data')    renderDataView();
+}
+
+// ── Data tab plumbing ────────────────────────────────────────────
+//
+// Mirrors renderDevices / deviceCardEls but on its own DOM tree.
+
+let lastMarkedFilename = null; // remembered between Mark and the "merged download" button press
+
+function renderDataViewIfVisible() {
+  if (currentView === 'data') renderDataView();
+}
+
+function renderDataView() {
+  const area = document.getElementById('dataArea');
+  if (!area) return;
+  const peers = [...sensors.values()];
+
+  const wantedKeys = new Set(peers.map((s) => s.key));
+  for (const [key, el] of dataCardEls) {
+    if (!wantedKeys.has(key)) { el.remove(); dataCardEls.delete(key); }
+  }
+
+  if (peers.length === 0) {
+    if (!area.querySelector('#dataPlaceholder')) {
+      area.innerHTML = '<div class="card" id="dataPlaceholder" style="color:#475569;text-align:center;padding:40px;">No sensors known yet.</div>';
+    }
+    updateCaptureUiFromFleet();
+    return;
+  }
+  const ph = area.querySelector('#dataPlaceholder');
+  if (ph) ph.remove();
+
+  peers.sort((a, b) => (a.deviceName ?? a.key).localeCompare(b.deviceName ?? b.key));
+  for (const s of peers) {
+    let el = dataCardEls.get(s.key);
+    if (!el) {
+      el = document.createElement('r2-data-card');
+      dataCardEls.set(s.key, el);
+      area.appendChild(el);
+      // First time a card appears, kick a list fetch.
+      scheduleDataRefresh(s.key, 100);
+    }
+    el.sensor = s;
+  }
+  for (const s of peers) {
+    const el = dataCardEls.get(s.key);
+    if (el) area.appendChild(el);
+  }
+  updateCaptureUiFromFleet();
+}
+
+/// Update the top-bar capture-state label + Start/Mark/Stop button
+/// disabled state based on the union of all peers' capture states.
+function updateCaptureUiFromFleet() {
+  const peers = [...sensors.values()];
+  let aggregate = 'idle';
+  for (const s of peers) {
+    if (s.captureState === 'calibrating')      aggregate = 'calibrating';
+    else if (s.captureState === 'recording' && aggregate !== 'calibrating') aggregate = 'recording';
+  }
+  const label = document.getElementById('captureStateLabel');
+  if (label) {
+    label.textContent = aggregate.toUpperCase();
+    label.classList.remove('state-idle', 'state-calibrating', 'state-recording');
+    label.classList.add(
+      aggregate === 'calibrating' ? 'state-calibrating'
+      : aggregate === 'recording' ? 'state-recording'
+      : 'state-idle'
+    );
+  }
+  // Button availability: Start is always live; Mark only while
+  // calibrating; Stop only while recording.
+  const btnStart = document.getElementById('captureStartBtn');
+  const btnMark  = document.getElementById('captureMarkBtn');
+  const btnStop  = document.getElementById('captureStopBtn');
+  if (btnStart) btnStart.disabled = (peers.length === 0);
+  if (btnMark)  btnMark .disabled = (aggregate !== 'calibrating');
+  if (btnStop)  btnStop .disabled = (aggregate !== 'recording');
+
+  const merged = document.getElementById('dataMergedBtn');
+  if (merged) merged.disabled = !lastMarkedFilename;
+}
+
+/// Coalesce file-list refreshes per sensor — every capture.state
+/// change fires this, and we don't want a stack of overlapping
+/// fetches if many state events arrive in quick succession.
+const _dataRefreshTimers = new Map();
+function scheduleDataRefresh(key, delayMs = 600) {
+  if (_dataRefreshTimers.has(key)) clearTimeout(_dataRefreshTimers.get(key));
+  const t = setTimeout(() => {
+    _dataRefreshTimers.delete(key);
+    const card = dataCardEls.get(key);
+    if (card) card.refresh();
+  }, delayMs);
+  _dataRefreshTimers.set(key, t);
+}
+
+// ── Capture controls (Start / Mark / Stop) ──────────────────────────
+
+async function captureStart() {
+  try {
+    const res = await fetch('/api/capture/start', { method: 'POST' });
+    if (!res.ok) console.warn('[capture] start', await res.text());
+  } catch (err) {
+    console.warn('[capture] start', err);
+  }
+}
+
+async function captureMark() {
+  const input = document.getElementById('runName');
+  const name = (input?.value || '').trim();
+  if (!/^[A-Za-z0-9_-]+$/.test(name) || name.length > 32) {
+    alert('Run name must match [A-Za-z0-9_-]{1,32}');
+    return;
+  }
+  try {
+    const res = await fetch('/api/capture/mark', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    if (!res.ok) {
+      console.warn('[capture] mark', await res.text());
+      return;
+    }
+    const out = await res.json();
+    // Sensors will independently rename to `<ts16>-<name>.csv`.
+    // Build the same filename here so "Download merged" knows which
+    // file to ask each sensor for.
+    if (out.ts_ms != null) {
+      const ts16 = String(Math.max(0, out.ts_ms)).padStart(16, '0');
+      lastMarkedFilename = `${ts16}-${name}.csv`;
+      updateCaptureUiFromFleet();
+    }
+  } catch (err) {
+    console.warn('[capture] mark', err);
+  }
+}
+
+async function captureStop() {
+  try {
+    const res = await fetch('/api/capture/stop', { method: 'POST' });
+    if (!res.ok) console.warn('[capture] stop', await res.text());
+  } catch (err) {
+    console.warn('[capture] stop', err);
+  }
+  // Refresh every card after stop so the new file appears.
+  for (const card of dataCardEls.values()) card.refresh();
+}
+
+// ── Per-file download / delete (used from inline onclick="…") ─────
+
+async function downloadCaptureFile(addr, name) {
+  // Build an anchor so the browser drives the actual download — no
+  // need to materialise the blob in JS for a 5..50 MB file.
+  const a = document.createElement('a');
+  a.href = `/api/data/${encodeURIComponent(addr)}/file/${encodeURIComponent(name)}`;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+async function deleteCaptureFile(addr, name) {
+  if (!confirm(`Delete ${name} on ${addr}?`)) return;
+  try {
+    const res = await fetch(`/api/data/${encodeURIComponent(addr)}/file/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    if (!res.ok) console.warn('[data] del', await res.text());
+  } catch (err) {
+    console.warn('[data] del', err);
+  }
+  const card = dataCardEls.get(addr);
+  if (card) await card.refresh();
+}
+
+async function downloadMergedLatest() {
+  if (!lastMarkedFilename) {
+    alert('No marked capture in this session yet.');
+    return;
+  }
+  const a = document.createElement('a');
+  a.href = `/api/data/merged?file=${encodeURIComponent(lastMarkedFilename)}`;
+  a.download = `merged-${lastMarkedFilename}`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+async function requestDeleteAllFleet() {
+  const cards = [...dataCardEls.values()];
+  if (cards.length === 0) return;
+  if (!confirm(`Delete ALL capture files on ALL ${cards.length} sensor(s)?`)) return;
+  await Promise.allSettled(cards.map((c) => c.deleteAll()));
 }
 
 function renderDevicesIfVisible() {
@@ -1565,76 +1841,560 @@ function healthRowFor(s) {
   return '<div class="health-row"><div class="health-dot health-sim" title="Sensor not reading — synthetic data on the wire"></div><span class="health-label health-sim-text">Sim fallback — sensor not reading</span></div>';
 }
 
+// ── <r2-device-card> custom element ──────────────────────────────
+//
+// Each card is a long-lived DOM tree. `set sensor(...)` mutates
+// individual nodes in place rather than rebuilding the card, so:
+//  - CSS animations (LED pulse, OTA strobe) don't restart on every
+//    1 Hz tick.
+//  - Per-card sub-state (live-log scroll position, button text mid-
+//    operation) survives renders.
+//  - Reset-all + bulk-OTA visual feedback is consistent with single-
+//    sensor operations because the DOM under the operator's cursor
+//    is the same DOM.
+class R2DeviceCard extends HTMLElement {
+  constructor() {
+    super();
+    this._sensor = null;
+    this._built  = false;
+    this._refs   = {};
+    // Cached last-rendered values so we skip DOM writes when nothing
+    // changed. Keeps the once-per-second tick quiet — only the bits
+    // that actually move (lastSeen, sometimes battery) hit the DOM.
+    this._last   = {};
+  }
+
+  set sensor(s) {
+    this._sensor = s;
+    if (!this._built) { this._build(); this._built = true; }
+    this._update();
+  }
+  get sensor() { return this._sensor; }
+
+  _build() {
+    const s = this._sensor;
+    const key = s ? s.key : '';
+    this.innerHTML = `
+      <div class="device-card" data-key="${escapeAttr(key)}">
+        <div class="device-header">
+          <div class="virt-led" title="virtual LED — awaiting Phase 5L FSM state"></div>
+          <div class="device-name" style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"></div>
+        </div>
+        <div class="health-row-host"></div>
+        <div class="device-row"><span class="label">addr</span><span class="value device-addr"></span></div>
+        <div class="device-row"><span class="label">firmware</span><span class="value device-fw"></span></div>
+        <div class="device-row"><span class="label">last seen</span><span class="value device-lastseen"></span></div>
+        <div class="device-row"><span class="label">battery</span><span class="value device-battery"></span></div>
+        <div class="battery-bar-host"></div>
+        <div class="device-actions">
+          <button class="btn-update">⬆ Update Firmware</button>
+          <button class="btn-reset">↻ Reset Sensor</button>
+          <button class="btn-logs">↓ Logs</button>
+        </div>
+        <div class="device-log-host"></div>
+      </div>
+    `;
+    this._refs = {
+      card:        this.querySelector('.device-card'),
+      led:         this.querySelector('.virt-led'),
+      name:        this.querySelector('.device-name'),
+      healthHost:  this.querySelector('.health-row-host'),
+      addr:        this.querySelector('.device-addr'),
+      fw:          this.querySelector('.device-fw'),
+      lastSeen:    this.querySelector('.device-lastseen'),
+      battery:     this.querySelector('.device-battery'),
+      battBarHost: this.querySelector('.battery-bar-host'),
+      btnUpdate:   this.querySelector('.btn-update'),
+      btnReset:    this.querySelector('.btn-reset'),
+      btnLogs:     this.querySelector('.btn-logs'),
+      logHost:     this.querySelector('.device-log-host'),
+    };
+    // Per-card action buttons delegate to methods on this element
+    // (below). Each method is self-contained — bulk operations
+    // ("Reset All", "Update All") call the same method on every card
+    // in parallel via Promise.allSettled, so single-sensor and fleet
+    // operations share one code path and produce identical UI feedback.
+    this._refs.btnUpdate.addEventListener('click', () => this._sensor && this.pickAndUpdateFirmware());
+    this._refs.btnReset .addEventListener('click', () => this._sensor && this.reset());
+    this._refs.btnLogs  .addEventListener('click', () => this._sensor && this.toggleLogs());
+  }
+
+  // ── action methods ─────────────────────────────────────────────
+
+  /// Reboot this sensor via the dashboard's reset endpoint. Returns
+  /// a Promise resolving to `{ok, message?}`. Updates button + LED
+  /// state in place. Safe to call concurrently from a fleet button.
+  async reset() {
+    const s = this._sensor;
+    if (!s) return { ok: false, message: 'no sensor' };
+    const r = this._refs;
+
+    s.pendingReset = true;
+    // Forward-fail the LED back to its real state after 10 s if the
+    // sensor never sends a fresh status frame (clears pendingReset
+    // on first frame; see handleEvent r2.sensor.status branch).
+    setTimeout(() => {
+      if (s.pendingReset) {
+        s.pendingReset = false;
+        renderDevicesIfVisible();
+        updateSensorList();
+      }
+    }, 10_000);
+    this._update();
+    updateSensorList();
+
+    r.btnReset.disabled = true;
+    r.btnReset.textContent = '↻ Resetting…';
+
+    let ok = false; let message = '';
+    try {
+      const res = await fetch(`/api/sensor/${encodeURIComponent(s.key)}/reset`, { method: 'POST' });
+      const out = await res.json().catch(() => ({}));
+      ok = res.ok && !!out.ok;
+      message = out.message || `HTTP ${res.status}`;
+      r.btnReset.textContent = ok ? '✓ Reset' : '✗ Failed';
+      if (!ok) console.warn('[reset]', s.key, out);
+    } catch (err) {
+      r.btnReset.textContent = '✗ Network error';
+      message = String(err);
+      console.warn('[reset]', s.key, err);
+    }
+    setTimeout(() => {
+      r.btnReset.textContent = '↻ Reset Sensor';
+      r.btnReset.disabled = false;
+    }, 4000);
+    return { ok, message };
+  }
+
+  /// Push a firmware Blob to this sensor's OTA endpoint. Returns
+  /// `{ok, message?}`. Sets `pendingOta` so the LED switches to the
+  /// strobing-white state for the duration.
+  async updateFirmware(blob) {
+    const s = this._sensor;
+    if (!s) return { ok: false, message: 'no sensor' };
+    const r = this._refs;
+
+    s.pendingOta = true;
+    if (s._otaFailsafe) clearTimeout(s._otaFailsafe);
+    s._otaFailsafe = setTimeout(() => {
+      if (s.pendingOta) {
+        s.pendingOta = false;
+        renderDevicesIfVisible();
+        updateSensorList();
+      }
+    }, 90_000);
+    this._update();
+    updateSensorList();
+
+    r.btnUpdate.disabled = true;
+    r.btnUpdate.textContent = `⬆ Uploading ${(blob.size / 1024).toFixed(0)} KB…`;
+
+    let ok = false; let message = '';
+    try {
+      const res = await fetch(`/api/ota/${encodeURIComponent(s.key)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: blob,
+      });
+      const out = await res.json().catch(() => ({}));
+      ok = res.ok && !!out.ok;
+      message = out.message || `HTTP ${res.status}`;
+      r.btnUpdate.textContent = ok ? '✓ Updated' : '✗ Update failed';
+      if (!ok) console.warn('[ota]', s.key, out);
+    } catch (err) {
+      r.btnUpdate.textContent = '✗ Network error';
+      message = String(err);
+      console.warn('[ota]', s.key, err);
+    }
+    setTimeout(() => {
+      r.btnUpdate.textContent = '⬆ Update Firmware';
+      r.btnUpdate.disabled = false;
+    }, 4000);
+    return { ok, message };
+  }
+
+  /// Open a file picker, then push the chosen .bin to this sensor.
+  /// Called by the per-card "Update Firmware" button.
+  pickAndUpdateFirmware() {
+    const s = this._sensor;
+    if (!s) return;
+    const picker = document.createElement('input');
+    picker.type = 'file';
+    picker.accept = '.bin';
+    picker.onchange = (ev) => {
+      const file = ev.target.files?.[0];
+      picker.remove();
+      if (file) this.updateFirmware(file);
+    };
+    document.body.appendChild(picker);
+    picker.click();
+    setTimeout(() => picker.remove(), 60_000);
+  }
+
+  /// Toggle the live log tail panel on this card. WS state lives on
+  /// the sensor object (so it survives card removal/re-add) and is
+  /// drained into `s._logsLines` for rendering.
+  toggleLogs() {
+    const s = this._sensor;
+    if (!s) return;
+    if (s.logsOpen) {
+      if (s._logsWs) {
+        try { s._logsWs.close(); } catch (_) {}
+        s._logsWs = null;
+      }
+      s.logsOpen = false;
+      this._update();
+      return;
+    }
+    s.logsOpen = true;
+    s._logsLines = s._logsLines ?? [];
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const url = `${proto}//${location.host}/ws/logs/${encodeURIComponent(s.key)}`;
+    let ws;
+    try {
+      ws = new WebSocket(url);
+    } catch (err) {
+      s._logsLines.push(`[ws/logs] open failed: ${err}\n`);
+      this._update();
+      return;
+    }
+    s._logsWs = ws;
+    ws.onopen = () => {
+      s._logsLines.push(`[ws/logs] connected to ${s.key}:21046\n`);
+      this._capLogs(s);
+      if (s.logsOpen) this._update();
+    };
+    ws.onmessage = (ev) => {
+      s._logsLines.push(String(ev.data));
+      this._capLogs(s);
+      if (s.logsOpen) this._update();
+    };
+    ws.onclose = () => {
+      if (s._logsWs === ws) s._logsWs = null;
+      s._logsLines.push('[ws/logs] disconnected\n');
+      if (s.logsOpen) this._update();
+    };
+    ws.onerror = () => {
+      s._logsLines.push('[ws/logs] socket error\n');
+      if (s.logsOpen) this._update();
+    };
+    this._update();
+  }
+
+  _capLogs(s) {
+    if (s._logsLines.length > LOG_BUFFER_MAX)
+      s._logsLines.splice(0, s._logsLines.length - LOG_BUFFER_MAX);
+  }
+
+  _update() {
+    const s = this._sensor;
+    if (!s) return;
+    const r = this._refs;
+    const last = this._last;
+
+    const key = s.key;
+    if (last.key !== key) {
+      r.card.dataset.key = key;
+      r.addr.textContent = key;
+      last.key = key;
+    }
+
+    const status = classifyOnline(s);
+    const cardClass = `device-card ${status}`;
+    if (last.cardClass !== cardClass) {
+      r.card.className = cardClass;
+      last.cardClass = cardClass;
+    }
+
+    const name = s.deviceName ?? key;
+    if (last.name !== name) {
+      r.name.textContent = name;
+      last.name = name;
+    }
+
+    const ledClass = `virt-led ${ledClassFor(s)}`;
+    if (last.ledClass !== ledClass) {
+      r.led.className = ledClass;
+      last.ledClass = ledClass;
+    }
+
+    // Firmware row + needs-update dot.
+    const fwShort = s.fwVer ?? '—';
+    const targetVer = availableFirmware?.version || null;
+    const fwOutdated = !!(targetVer && s.fwVer && s.fwVer !== targetVer
+      && !availableFirmware.assets.some((a) => a.version === s.fwVer));
+    s._needsUpdate = fwOutdated;
+    const fwSig = `${fwShort}|${fwOutdated ? targetVer : ''}`;
+    if (last.fwSig !== fwSig) {
+      r.fw.title = s.fwVer ?? '—';
+      r.fw.textContent = fwShort;
+      if (fwOutdated) {
+        const dot = document.createElement('span');
+        dot.className = 'fw-update-dot';
+        dot.title = `newer firmware available: ${targetVer}`;
+        r.fw.appendChild(dot);
+      }
+      last.fwSig = fwSig;
+    }
+
+    // Last seen — this is what changes every 1 Hz tick.
+    const lastSeenText = s.lastSeen ? fmtAge(Date.now() - s.lastSeen) : '—';
+    if (last.lastSeenText !== lastSeenText) {
+      r.lastSeen.textContent = lastSeenText;
+      last.lastSeenText = lastSeenText;
+    }
+
+    // Battery line + bar.
+    const battMv = s.battery?.voltage_mv ?? null;
+    const battPct = s.battery?.percent ?? null;
+    const battCharging = s.battery?.charging ?? false;
+    const battText = `${battMv != null ? (battMv + ' mV') : '—'}${battPct != null ? ` (${battPct}%)` : ''}${battCharging ? ' ⚡' : ''}`;
+    if (last.battText !== battText) {
+      r.battery.textContent = battText;
+      last.battText = battText;
+    }
+    const battSig = `${battPct}`;
+    if (last.battSig !== battSig) {
+      if (battPct != null) {
+        const battClass = battPct < 10 ? 'crit' : battPct < 25 ? 'low' : '';
+        r.battBarHost.innerHTML = `<div class="battery-bar"><div class="${battClass}" style="width:${Math.max(2, Math.min(100, battPct))}%;"></div></div>`;
+      } else {
+        r.battBarHost.innerHTML = '';
+      }
+      last.battSig = battSig;
+    }
+
+    // Health row (sensor health: real / sim / unknown).
+    const healthHtml = healthRowFor(s);
+    if (last.healthHtml !== healthHtml) {
+      r.healthHost.innerHTML = healthHtml;
+      last.healthHtml = healthHtml;
+    }
+
+    // Logs button state.
+    const logsOpen = !!s.logsOpen;
+    if (last.logsOpen !== logsOpen) {
+      r.btnLogs.textContent = logsOpen ? '↑ Logs' : '↓ Logs';
+      r.btnLogs.classList.toggle('open', logsOpen);
+      last.logsOpen = logsOpen;
+    }
+
+    // Log panel — content updates on each tick when open.
+    if (logsOpen) {
+      const lines = (s._logsLines ?? []).join('');
+      if (last.logLines !== lines) {
+        let panel = r.logHost.querySelector('.device-log-panel');
+        if (!panel) {
+          panel = document.createElement('div');
+          panel.className = 'device-log-panel';
+          panel.dataset.logKey = key;
+          r.logHost.appendChild(panel);
+        }
+        panel.textContent = lines;
+        panel.scrollTop = panel.scrollHeight;
+        last.logLines = lines;
+      }
+    } else if (last.logLines !== undefined) {
+      r.logHost.innerHTML = '';
+      last.logLines = undefined;
+    }
+  }
+}
+customElements.define('r2-device-card', R2DeviceCard);
+
+// ── <r2-data-card> custom element ────────────────────────────────
+//
+// Mirror of R2DeviceCard for the Data tab. Long-lived DOM tree; the
+// `sensor` setter mutates in place. Owns the per-sensor file list +
+// the per-card "delete all" button. Per-file download / delete are
+// wired to the dashboard's /api/data/{addr}/* routes.
+class R2DataCard extends HTMLElement {
+  constructor() {
+    super();
+    this._sensor = null;
+    this._built = false;
+    this._refs = {};
+    this._lastFilesSig = '';
+  }
+
+  set sensor(s) {
+    this._sensor = s;
+    if (!this._built) { this._build(); this._built = true; }
+    this._update();
+  }
+  get sensor() { return this._sensor; }
+
+  _build() {
+    const s = this._sensor;
+    const key = s ? s.key : '';
+    this.innerHTML = `
+      <div class="device-card" data-key="${escapeAttr(key)}">
+        <div class="device-header">
+          <div class="virt-led" title="virtual LED"></div>
+          <div class="device-name" style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"></div>
+        </div>
+        <div class="device-row"><span class="label">addr</span><span class="value device-addr"></span></div>
+        <div class="device-row"><span class="label">SD</span><span class="value device-sd"></span></div>
+        <div class="data-files"></div>
+        <div class="data-card-actions">
+          <button class="btn-refresh">↻ Refresh</button>
+          <button class="btn-del-all">🗑 Delete all on this sensor</button>
+        </div>
+      </div>
+    `;
+    this._refs = {
+      card:     this.querySelector('.device-card'),
+      led:      this.querySelector('.virt-led'),
+      name:     this.querySelector('.device-name'),
+      addr:     this.querySelector('.device-addr'),
+      sd:       this.querySelector('.device-sd'),
+      files:    this.querySelector('.data-files'),
+      btnRefresh: this.querySelector('.btn-refresh'),
+      btnDelAll:  this.querySelector('.btn-del-all'),
+    };
+    this._refs.btnRefresh.addEventListener('click', () => this._sensor && this.refresh());
+    this._refs.btnDelAll .addEventListener('click', () => this._sensor && this.deleteAll());
+  }
+
+  _update() {
+    const s = this._sensor;
+    if (!s) return;
+    const r = this._refs;
+
+    r.card.dataset.key = s.key;
+    r.addr.textContent = s.key;
+    r.name.textContent = s.deviceName ?? s.key;
+    r.card.className = `device-card ${classifyOnline(s)}`;
+    r.led.className = `virt-led ${ledClassFor(s)}`;
+    // SD presence is inferred from `captureSdAvailable` set by file
+    // list responses. If list returned a 5xx with a "no SD" message
+    // we mark it false. Until then assume present.
+    const sdOk = s.captureSdAvailable !== false;
+    r.sd.textContent = sdOk ? 'present' : 'not detected';
+    r.sd.style.color = sdOk ? '#cbd5e1' : '#f87171';
+
+    // File list — rebuild only when the signature changed (same idea
+    // as R2DeviceCard's `_last` cache).
+    const files = s.dataFiles ?? [];
+    const sig = JSON.stringify(files);
+    if (sig !== this._lastFilesSig) {
+      if (files.length === 0) {
+        r.files.innerHTML = '<div class="data-empty">No captures yet on this sensor.</div>';
+      } else {
+        const rows = files.map((f) => {
+          const sizeKb = (f.size / 1024).toFixed(1);
+          const mt = f.mtime_ms ? new Date(f.mtime_ms).toISOString().replace('T', ' ').slice(0, 19) : '—';
+          const nameEsc = escapeText(f.name);
+          const nameAttr = escapeAttr(f.name);
+          const addrAttr = escapeAttr(s.key);
+          return `
+            <div class="data-file-row">
+              <span class="name" title="${nameEsc}">${nameEsc}</span>
+              <span class="meta">${sizeKb} KB · ${mt}</span>
+              <button onclick="downloadCaptureFile('${addrAttr}','${nameAttr}')">📥</button>
+              <button class="danger" onclick="deleteCaptureFile('${addrAttr}','${nameAttr}')">🗑</button>
+            </div>`;
+        }).join('');
+        r.files.innerHTML = rows;
+      }
+      this._lastFilesSig = sig;
+    }
+
+    r.btnDelAll.disabled = (files.length === 0);
+  }
+
+  async refresh() {
+    const s = this._sensor;
+    if (!s) return;
+    try {
+      const res = await fetch(`/api/data/${encodeURIComponent(s.key)}/list`);
+      if (!res.ok) {
+        s.captureSdAvailable = false;
+        s.dataFiles = [];
+      } else {
+        const body = await res.json();
+        s.captureSdAvailable = true;
+        s.dataFiles = Array.isArray(body.files) ? body.files.slice().sort((a, b) => a.name.localeCompare(b.name)) : [];
+      }
+    } catch (err) {
+      console.warn('[data] list', s.key, err);
+      s.captureSdAvailable = false;
+      s.dataFiles = [];
+    }
+    this._update();
+  }
+
+  async deleteAll() {
+    const s = this._sensor;
+    if (!s) return;
+    if (!confirm(`Delete ALL capture files on ${s.deviceName ?? s.key}?`)) return;
+    try {
+      const res = await fetch(`/api/data/${encodeURIComponent(s.key)}/all`, { method: 'DELETE' });
+      if (!res.ok) console.warn('[data] del_all', s.key, await res.text());
+    } catch (err) {
+      console.warn('[data] del_all', s.key, err);
+    }
+    await this.refresh();
+  }
+}
+customElements.define('r2-data-card', R2DataCard);
+
+// Map key → <r2-data-card>. Lives parallel to deviceCardEls so the
+// two tabs stay independent (a card on the Devices tab is NOT the
+// same DOM as the matching card on the Data tab).
+const dataCardEls = new Map();
+
+// Map of IP-key → <r2-device-card> currently in the DOM. Lets
+// renderDevices() reuse the existing card element across ticks
+// rather than rebuilding the DOM tree.
+const deviceCardEls = new Map();
+
 function renderDevices() {
   const area = document.getElementById('devicesArea');
   const peers = [...sensors.values()];
-  if (peers.length === 0) {
-    area.innerHTML = '<div class="card" id="devicesPlaceholder" style="color:#475569;text-align:center;padding:40px;">No sensors known yet — wait for an announce or click <em>Connect Sensors</em>.</div>';
-    updateDevicesSummary(peers);
-    return;
-  }
 
   // Stable sort by hostname/key so cards don't jump around.
   peers.sort((a, b) => (a.deviceName ?? a.key).localeCompare(b.deviceName ?? b.key));
 
-  area.innerHTML = peers.map(s => {
-    const status   = classifyOnline(s);
-    const name     = s.deviceName ?? s.key;
-    const ip       = s.key;
-    // Show the full fw_ver verbatim — operator wants to see semver +
-    // git short-sha + any tag (e.g. " sim") on the card directly.
-    // Once a "current expected firmware" register exists (Phase 9-fwreg),
-    // a mismatch will get a small "out-of-date" badge layered on top.
-    const fwShort  = s.fwVer ?? '—';
-    // Outdated if the dashboard knows of a newer firmware AND the
-    // device's announced fw_ver doesn't match. The dashboard returns
-    // a version string for each carrier; we don't know which carrier
-    // this device is, so any-asset match counts as up-to-date.
-    const targetVer = availableFirmware?.version || null;
-    const fwOutdated = targetVer && s.fwVer && s.fwVer !== targetVer
-        && !availableFirmware.assets.some(a => a.version === s.fwVer);
-    s._needsUpdate = !!fwOutdated;
-    const fwDot = fwOutdated
-        ? `<span class="fw-update-dot" title="newer firmware available: ${escapeAttr(targetVer)}"></span>`
-        : '';
-    const battMv   = s.battery?.voltage_mv ?? null;
-    const battPct  = s.battery?.percent ?? null;
-    const battCharging = s.battery?.charging ?? false;
-    const battClass = battPct == null ? ''
-                     : battPct < 10 ? 'crit'
-                     : battPct < 25 ? 'low' : '';
-    const lastSeen = s.lastSeen ? fmtAge(Date.now() - s.lastSeen) : '—';
-    const led      = ledClassFor(s);
+  // Drop cards for sensors that are no longer in the map (rare, but
+  // a bootstrap "Reset" event can clear them).
+  const wantedKeys = new Set(peers.map((s) => s.key));
+  for (const [key, el] of deviceCardEls) {
+    if (!wantedKeys.has(key)) {
+      el.remove();
+      deviceCardEls.delete(key);
+    }
+  }
 
-    return `
-      <div class="device-card ${status}" data-key="${escapeAttr(s.key)}">
-        <div class="device-header">
-          <div class="virt-led ${led}" title="virtual LED${s.fsmState == null ? ' — awaiting Phase 5L FSM state' : ''}"></div>
-          <div style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeText(name)}</div>
-        </div>
-        ${healthRowFor(s)}
-        <div class="device-row"><span class="label">addr</span><span class="value">${escapeText(ip)}</span></div>
-        <div class="device-row"><span class="label">firmware</span><span class="value" title="${escapeAttr(s.fwVer ?? '—')}">${escapeText(fwShort)}${fwDot}</span></div>
-        <div class="device-row"><span class="label">last seen</span><span class="value">${lastSeen}</span></div>
-        <div class="device-row">
-          <span class="label">battery</span>
-          <span class="value">${battMv != null ? (battMv + ' mV') : '—'}${battPct != null ? ` (${battPct}%)` : ''}${battCharging ? ' ⚡' : ''}</span>
-        </div>
-        ${battPct != null ? `<div class="battery-bar"><div class="${battClass}" style="width:${Math.max(2, Math.min(100, battPct))}%;"></div></div>` : ''}
-        <div class="device-actions">
-          <button class="btn-update" onclick="requestFirmwareUpdate('${escapeAttr(s.key)}')">⬆ Update Firmware</button>
-          <button class="btn-reset" onclick="requestReset('${escapeAttr(s.key)}')">↻ Reset Sensor</button>
-          <button class="btn-logs ${s.logsOpen ? 'open' : ''}" onclick="toggleLogs('${escapeAttr(s.key)}')">${s.logsOpen ? '↑ Logs' : '↓ Logs'}</button>
-        </div>
-        ${s.logsOpen ? `<div class="device-log-panel" data-log-key="${escapeAttr(s.key)}">${escapeText((s._logsLines ?? []).join(''))}</div>` : ''}
-      </div>`;
-  }).join('');
+  // Empty state: replace area content with the placeholder. Skip the
+  // custom-element path entirely when there are no peers so the
+  // operator sees the "no sensors known yet" message.
+  if (peers.length === 0) {
+    if (!area.querySelector('#devicesPlaceholder')) {
+      area.innerHTML = '<div class="card" id="devicesPlaceholder" style="color:#475569;text-align:center;padding:40px;">No sensors known yet — wait for an announce or click <em>Connect Sensors</em>.</div>';
+    }
+    updateDevicesSummary(peers);
+    return;
+  }
+  // Remove placeholder if present.
+  const placeholder = area.querySelector('#devicesPlaceholder');
+  if (placeholder) placeholder.remove();
 
-  // Pin the live-log panel to the bottom after each repaint so new lines
-  // are always visible. (The card is re-rendered once a second, so any
-  // manual scrollback is overwritten anyway.)
-  for (const panel of area.querySelectorAll('.device-log-panel')) {
-    panel.scrollTop = panel.scrollHeight;
+  // Reuse-or-create per peer, then re-order to match sort.
+  for (const s of peers) {
+    let el = deviceCardEls.get(s.key);
+    if (!el) {
+      el = document.createElement('r2-device-card');
+      deviceCardEls.set(s.key, el);
+      area.appendChild(el);
+    }
+    el.sensor = s;
+  }
+  // Re-order DOM children to match the sorted peer list. appendChild
+  // moves the node (no re-creation, so CSS state survives).
+  for (const s of peers) {
+    const el = deviceCardEls.get(s.key);
+    if (el) area.appendChild(el);
   }
 
   updateDevicesSummary(peers);
@@ -1730,47 +2490,13 @@ function handleOtaEvent(msg) {
   }
 }
 
+// All per-sensor actions live on the <r2-device-card> custom element
+// (see R2DeviceCard above). These top-level shims exist so legacy
+// callers (anything that still has the IP string but not the card
+// reference) keep working — they look the card up and delegate.
 function requestFirmwareUpdate(addr) {
-  // Phase 9-light: open a file picker, POST the chosen .bin to the
-  // dashboard's /api/ota/{addr}, watch progress via /ws/status events.
-  // Phase 9-secure (#24) will add Ed25519 signing + verify before swap.
-  const btn = document.querySelector(`.device-card[data-key="${addr}"] .btn-update`);
-  if (!btn) return;
-
-  const picker = document.createElement('input');
-  picker.type = 'file';
-  picker.accept = '.bin,application/octet-stream';
-  picker.style.display = 'none';
-  picker.onchange = async () => {
-    const file = picker.files && picker.files[0];
-    if (!file) return;
-    btn.disabled = true;
-    btn.textContent = `⬆ Uploading ${(file.size / 1024).toFixed(0)} KB…`;
-    try {
-      const res = await fetch(`/api/ota/${encodeURIComponent(addr)}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/octet-stream' },
-        body: file,
-      });
-      const out = await res.json().catch(() => ({}));
-      if (res.ok && out.ok) {
-        btn.textContent = '✓ Updated';
-      } else {
-        btn.textContent = '✗ Update failed';
-        console.warn('[ota] failed:', out);
-      }
-    } catch (err) {
-      btn.textContent = '✗ Network error';
-      console.warn('[ota] fetch error:', err);
-    }
-    setTimeout(() => {
-      btn.textContent = '⬆ Update Firmware';
-      btn.disabled = false;
-    }, 4000);
-  };
-  document.body.appendChild(picker);
-  picker.click();
-  setTimeout(() => picker.remove(), 60_000);
+  const card = deviceCardEls.get(addr);
+  if (card) card.pickAndUpdateFirmware();
 }
 
 function escapeText(s) {
@@ -1778,103 +2504,79 @@ function escapeText(s) {
 }
 function escapeAttr(s) { return escapeText(s).replace(/"/g, '&quot;'); }
 
-// SPEC-R2-ROCKER-SENSOR-REMOTE-RESET: POST /api/sensor/{addr}/reset,
-// watch progress via /ws/status reset events. Flips the virtual-LED dot
-// to a transient grey-pulse "resetting" state immediately on click, so
-// the user gets visual confirmation that something is happening; the
-// flag clears on the first status frame from the rebooted sensor (or
-// after a 10 s failsafe in case the sensor never comes back).
+// SPEC-R2-ROCKER-SENSOR-REMOTE-RESET. Thin shim; logic lives in
+// R2DeviceCard.reset().
 async function requestReset(addr) {
-  const btn = document.querySelector(`.device-card[data-key="${addr}"] .btn-reset`);
-  if (!btn) return;
-  const sensor = sensors.get(addr);
-  if (sensor) {
-    sensor.pendingReset = true;
-    renderDevicesIfVisible();
-    updateSensorList();
-    setTimeout(() => {
-      if (sensor.pendingReset) {
-        sensor.pendingReset = false;
-        renderDevicesIfVisible();
-        updateSensorList();
-      }
-    }, 10_000);
-  }
-  btn.disabled = true;
-  btn.textContent = '↻ Resetting…';
-  try {
-    const res = await fetch(`/api/sensor/${encodeURIComponent(addr)}/reset`, { method: 'POST' });
-    const out = await res.json().catch(() => ({}));
-    btn.textContent = (res.ok && out.ok) ? '✓ Reset' : '✗ Failed';
-    if (!(res.ok && out.ok)) console.warn('[reset] failed:', out);
-  } catch (err) {
-    btn.textContent = '✗ Network error';
-    console.warn('[reset] fetch error:', err);
-  }
-  setTimeout(() => {
-    btn.textContent = '↻ Reset Sensor';
-    btn.disabled = false;
-  }, 4000);
+  const card = deviceCardEls.get(addr);
+  if (card) await card.reset();
 }
 
-// Bulk operations across every known peer. The dashboard has no
-// fleet-level endpoint — these are just client-side fan-outs of the
-// existing /api/sensor/{addr}/reset and /api/ota/{addr} routes. We
-// run requests in parallel; OTA per-sensor at ~1.4 MB each, so for
-// two sensors this is fine and gets the job done faster than serial.
-// If the fleet grows past ~4 sensors we may need to cap concurrency.
+// Fleet operations — fan out the corresponding card methods in
+// parallel. Single-sensor and bulk paths go through the same DOM
+// node and call the same code, so they're visually identical.
+
 async function requestResetAll() {
-  const peers = [...sensors.values()];
-  if (peers.length === 0) return;
-  if (!confirm(`Reset all ${peers.length} sensor(s)?`)) return;
-
-  for (const sensor of peers) sensor.pendingReset = true;
-  renderDevicesIfVisible();
-  updateSensorList();
-
-  await Promise.allSettled(peers.map(async (sensor) => {
-    try {
-      await fetch(`/api/sensor/${encodeURIComponent(sensor.key)}/reset`, { method: 'POST' });
-    } catch (err) {
-      console.warn(`[reset-all] ${sensor.key} failed:`, err);
-    }
-  }));
-
-  // Same 10s failsafe as requestReset — sensors should be back well
-  // before this, and the `pendingReset` flag clears on first fresh
-  // status frame anyway.
-  setTimeout(() => {
-    for (const sensor of peers) sensor.pendingReset = false;
-    renderDevicesIfVisible();
-    updateSensorList();
-  }, 10_000);
+  const cards = [...deviceCardEls.values()];
+  if (cards.length === 0) return;
+  if (!confirm(`Reset all ${cards.length} sensor(s)?`)) return;
+  await Promise.allSettled(cards.map((c) => c.reset()));
 }
 
-// Auto-fetch latest firmware via the dashboard's `/api/firmware/...`
-// endpoints and push to every outdated peer. No file picker — the
-// dashboard is the source of truth (GitHub Release if reachable,
-// otherwise the local releases/ dir). Carrier is hardcoded to
-// devkitc for v0.1 since every sensor in the rig is a DevKitC; once
-// the announce payload carries a carrier field this should diff
-// per-device instead.
+async function requestUpdateAll() {
+  const cards = [...deviceCardEls.values()];
+  if (cards.length === 0) return;
+
+  const picker = document.createElement('input');
+  picker.type = 'file';
+  picker.accept = '.bin';
+  picker.onchange = async (ev) => {
+    const file = ev.target.files?.[0];
+    picker.remove();
+    if (!file) return;
+
+    // Filename convention: r2-rocker-firmware-<fw_ver>.bin. If it
+    // parses, skip any peer already on that version. Otherwise push
+    // to every peer.
+    const match = file.name.match(/^r2-rocker-firmware-(.+)\.bin$/);
+    const targetFwVer = match ? match[1] : null;
+    const targets = targetFwVer
+      ? cards.filter((c) => c.sensor?.fwVer !== targetFwVer)
+      : cards;
+
+    if (targets.length === 0) {
+      alert(`All ${cards.length} sensor(s) already on ${targetFwVer}.`);
+      return;
+    }
+    const skipped = cards.length - targets.length;
+    const msg = targetFwVer
+      ? (skipped > 0
+          ? `Push ${targetFwVer} to ${targets.length} sensor(s)? (${skipped} already on this version)`
+          : `Push ${targetFwVer} to ${targets.length} sensor(s)?`)
+      : `Push this firmware to ${targets.length} sensor(s)? (filename doesn't carry a version stamp; pushing to every peer)`;
+    if (!confirm(msg)) return;
+
+    await Promise.allSettled(targets.map((c) => c.updateFirmware(file)));
+  };
+  document.body.appendChild(picker);
+  picker.click();
+  setTimeout(() => picker.remove(), 60_000);
+}
+
 async function requestUpdateAllFromLatest() {
   if (!availableFirmware || availableFirmware.source === 'none') {
     alert('No firmware source available — operator must build locally or publish a GitHub release.');
     return;
   }
-  const outdated = [...sensors.values()].filter((s) => s._needsUpdate);
-  if (outdated.length === 0) {
+  const outdatedCards = [...deviceCardEls.values()].filter((c) => c.sensor?._needsUpdate);
+  if (outdatedCards.length === 0) {
     alert('All connected sensors are already on the latest firmware.');
     return;
   }
   const targetVer = availableFirmware.version;
   const srcLabel  = availableFirmware.source === 'github' ? 'GitHub Release' : 'local build';
-  if (!confirm(`Pull ${targetVer} from the ${srcLabel} and push to ${outdated.length} sensor(s)?`)) return;
+  if (!confirm(`Pull ${targetVer} from the ${srcLabel} and push to ${outdatedCards.length} sensor(s)?`)) return;
 
-  // Fetch the .bin once via the dashboard, then re-use the same blob
-  // for every peer. /api/firmware/{carrier}/binary either redirects
-  // (302) to GitHub's CDN for source=github or streams the local
-  // file for source=local.
+  // Fetch the .bin once via the dashboard, re-use the blob across cards.
   const carrier = 'devkitc';
   let blob;
   try {
@@ -1886,176 +2588,17 @@ async function requestUpdateAllFromLatest() {
     return;
   }
 
-  for (const sensor of outdated) {
-    sensor.pendingOta = true;
-    if (sensor._otaFailsafe) clearTimeout(sensor._otaFailsafe);
-    sensor._otaFailsafe = setTimeout(() => {
-      if (sensor.pendingOta) {
-        sensor.pendingOta = false;
-        renderDevicesIfVisible();
-        updateSensorList();
-      }
-    }, 90_000);
-  }
-  renderDevicesIfVisible();
-  updateSensorList();
-
-  await Promise.allSettled(outdated.map(async (sensor) => {
-    try {
-      const res = await fetch(`/api/ota/${encodeURIComponent(sensor.key)}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/octet-stream' },
-        body: blob,
-      });
-      if (!res.ok) {
-        const out = await res.json().catch(() => ({}));
-        console.warn(`[ota-pull] ${sensor.key} HTTP ${res.status}:`, out);
-      }
-    } catch (err) {
-      console.warn(`[ota-pull] ${sensor.key} fetch error:`, err);
-    }
-  }));
+  await Promise.allSettled(outdatedCards.map((c) => c.updateFirmware(blob)));
 }
 
-async function requestUpdateAll() {
-  const allPeers = [...sensors.values()];
-  if (allPeers.length === 0) return;
-
-  const picker = document.createElement('input');
-  picker.type = 'file';
-  picker.accept = '.bin';
-  picker.onchange = async (ev) => {
-    const file = ev.target.files?.[0];
-    picker.remove();
-    if (!file) return;
-
-    // Filename convention: r2-rocker-firmware-<fw_ver>.bin where
-    // <fw_ver> matches the string baked into the binary and reported
-    // in r2.sensor.announce. If the filename parses, skip any peer
-    // already on that version. If it doesn't parse (operator
-    // renamed the file), push to every peer.
-    const match = file.name.match(/^r2-rocker-firmware-(.+)\.bin$/);
-    const targetFwVer = match ? match[1] : null;
-
-    const targets = targetFwVer
-      ? allPeers.filter((s) => s.fwVer !== targetFwVer)
-      : allPeers;
-
-    if (targets.length === 0) {
-      alert(`All ${allPeers.length} sensor(s) already on ${targetFwVer}.`);
-      return;
-    }
-
-    const skipped = allPeers.length - targets.length;
-    const msg = targetFwVer
-      ? (skipped > 0
-          ? `Push ${targetFwVer} to ${targets.length} sensor(s)? (${skipped} already on this version)`
-          : `Push ${targetFwVer} to ${targets.length} sensor(s)?`)
-      : `Push this firmware to ${targets.length} sensor(s)? (filename doesn't carry a version stamp; pushing to every peer)`;
-    if (!confirm(msg)) return;
-
-    // Flip every target's LED to "OTA in progress" up front so the
-    // operator sees the action take effect immediately. The
-    // pendingOta failsafe in handleOtaEvent normally only arms via
-    // the /ws/status 'uploading' event — replicate that here so
-    // bulk pushes show the same calm-tech indicator.
-    for (const sensor of targets) {
-      sensor.pendingOta = true;
-      if (sensor._otaFailsafe) clearTimeout(sensor._otaFailsafe);
-      sensor._otaFailsafe = setTimeout(() => {
-        if (sensor.pendingOta) {
-          sensor.pendingOta = false;
-          renderDevicesIfVisible();
-          updateSensorList();
-        }
-      }, 90_000);
-    }
-    renderDevicesIfVisible();
-    updateSensorList();
-
-    await Promise.allSettled(targets.map(async (sensor) => {
-      try {
-        const res = await fetch(`/api/ota/${encodeURIComponent(sensor.key)}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/octet-stream' },
-          body: file,
-        });
-        if (!res.ok) {
-          const out = await res.json().catch(() => ({}));
-          console.warn(`[ota-all] ${sensor.key} HTTP ${res.status}:`, out);
-        }
-      } catch (err) {
-        console.warn(`[ota-all] ${sensor.key} fetch error:`, err);
-      }
-    }));
-  };
-  document.body.appendChild(picker);
-  picker.click();
-  // Self-destruct the picker after a minute if the user dismisses
-  // the file dialog without picking anything.
-  setTimeout(() => picker.remove(), 60_000);
-}
-
-// Per-sensor live log tail. Opens a WebSocket to the dashboard's
-// /ws/logs/{addr} proxy, which in turn opens TCP to <ip>:21045 on the
-// sensor. Lines stream back as text frames; we keep a rolling 500-line
-// buffer per sensor on the `sensors` map so the panel survives the
-// once-a-second renderDevices() repaint without state on the DOM.
+// Rolling buffer cap for the per-card log tail. Logic itself lives
+// on R2DeviceCard.toggleLogs(); this shim is for any legacy caller
+// that still passes an IP string rather than a card reference.
 const LOG_BUFFER_MAX = 500;
 
 function toggleLogs(addr) {
-  const sensor = sensors.get(addr);
-  if (!sensor) return;
-
-  if (sensor.logsOpen) {
-    if (sensor._logsWs) {
-      try { sensor._logsWs.close(); } catch (_) {}
-      sensor._logsWs = null;
-    }
-    sensor.logsOpen = false;
-    renderDevicesIfVisible();
-    return;
-  }
-
-  sensor.logsOpen = true;
-  sensor._logsLines = sensor._logsLines ?? [];
-  // Use same-origin WS so we inherit any future TLS. addr is `ip` (no
-  // port) — Devices-view keys peers by IP.
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const url = `${proto}//${location.host}/ws/logs/${encodeURIComponent(addr)}`;
-  let ws;
-  try {
-    ws = new WebSocket(url);
-  } catch (err) {
-    sensor._logsLines.push(`[ws/logs] open failed: ${err}\n`);
-    renderDevicesIfVisible();
-    return;
-  }
-  sensor._logsWs = ws;
-
-  ws.onopen = () => {
-    sensor._logsLines.push(`[ws/logs] connected to ${addr}:21045\n`);
-    if (sensor._logsLines.length > LOG_BUFFER_MAX)
-      sensor._logsLines.splice(0, sensor._logsLines.length - LOG_BUFFER_MAX);
-    renderDevicesIfVisible();
-  };
-  ws.onmessage = (ev) => {
-    sensor._logsLines.push(String(ev.data));
-    if (sensor._logsLines.length > LOG_BUFFER_MAX)
-      sensor._logsLines.splice(0, sensor._logsLines.length - LOG_BUFFER_MAX);
-    if (sensor.logsOpen) renderDevicesIfVisible();
-  };
-  ws.onclose = () => {
-    if (sensor._logsWs === ws) sensor._logsWs = null;
-    sensor._logsLines.push('[ws/logs] disconnected\n');
-    if (sensor.logsOpen) renderDevicesIfVisible();
-  };
-  ws.onerror = () => {
-    sensor._logsLines.push('[ws/logs] socket error\n');
-    if (sensor.logsOpen) renderDevicesIfVisible();
-  };
-
-  renderDevicesIfVisible();
+  const card = deviceCardEls.get(addr);
+  if (card) card.toggleLogs();
 }
 
 // Keep online/stale/offline classification fresh even when no events
@@ -2065,7 +2608,11 @@ function toggleLogs(addr) {
 // depend on `classifyOnline(s)` against `lastSeen`, so both need a tick.
 setInterval(() => {
   updateSensorList();
+  // Capture state lives in the Run Control panel on the Live tab,
+  // so its label needs to refresh regardless of which view is active.
+  updateCaptureUiFromFleet();
   if (currentView === 'devices') renderDevices();
+  if (currentView === 'data')    renderDataView();
 }, 1000);
 
 // Refresh the "latest firmware" snapshot on load and every minute.
@@ -2099,6 +2646,14 @@ Object.assign(window, {
   requestUpdateAll,
   requestUpdateAllFromLatest,
   toggleLogs,
+  // Data tab (SPEC-R2-ROCKER-CAPTURE).
+  captureStart,
+  captureMark,
+  captureStop,
+  downloadCaptureFile,
+  deleteCaptureFile,
+  downloadMergedLatest,
+  requestDeleteAllFleet,
 });
 </script>
 </body>

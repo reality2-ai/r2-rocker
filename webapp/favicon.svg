@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- R2 hexagon favicon. Flat-top hexagon outline + filled hex
+       behind it; matches the dashboard's #4a9eff accent on a dark
+       slate background. "R2" centred. SVG so it stays crisp at any
+       browser-tab resolution + on hi-DPI displays. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1a1f35"/>
+      <stop offset="100%" stop-color="#0d1220"/>
+    </linearGradient>
+  </defs>
+  <!-- Inner filled hex (slight inset so the outline reads cleanly). -->
+  <polygon points="32,4 56,18 56,46 32,60 8,46 8,18"
+           fill="url(#bg)"
+           stroke="#4a9eff"
+           stroke-width="3"
+           stroke-linejoin="round"/>
+  <!-- "R2" mark, monospace digital style. -->
+  <text x="32" y="42"
+        text-anchor="middle"
+        font-family="'SF Mono', Consolas, monospace"
+        font-size="28"
+        font-weight="700"
+        fill="#4a9eff">R2</text>
+</svg>

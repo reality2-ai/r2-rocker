@@ -35,11 +35,11 @@ imports from `./pkg/r2_wasm.js`.
 
 The page must be served over HTTP (browsers refuse to load WASM from
 `file://` URLs by default). The onsite-controller dashboard mounts
-this directory at `/v/` (Phase 5d step 3) so once the dashboard is
-running it's reachable at:
+this directory at the root of its HTTP port, so once the dashboard
+is running it's reachable at:
 
 ```
-http://localhost:8080/v/
+http://localhost:8080/
 ```
 
 For standalone development without the dashboard, any static-file

@@ -7,10 +7,11 @@
 //
 // To force every connected browser to refresh the cache, bump CACHE.
 
-const CACHE = 'r2-rocker-v6';
+const CACHE = 'r2-rocker-v15';
 const PRECACHE = [
   '/',
   '/index.html',
+  '/favicon.svg',
   '/pkg/r2_wasm.js',
   '/pkg/r2_wasm_bg.wasm',
 ];

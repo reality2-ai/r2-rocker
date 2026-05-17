@@ -1,6 +1,6 @@
 # sdkconfig.defaults — applied on top of ESP-IDF defaults at build time.
-# Tuned for the Seeed XIAO ESP32-S3 (Pre-Soldered) carrier
-# (per HARDWARE-WIRING-XIAO.md §1).
+# Tuned for the ESP32-S3-DevKitC-1-N8R8 reference hardware
+# (per HARDWARE-WIRING.md §1).
 
 CONFIG_IDF_TARGET="esp32s3"
 
@@ -8,14 +8,11 @@ CONFIG_IDF_TARGET="esp32s3"
 # allocations, future BLE/WiFi/SPI work).
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=16000
 
-# XIAO ESP32-S3: 8 MB flash (matches the ESP32-S3R8 module the XIAO
-# uses). The XIAO ESP32-S3 Plus has 16 MB — change to FLASHSIZE_16MB
-# if you build for that SKU.
+# DevKitC-1-N8R8: 8 MB flash. Change to 32MB for N32R16V variant.
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
 
-# Octal PSRAM — the XIAO's ESP32-S3R8 die has 8 MB octal SPI PSRAM
-# integrated. Comment out only if you are building for a no-PSRAM
-# variant.
+# Octal PSRAM, present on N8R8 and N32R16V variants.
+# Comment out if you have a no-PSRAM module.
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
@@ -24,10 +21,10 @@ CONFIG_SPIRAM_SPEED_80M=y
 # Phase 1+ will tighten this with explicit kicks per SPEC-R2-ROCKER-SENSOR §2.3.
 
 # ─── Console routing ──────────────────────────────────────────────────────
-# Send `log::info!` output to the ESP32-S3's native USB-Serial-JTAG.
-# The XIAO has a single USB-C port wired to the chip's native
-# USB-Serial-JTAG peripheral — `espflash flash --monitor` carries the
-# log output back over the same cable used to flash.
+# Send `log::info!` output to the ESP32-S3's native USB-Serial-JTAG so the
+# same USB-OTG cable used for flashing also carries the UART monitor. The
+# DevKitC-1 has two USB ports — UART (CP2102) and native USB-OTG; this
+# setting makes the firmware print to whichever one is connected.
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 
 # ─── OTA / partition table ────────────────────────────────────────────────
@@ -63,3 +60,12 @@ CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
 CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
 CONFIG_BT_NIMBLE_L2CAP_COC_MAX_NUM=3
 CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=251
+
+# ── FATFS long filenames (SPEC-R2-ROCKER-CAPTURE §4) ─────────────────
+# The capture filename convention is <ts16>-<name>.csv which exceeds
+# 8.3. Without LFN enabled, FATFS rejects the file open with EINVAL/
+# ENOENT and the capture sentant can never transition to Recording.
+# LFN_HEAP keeps the long-name buffer off the stack so the small
+# per-thread stacks we use everywhere don't risk overflow.
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255

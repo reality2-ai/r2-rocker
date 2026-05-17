@@ -49,7 +49,7 @@ Out of scope:
 
 RFC 2119 terms apply.
 
-* **Log listener** — the on-device TCP server on port 21045 that
+* **Log listener** — the on-device TCP server on port 21046 that
   fans out `log::Record`s to subscribed sockets.
 * **Log proxy** — the dashboard HTTP→WS endpoint that bridges a
   browser to a sensor's log listener.
@@ -64,7 +64,7 @@ RFC 2119 terms apply.
 ```
 log!() ─► CapturingLogger ─┬─► EspLogger ─► UART / USB-Serial-JTAG
                            │
-                           └─► per-client mpsc ─► TCP 21045
+                           └─► per-client mpsc ─► TCP 21046
                                                   ▲
                                                   │
    browser ◄── WS /ws/logs/{addr} ── dashboard ───┘
@@ -82,7 +82,7 @@ Subscriber senders use `sync_channel(SUBSCRIBER_QUEUE)`. Full queues
 drop lines (the line is discarded, the subscriber is kept); disconnected
 queues are pruned.
 
-The TCP listener accepts on port 21045 and spawns a small writer thread
+The TCP listener accepts on port 21046 and spawns a small writer thread
 per client. Each writer registers a `SyncSender<String>` with the
 logger and writes received lines to its socket until the socket fails
 or the writer thread exits.
@@ -106,7 +106,7 @@ the two during boot.
 1. Calls `log::set_logger(&CAPTURING_LOGGER)`. If another logger has
    already been installed, the call is ignored (no panic).
 2. Sets `log::set_max_level(LevelFilter::Info)`.
-3. Spawns the `log-tcp` listener thread on port 21045.
+3. Spawns the `log-tcp` listener thread on port 21046.
 
 ### 3.2 Wire Format
 
@@ -157,7 +157,7 @@ GET /ws/logs/{addr}
 
 `addr` is a sensor IP (or `ip:port`; the port suffix is stripped before
 use). On upgrade, the dashboard opens a TCP connection to
-`{ip}:21045` and pipes each newline-terminated line received from the
+`{ip}:21046` and pipes each newline-terminated line received from the
 sensor to the WebSocket as a text frame.
 
 ### 4.2 Lifecycle
@@ -226,3 +226,4 @@ subscriptions is folded into the same Phase 5c migration (#24).
 | Date       | Ver | Change                                                 |
 |------------|-----|--------------------------------------------------------|
 | 2026-05-16 | 0.1 | Initial draft. TCP listener on port 21045, /ws/logs proxy, per-card panel in webapp. |
+| 2026-05-18 | 0.2 | Listener port moved to **21046** — 21045 collides with canonical R2 Console / GraphQL (R2-TRANSPORT §5, R2-CONSOLE §3.2). See audits/2026-05-18-post-v0.1.0-conformance.md Finding F. |

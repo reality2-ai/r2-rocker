@@ -60,3 +60,12 @@ CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
 CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
 CONFIG_BT_NIMBLE_L2CAP_COC_MAX_NUM=3
 CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=251
+
+# ── FATFS long filenames (SPEC-R2-ROCKER-CAPTURE §4) ─────────────────
+# The capture filename convention is <ts16>-<name>.csv which exceeds
+# 8.3. Without LFN enabled, FATFS rejects the file open with EINVAL/
+# ENOENT and the capture sentant can never transition to Recording.
+# LFN_HEAP keeps the long-name buffer off the stack so the small
+# per-thread stacks we use everywhere don't risk overflow.
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255

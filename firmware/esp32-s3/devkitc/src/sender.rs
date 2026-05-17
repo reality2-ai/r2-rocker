@@ -28,11 +28,13 @@ use crate::led::LedHandle;
 use crate::ring::Ring;
 use crate::sim::{AccelSim, BatterySim};
 use crate::wire::{
-    decode_compact_frame, frame_for_tcp, parse_dash_ack_through_seq,
+    decode_compact_frame, frame_for_tcp, parse_capture_mark, parse_dash_ack_through_seq,
     parse_set_clock_offset, parse_sync_pulse_req_id,
     CborWriter,
-    EVT_DASH_ACK, EVT_DASH_SET_CLOCK_OFFSET, EVT_DASH_SYNC_PULSE, EVT_SENSOR_ACCELERATION,
-    EVT_SENSOR_ANNOUNCE, EVT_SENSOR_BATTERY, EVT_SENSOR_STATUS, EVT_SENSOR_SYNC_PONG,
+    EVT_DASH_ACK, EVT_DASH_CAPTURE_MARK, EVT_DASH_CAPTURE_START, EVT_DASH_CAPTURE_STOP,
+    EVT_DASH_SET_CLOCK_OFFSET, EVT_DASH_SYNC_PULSE, EVT_SENSOR_ACCELERATION,
+    EVT_SENSOR_ANNOUNCE, EVT_SENSOR_BATTERY, EVT_SENSOR_CAPTURE_STATE, EVT_SENSOR_STATUS,
+    EVT_SENSOR_SYNC_PONG,
 };
 
 const SAMPLE_RATE_HZ: u32 = 100;
@@ -91,6 +93,11 @@ pub struct Sender {
     /// path is unavailable for this boot (no card, mount failed) — the
     /// sender continues streaming-only.
     ring: Option<Ring>,
+    /// Named-capture state machine (SPEC-R2-ROCKER-CAPTURE). `None`
+    /// when SD isn't available — there's nowhere to write captures
+    /// either, so the Data tab affordances stay disabled for this
+    /// peer in the webapp.
+    capture: Option<crate::capture::CaptureMgr>,
     /// Last `through_seq` received via `r2.dash.ack`. Used to free SD
     /// segments whose records have all been acknowledged by the
     /// dashboard. RAM-only in v0.1 — spec §6.4 calls for rate-limited
@@ -118,6 +125,7 @@ impl Sender {
         adxl: Option<Adxl355>,
         clock: Arc<Clock>,
         ring: Option<Ring>,
+        capture: Option<crate::capture::CaptureMgr>,
     ) -> Self {
         let fw_ver = build_fw_ver(adxl.is_some());
         Self {
@@ -130,6 +138,7 @@ impl Sender {
             led,
             clock,
             ring,
+            capture,
             last_acked_seq: 0,
             boot_instant: Instant::now(),
             app_validated: false,
@@ -328,6 +337,35 @@ impl Sender {
                     warn!("[sender] malformed set_clock_offset payload");
                 }
             }
+            EVT_DASH_CAPTURE_START => {
+                if let Some(ref mut cap) = self.capture {
+                    cap.start(self.clock.ts_ms_i64());
+                    self.send_capture_state(stream)?;
+                } else {
+                    warn!("[capture] start ignored — no SD");
+                }
+            }
+            EVT_DASH_CAPTURE_MARK => {
+                match (self.capture.as_mut(), parse_capture_mark(payload)) {
+                    (Some(cap), Some((ts_ms, name))) => {
+                        match cap.mark(ts_ms, name) {
+                            Ok(()) => info!("[capture] mark ts={} name={:?}", ts_ms, name),
+                            Err(e) => warn!("[capture] mark failed: {}", e),
+                        }
+                        self.send_capture_state(stream)?;
+                    }
+                    (None, _) => warn!("[capture] mark ignored — no SD"),
+                    (_, None) => warn!("[sender] malformed capture.mark payload"),
+                }
+            }
+            EVT_DASH_CAPTURE_STOP => {
+                if let Some(ref mut cap) = self.capture {
+                    if let Err(e) = cap.stop() {
+                        warn!("[capture] stop: {}", e);
+                    }
+                    self.send_capture_state(stream)?;
+                }
+            }
             EVT_DASH_SYNC_PULSE => {
                 if let Some(req_id) = parse_sync_pulse_req_id(payload) {
                     let sensor_ts_ms = self.clock.ts_ms_i64();
@@ -463,19 +501,92 @@ impl Sender {
             }
         }
 
+        // Named-capture path (SPEC-R2-ROCKER-CAPTURE). No-op in Idle;
+        // accumulates the cal-window mean in Calibrating; writes a
+        // calibrated row in Recording. Failures here are best-effort
+        // like the ring — log + continue so the wire stream isn't
+        // dropped by a transient SD write error.
+        if let Some(ref mut cap) = self.capture {
+            if let Err(e) = cap.observe(seq, ts_ms_i64, x, y, z) {
+                warn!("[capture] observe seq={} failed: {}", seq, e);
+            }
+        }
+
+        // Apply the calibration offset to the wire-emitted payload
+        // while a capture is recording, so the dashboard's Live
+        // chart shows the same zeroed values that are landing on
+        // the SD card. Idle / Calibrating fall through to raw
+        // values — the chart shows raw acceleration normally, and
+        // the cal window doesn't yet have a locked offset.
+        let (wx, wy, wz) = match self.capture.as_ref().and_then(|c| c.current_offset()) {
+            Some((ox, oy, oz)) => (
+                x.saturating_sub(ox),
+                y.saturating_sub(oy),
+                z.saturating_sub(oz),
+            ),
+            None => (x, y, z),
+        };
+
         let mut payload = [0u8; 32];
         let mut w = CborWriter::new(&mut payload);
         w.map(5);
         w.key(0); w.u(seq as u64);
         w.key(1); w.u(ts_ms as u64);
-        w.key(2); w.i(x as i64);
-        w.key(3); w.i(y as i64);
-        w.key(4); w.i(z as i64);
+        w.key(2); w.i(wx as i64);
+        w.key(3); w.i(wy as i64);
+        w.key(4); w.i(wz as i64);
         let used = w.pos();
 
         let mut frame = [0u8; 64];
         let n = frame_for_tcp(&mut frame, self.random_msg_id(), EVT_SENSOR_ACCELERATION, &payload[..used]);
         stream.write_all(&frame[..n])?;
+        Ok(())
+    }
+
+    /// Emit `r2.sensor.capture.state` (SPEC-R2-ROCKER-CAPTURE §3) so
+    /// the dashboard learns the current state right after handling a
+    /// `capture.start` / `mark` / `stop`. No-op if the capture
+    /// subsystem isn't initialised (SD absent).
+    fn send_capture_state(&self, stream: &mut TcpStream) -> Result<()> {
+        let Some(ref cap) = self.capture else { return Ok(()); };
+        let state = cap.state_byte();
+        let file = cap.open_file_name();
+
+        // LED follows the capture state machine: purple while
+        // Calibrating; restore to the session's normal streaming
+        // colour otherwise. Same priority everywhere else in the
+        // firmware — pendingOta / Reset would override these via the
+        // LED's own priority logic, but capture-vs-streaming is a
+        // simple flip.
+        use crate::led::LedState;
+        self.led.set(match state {
+            crate::capture::STATE_CALIBRATING => LedState::Calibrating,
+            _ => if self.adxl.is_some() {
+                LedState::StreamingLive
+            } else {
+                LedState::StreamingDegradedSim
+            },
+        });
+        let mut payload = [0u8; 64];
+        let used = {
+            let mut w = CborWriter::new(&mut payload);
+            // Emit two entries when recording (state + file), one otherwise.
+            let n = if file.is_some() { 2 } else { 1 };
+            w.map(n);
+            w.key(0); w.u(state as u64);
+            if let Some(name) = file {
+                w.key(1); w.text(name);
+            }
+            w.pos()
+        };
+        let mut frame = [0u8; 96];
+        let n = frame_for_tcp(
+            &mut frame,
+            self.random_msg_id(),
+            EVT_SENSOR_CAPTURE_STATE,
+            &payload[..used],
+        );
+        stream.write_all(&frame[..n]).context("capture.state write")?;
         Ok(())
     }
 

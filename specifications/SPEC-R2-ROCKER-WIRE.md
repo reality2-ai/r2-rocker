@@ -108,6 +108,10 @@ multi-sensor receive path on dashboard port 21042.
 | 14 | `r2.dash.config.set` | dash → sensor | Update NVS-stored config (rate, range, hostname) |
 | 15 | `r2.dash.fw.update` | dash → sensor | Trigger OTA fetch |
 | 16 | `r2.dash.reset` | dash → sensor | Soft reset; optional `factory: true` clears NVS |
+| 17 | `r2.dash.capture.start` | dash → sensor | Enter calibration window (SPEC-R2-ROCKER-CAPTURE §2) |
+| 18 | `r2.dash.capture.mark`  | dash → sensor | `{0: i64 ts_ms, 1: str name}`; lock calibration offset and open `/sdcard/captures/<ts16>-<name>.csv` |
+| 19 | `r2.dash.capture.stop`  | dash → sensor | Close the open capture file |
+| 20 | `r2.sensor.capture.state` | sensor → dash | `{0: u8 state, 1: str? file}` — state ∈ {0=idle, 1=calibrating, 2=recording} |
 
 Implementations MUST treat unknown event hashes as receivable but
 non-actionable — log them and move on; never close the connection over
