@@ -63,7 +63,50 @@ fn track_git_state(manifest_dir: &str) {
 /// Stamp git short SHA + build timestamp as compile-time env vars so the
 /// firmware's announce frame can carry an unambiguous version string.
 /// Falls back to "unknown" outside a git checkout.
+///
+/// Release mode (`R2_RELEASE=1` in the env): the build must be on a
+/// clean checkout AND on an exact git tag. The fw_ver string is then
+/// just the tag (e.g. `v0.2.0`) — no timestamp, no SHA — so it matches
+/// the GitHub Release tag for "needs update?" comparison in the
+/// dashboard. Refusing dirty / non-tagged release builds keeps the
+/// archive honest.
 fn stamp_build_metadata() {
+    let dirty = std::process::Command::new("git")
+        .args(["diff-index", "--quiet", "HEAD", "--"])
+        .status()
+        .map(|s| !s.success())
+        .unwrap_or(false);
+
+    let release_mode = env::var("R2_RELEASE").ok().as_deref() == Some("1");
+
+    if release_mode {
+        if dirty {
+            panic!(
+                "R2_RELEASE=1 but working tree is dirty — refusing to bake an unverifiable release version. \
+                 Commit your changes or unset R2_RELEASE."
+            );
+        }
+        let tag = std::process::Command::new("git")
+            .args(["describe", "--tags", "--exact-match"])
+            .output()
+            .ok()
+            .and_then(|o| if o.status.success() { Some(o.stdout) } else { None })
+            .and_then(|b| String::from_utf8(b).ok())
+            .map(|s| s.trim().to_owned());
+        let tag = match tag {
+            Some(t) if !t.is_empty() => t,
+            _ => panic!(
+                "R2_RELEASE=1 but HEAD is not on a tag — refusing to bake a release version. \
+                 `git tag vX.Y.Z` first."
+            ),
+        };
+        println!("cargo:rustc-env=R2_GIT_SHA={tag}");
+        println!("cargo:rustc-env=R2_BUILD_TIMESTAMP=");
+        println!("cargo:rustc-env=R2_FW_VER={tag}");
+        return;
+    }
+
+    // Dev-mode: short-sha + dirty marker + per-build UTC timestamp.
     let sha = std::process::Command::new("git")
         .args(["rev-parse", "--short=8", "HEAD"])
         .output()
@@ -72,20 +115,9 @@ fn stamp_build_metadata() {
         .and_then(|b| String::from_utf8(b).ok())
         .map(|s| s.trim().to_owned())
         .unwrap_or_else(|| "unknown".into());
-
-    // Append "-dirty" if the working tree has uncommitted changes.
-    let dirty = std::process::Command::new("git")
-        .args(["diff-index", "--quiet", "HEAD", "--"])
-        .status()
-        .map(|s| !s.success())
-        .unwrap_or(false);
-
     let sha_full = if dirty { format!("{sha}-dirty") } else { sha };
     println!("cargo:rustc-env=R2_GIT_SHA={sha_full}");
 
-    // Human-readable build stamp baked into FW_VER on the wire and
-    // shown on the dashboard's device card. Drops ISO T/Z + seconds —
-    // operator wants "X.Y.Z-date-time", not log-format.
     let ts = std::process::Command::new("date")
         .args(["-u", "+%Y-%m-%d-%H:%M"])
         .output()
@@ -94,6 +126,11 @@ fn stamp_build_metadata() {
         .map(|s| s.trim().to_owned())
         .unwrap_or_else(|| "unknown".into());
     println!("cargo:rustc-env=R2_BUILD_TIMESTAMP={ts}");
+
+    // Compose the full dev-mode fw_ver here so the sender can emit it
+    // verbatim. Format: `<semver>-<UTC-yyyy-mm-dd-HH:MM>+<sha>[-dirty]`.
+    let semver = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".into());
+    println!("cargo:rustc-env=R2_FW_VER={semver}-{ts}+{sha_full}");
 }
 
 /// ESP-IDF resolves `CONFIG_PARTITION_TABLE_CUSTOM_FILENAME` relative to

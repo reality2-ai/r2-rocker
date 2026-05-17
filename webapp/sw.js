@@ -7,7 +7,7 @@
 //
 // To force every connected browser to refresh the cache, bump CACHE.
 
-const CACHE = 'r2-rocker-v4';
+const CACHE = 'r2-rocker-v6';
 const PRECACHE = [
   '/',
   '/index.html',

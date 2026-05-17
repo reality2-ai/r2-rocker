@@ -561,6 +561,20 @@
   .btn-bulk-reset:hover { background: rgba(245, 158, 11, 0.12); }
   .btn-bulk-update:disabled,
   .btn-bulk-reset:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  /* "Newer firmware available" dot next to the device card's
+     firmware line. Distinct hue (pink) from the LED/health colours
+     so it doesn't get confused with online/offline state. */
+  .fw-update-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #ec4899;
+    margin-left: 6px;
+    box-shadow: 0 0 4px #ec4899;
+    vertical-align: middle;
+  }
 </style>
 </head>
 <body>
@@ -592,6 +606,7 @@
     <span><strong id="dsNeedsUpdate" style="color:#ec4899;">0</strong> needs update</span>
   </div>
   <div class="devices-bulk-actions">
+    <button class="btn-bulk-update" id="bulkPullLatestBtn" onclick="requestUpdateAllFromLatest()" hidden>✨ Update Outdated from Latest</button>
     <button class="btn-bulk-update" id="bulkUpdateBtn" onclick="requestUpdateAll()">⬆ Update All Firmware…</button>
     <button class="btn-bulk-reset"  id="bulkResetBtn"  onclick="requestResetAll()">↻ Reset All Sensors</button>
   </div>
@@ -672,6 +687,13 @@ const CALIBRATION_MIN = 10;
 // ── Global state ──
 let runState = 'idle';
 let totalEvents = 0;
+
+// Latest firmware snapshot from `/api/firmware/available`. Refreshed
+// on page load + every minute. Shape:
+//   { source: 'github'|'local'|'none', version, assets: [{carrier,
+//     version, url, size}], note?: string, fetched_at_ms }
+// `null` until the first fetch resolves.
+let availableFirmware = null;
 
 // ── Per-sensor state ── keyed by source_addr (IP:port)
 const sensors = new Map();
@@ -1564,6 +1586,17 @@ function renderDevices() {
     // Once a "current expected firmware" register exists (Phase 9-fwreg),
     // a mismatch will get a small "out-of-date" badge layered on top.
     const fwShort  = s.fwVer ?? '—';
+    // Outdated if the dashboard knows of a newer firmware AND the
+    // device's announced fw_ver doesn't match. The dashboard returns
+    // a version string for each carrier; we don't know which carrier
+    // this device is, so any-asset match counts as up-to-date.
+    const targetVer = availableFirmware?.version || null;
+    const fwOutdated = targetVer && s.fwVer && s.fwVer !== targetVer
+        && !availableFirmware.assets.some(a => a.version === s.fwVer);
+    s._needsUpdate = !!fwOutdated;
+    const fwDot = fwOutdated
+        ? `<span class="fw-update-dot" title="newer firmware available: ${escapeAttr(targetVer)}"></span>`
+        : '';
     const battMv   = s.battery?.voltage_mv ?? null;
     const battPct  = s.battery?.percent ?? null;
     const battCharging = s.battery?.charging ?? false;
@@ -1581,7 +1614,7 @@ function renderDevices() {
         </div>
         ${healthRowFor(s)}
         <div class="device-row"><span class="label">addr</span><span class="value">${escapeText(ip)}</span></div>
-        <div class="device-row"><span class="label">firmware</span><span class="value" title="${escapeAttr(s.fwVer ?? '—')}">${escapeText(fwShort)}</span></div>
+        <div class="device-row"><span class="label">firmware</span><span class="value" title="${escapeAttr(s.fwVer ?? '—')}">${escapeText(fwShort)}${fwDot}</span></div>
         <div class="device-row"><span class="label">last seen</span><span class="value">${lastSeen}</span></div>
         <div class="device-row">
           <span class="label">battery</span>
@@ -1611,8 +1644,6 @@ function updateDevicesSummary(peers) {
   const counts = { online: 0, stale: 0, offline: 0, needsUpdate: 0 };
   for (const s of peers) {
     counts[classifyOnline(s)]++;
-    // Update flagging is a stub until Phase 9 ships a real "current
-    // version" for the dashboard to compare against.
     if (s._needsUpdate) counts.needsUpdate++;
   }
   document.getElementById('dsTotal').textContent       = peers.length;
@@ -1620,6 +1651,21 @@ function updateDevicesSummary(peers) {
   document.getElementById('dsStale').textContent       = counts.stale;
   document.getElementById('dsOffline').textContent     = counts.offline;
   document.getElementById('dsNeedsUpdate').textContent = counts.needsUpdate;
+
+  // Surface the "Update Outdated from Latest" button only when the
+  // dashboard knows of a newer firmware AND at least one peer
+  // actually needs it. Pressing the existing manual file-picker
+  // button is always available regardless.
+  const pullBtn = document.getElementById('bulkPullLatestBtn');
+  if (pullBtn) {
+    const canPull = !!availableFirmware
+      && availableFirmware.source !== 'none'
+      && counts.needsUpdate > 0;
+    pullBtn.hidden = !canPull;
+    if (canPull) {
+      pullBtn.textContent = `✨ Pull ${availableFirmware.version} → ${counts.needsUpdate} sensor(s)`;
+    }
+  }
 }
 
 // OTA progress events from /ws/status (dashboard's /api/ota/{addr} handler
@@ -1804,6 +1850,73 @@ async function requestResetAll() {
   }, 10_000);
 }
 
+// Auto-fetch latest firmware via the dashboard's `/api/firmware/...`
+// endpoints and push to every outdated peer. No file picker — the
+// dashboard is the source of truth (GitHub Release if reachable,
+// otherwise the local releases/ dir). Carrier is hardcoded to
+// devkitc for v0.1 since every sensor in the rig is a DevKitC; once
+// the announce payload carries a carrier field this should diff
+// per-device instead.
+async function requestUpdateAllFromLatest() {
+  if (!availableFirmware || availableFirmware.source === 'none') {
+    alert('No firmware source available — operator must build locally or publish a GitHub release.');
+    return;
+  }
+  const outdated = [...sensors.values()].filter((s) => s._needsUpdate);
+  if (outdated.length === 0) {
+    alert('All connected sensors are already on the latest firmware.');
+    return;
+  }
+  const targetVer = availableFirmware.version;
+  const srcLabel  = availableFirmware.source === 'github' ? 'GitHub Release' : 'local build';
+  if (!confirm(`Pull ${targetVer} from the ${srcLabel} and push to ${outdated.length} sensor(s)?`)) return;
+
+  // Fetch the .bin once via the dashboard, then re-use the same blob
+  // for every peer. /api/firmware/{carrier}/binary either redirects
+  // (302) to GitHub's CDN for source=github or streams the local
+  // file for source=local.
+  const carrier = 'devkitc';
+  let blob;
+  try {
+    const res = await fetch(`/api/firmware/${carrier}/binary`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    blob = await res.blob();
+  } catch (err) {
+    alert(`Failed to fetch firmware: ${err}`);
+    return;
+  }
+
+  for (const sensor of outdated) {
+    sensor.pendingOta = true;
+    if (sensor._otaFailsafe) clearTimeout(sensor._otaFailsafe);
+    sensor._otaFailsafe = setTimeout(() => {
+      if (sensor.pendingOta) {
+        sensor.pendingOta = false;
+        renderDevicesIfVisible();
+        updateSensorList();
+      }
+    }, 90_000);
+  }
+  renderDevicesIfVisible();
+  updateSensorList();
+
+  await Promise.allSettled(outdated.map(async (sensor) => {
+    try {
+      const res = await fetch(`/api/ota/${encodeURIComponent(sensor.key)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: blob,
+      });
+      if (!res.ok) {
+        const out = await res.json().catch(() => ({}));
+        console.warn(`[ota-pull] ${sensor.key} HTTP ${res.status}:`, out);
+      }
+    } catch (err) {
+      console.warn(`[ota-pull] ${sensor.key} fetch error:`, err);
+    }
+  }));
+}
+
 async function requestUpdateAll() {
   const allPeers = [...sensors.values()];
   if (allPeers.length === 0) return;
@@ -1955,6 +2068,22 @@ setInterval(() => {
   if (currentView === 'devices') renderDevices();
 }, 1000);
 
+// Refresh the "latest firmware" snapshot on load and every minute.
+// The dashboard caches the GitHub API call for 5 min so this is cheap.
+async function refreshFirmwareAvailability() {
+  try {
+    const res = await fetch('/api/firmware/available');
+    if (!res.ok) return;
+    availableFirmware = await res.json();
+    if (currentView === 'devices') renderDevices();
+    updateSensorList();
+  } catch (err) {
+    console.warn('[firmware] availability fetch failed:', err);
+  }
+}
+refreshFirmwareAvailability();
+setInterval(refreshFirmwareAvailability, 60_000);
+
 // Module scripts isolate names; expose the inline-onclick handlers on
 // `window` so the existing onclick="..." attributes in the HTML still
 // resolve. (Cleaner long-term: addEventListener bindings, but this
@@ -1968,6 +2097,7 @@ Object.assign(window, {
   requestReset,
   requestResetAll,
   requestUpdateAll,
+  requestUpdateAllFromLatest,
   toggleLogs,
 });
 </script>

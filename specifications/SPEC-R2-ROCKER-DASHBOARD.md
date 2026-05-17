@@ -786,6 +786,78 @@ Fleet-wide reset works the same way via `POST /api/sensor/{addr}/reset`:
 "Reset All Sensors" button on the Devices view, confirmation dialog,
 `Promise.allSettled` over peers.
 
+### 13.3 Firmware availability + "needs update" dot
+
+The dashboard exposes a snapshot of the latest available firmware so
+the webapp can flag any device whose announced `fw_ver` is out of
+date.
+
+**Sources (in order of preference):**
+
+1. **GitHub Releases** on `reality2-ai/r2-rocker` — queried via the
+   public REST API. The latest release's `tag_name` is taken as the
+   canonical version; `.bin` assets named `…devkitc…` / `…xiao…`
+   become per-carrier entries.
+2. **Local `firmware/esp32-s3/<carrier>/releases/` directory** — the
+   highest-mtime `.bin` per carrier. Used when the GitHub query
+   fails (no internet, repo private, rate-limit) so the operator is
+   never stuck without the dot working.
+
+**Endpoint:**
+
+```
+GET /api/firmware/available
+→ {
+    "source":  "github" | "local" | "none",
+    "version": "<tag or fw_ver>",
+    "assets":  [{ "carrier": "devkitc",
+                  "version": "<fw_ver>",
+                  "url":     "<https url for github, fs path for local>",
+                  "size":    <bytes> }],
+    "note":    "<optional note when GitHub query fell back to local>",
+    "fetched_at_ms": <unix ms>
+  }
+```
+
+Cached for **5 minutes** to stay under GitHub's 60/hr/IP
+unauthenticated rate limit. Webapp polls every 60 s.
+
+**Binary fetch:**
+
+```
+GET /api/firmware/{carrier}/binary
+→ 302 redirect to the GitHub asset URL (when source = "github")
+→ application/octet-stream stream of the file (when source = "local")
+```
+
+Public repo + a 302 keeps the dashboard out of the data path for
+GitHub-hosted assets. The webapp's `fetch()` follows the redirect
+and gets the bytes from GitHub's CDN directly.
+
+**Release-mode firmware build:**
+
+For the GitHub-side comparison to make sense, the released `.bin`
+must bake an `fw_ver` string equal to the tag name. The firmware's
+`build.rs` checks `R2_RELEASE=1` and `git describe --tags
+--exact-match`: if both pass, `fw_ver` is just the tag (`v0.2.0`);
+if either fails (dirty tree, no tag), the build panics with a clear
+error. Day-to-day dev builds without `R2_RELEASE` continue to bake
+the dev-format `fw_ver` (`0.1.0-<UTC>+<sha>[-dirty]`).
+
+**Webapp UX:**
+
+On each device card the webapp shows a small pink dot next to the
+firmware line when:
+
+* `availableFirmware.version` is known, AND
+* the device's announced `fw_ver` is neither `availableFirmware.version`
+  nor any per-carrier asset version.
+
+The existing "⬆ Update All Firmware…" button (§13.2) accepts a
+`.bin` from a local file picker; v0.2 of this spec adds an
+auto-fetch path that pulls from `/api/firmware/{carrier}/binary` and
+pushes to outdated peers without operator file selection.
+
 ---
 
 ## 14. Configuration

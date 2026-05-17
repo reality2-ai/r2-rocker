@@ -536,6 +536,39 @@ struct AppState {
     bootstrap_log: Arc<Mutex<Vec<String>>>,
     /// Handle to the running bootstrap task — aborted on re-press
     bootstrap_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Cached snapshot of the latest available firmware (GitHub
+    /// Releases tag + asset URLs, with local releases dir as fallback).
+    /// Refreshed lazily by `firmware_available_handler` when older
+    /// than `FIRMWARE_CACHE_TTL_SECS`.
+    firmware_cache: Mutex<Option<FirmwareAvailable>>,
+}
+
+const FIRMWARE_CACHE_TTL_SECS: u64 = 300;
+const GITHUB_OWNER_REPO: &str = "reality2-ai/r2-rocker";
+
+#[derive(Clone, serde::Serialize)]
+struct FirmwareAsset {
+    carrier: String,    // "devkitc" or "xiao"
+    version: String,    // exact fw_ver string baked in the .bin
+    url: String,        // proxy URL the webapp fetches from (/api/firmware/...)
+    size: Option<u64>,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct FirmwareAvailable {
+    /// "github" if the GitHub query succeeded; "local" if only the
+    /// on-disk releases directory had hits; "none" if neither.
+    source: String,
+    /// Common version string across the assets — typically the
+    /// GitHub release tag, or the highest-mtime fw_ver in the local
+    /// releases dir.
+    version: String,
+    /// One entry per carrier.
+    assets: Vec<FirmwareAsset>,
+    /// Optional error/warning when GitHub was tried but failed.
+    note: Option<String>,
+    /// Unix-ms when this snapshot was taken, for cache age display.
+    fetched_at_ms: u64,
 }
 
 #[tokio::main]
@@ -553,6 +586,7 @@ async fn main() {
         bootstrap_running: Arc::new(AtomicBool::new(false)),
         bootstrap_log: Arc::new(Mutex::new(Vec::new())),
         bootstrap_task: Mutex::new(None),
+        firmware_cache: Mutex::new(None),
     });
 
     // Spawn TCP listener for R2-WIRE events
@@ -594,6 +628,12 @@ async fn main() {
         // SPEC-R2-ROCKER-SENSOR-REMOTE-RESET: push a CMD_RESET to a sensor's
         // reset listener (TCP 21044). Triggers esp_restart() on the sensor.
         .route("/api/sensor/{addr}/reset", post(reset_push_handler))
+        // Firmware availability: returns the latest release per
+        // carrier (GitHub Releases primary, local releases/ dir
+        // fallback). 5-minute cache. Webapp diffs against each peer's
+        // announce fw_ver for the "needs update" dot.
+        .route("/api/firmware/available", get(firmware_available_handler))
+        .route("/api/firmware/{carrier}/binary", get(firmware_binary_handler))
         .route("/api/version", get(version_handler));
 
     // Serve the WASM viewer (webapp/) as the dashboard root if the
@@ -1842,6 +1882,227 @@ async fn handle_ws_logs(mut socket: WebSocket, addr: String) {
         }
     }
     eprintln!("[ws/logs] tail of {} closed", target);
+}
+
+/// `GET /api/firmware/available` — latest firmware snapshot.
+///
+/// Tries GitHub Releases first (latest non-draft release on the
+/// `reality2-ai/r2-rocker` repo); falls back to the highest-mtime
+/// .bin in `firmware/esp32-s3/<carrier>/releases/`. Cached for
+/// `FIRMWARE_CACHE_TTL_SECS` so the webapp can poll every few
+/// seconds without hammering the GitHub API rate limit (60/hr
+/// unauthenticated per IP).
+async fn firmware_available_handler(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    {
+        let cache = state.firmware_cache.lock().await;
+        if let Some(ref entry) = *cache {
+            let age_s = (now_ms.saturating_sub(entry.fetched_at_ms)) / 1000;
+            if age_s < FIRMWARE_CACHE_TTL_SECS {
+                return (axum::http::StatusCode::OK, Json(serde_json::to_value(entry).unwrap_or(serde_json::json!({})))).into_response();
+            }
+        }
+    }
+
+    let snapshot = build_firmware_snapshot(now_ms).await;
+
+    {
+        let mut cache = state.firmware_cache.lock().await;
+        *cache = Some(snapshot.clone());
+    }
+
+    (axum::http::StatusCode::OK, Json(serde_json::to_value(&snapshot).unwrap_or(serde_json::json!({})))).into_response()
+}
+
+/// `GET /api/firmware/{carrier}/binary` — fetch the matching .bin.
+///
+/// If the cached snapshot was sourced from GitHub, redirects (302) to
+/// the release asset URL — the browser then fetches the bytes from
+/// GitHub's CDN directly. If sourced from a local releases dir, the
+/// dashboard streams the file from disk.
+async fn firmware_binary_handler(
+    State(state): State<Arc<AppState>>,
+    Path(carrier): Path<String>,
+) -> impl IntoResponse {
+    let snapshot = {
+        let cache = state.firmware_cache.lock().await;
+        cache.clone()
+    };
+    let snapshot = match snapshot {
+        Some(s) => s,
+        None => {
+            // No cache yet — synthesise one. Webapp normally hits
+            // /available before /binary, so this is a corner case.
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let snap = build_firmware_snapshot(now_ms).await;
+            let mut cache = state.firmware_cache.lock().await;
+            *cache = Some(snap.clone());
+            snap
+        }
+    };
+
+    let asset = snapshot.assets.iter().find(|a| a.carrier == carrier);
+    let asset = match asset {
+        Some(a) => a,
+        None => return (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("no firmware available for carrier {}", carrier) })),
+        ).into_response(),
+    };
+
+    if snapshot.source == "github" {
+        // Asset URL is the github.com/.../releases/download/... path.
+        // Browser fetches direct from GH's CDN — no proxy needed.
+        return axum::response::Redirect::temporary(&asset.url).into_response();
+    }
+
+    // Local source — read the file from disk and stream it back.
+    let path = std::path::PathBuf::from(&asset.url); // "url" is the local path for local source
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => (
+            axum::http::StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+            bytes,
+        ).into_response(),
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("read {:?}: {}", path, e) })),
+        ).into_response(),
+    }
+}
+
+/// Build a fresh FirmwareAvailable snapshot by querying GitHub then
+/// falling back to the local releases dir.
+async fn build_firmware_snapshot(now_ms: u64) -> FirmwareAvailable {
+    // ── GitHub query ──
+    let gh_url = format!(
+        "https://api.github.com/repos/{}/releases/latest",
+        GITHUB_OWNER_REPO,
+    );
+    let gh_result = tokio::process::Command::new("curl")
+        .args([
+            "-sS",
+            "--max-time", "5",
+            "-H", "Accept: application/vnd.github+json",
+            "-H", "User-Agent: r2-rocker-dashboard",
+            &gh_url,
+        ])
+        .output()
+        .await;
+
+    if let Ok(output) = gh_result {
+        if output.status.success() {
+            if let Ok(body) = String::from_utf8(output.stdout) {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                    if let Some(tag) = json.get("tag_name").and_then(|v| v.as_str()) {
+                        let mut assets = Vec::new();
+                        if let Some(arr) = json.get("assets").and_then(|v| v.as_array()) {
+                            for a in arr {
+                                let name = a.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                                let url = a.get("browser_download_url").and_then(|v| v.as_str()).unwrap_or("");
+                                let size = a.get("size").and_then(|v| v.as_u64());
+                                if !name.ends_with(".bin") { continue; }
+                                let carrier = if name.contains("devkitc") {
+                                    "devkitc"
+                                } else if name.contains("xiao") {
+                                    "xiao"
+                                } else {
+                                    continue;
+                                };
+                                assets.push(FirmwareAsset {
+                                    carrier: carrier.to_string(),
+                                    version: tag.to_string(),
+                                    url: url.to_string(),
+                                    size,
+                                });
+                            }
+                        }
+                        if !assets.is_empty() {
+                            return FirmwareAvailable {
+                                source: "github".to_string(),
+                                version: tag.to_string(),
+                                assets,
+                                note: None,
+                                fetched_at_ms: now_ms,
+                            };
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let gh_note = "GitHub query failed or no matching assets — falling back to local releases dir";
+
+    // ── Local fallback ──
+    let mut assets = Vec::new();
+    let mut latest_version = String::new();
+    for carrier in &["devkitc", "xiao"] {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .map(|p| p.join("firmware/esp32-s3").join(carrier).join("releases"));
+        let Some(dir) = dir else { continue };
+        if !dir.is_dir() { continue; }
+
+        // Pick newest-mtime .bin.
+        let mut best: Option<(std::time::SystemTime, std::path::PathBuf, u64)> = None;
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) != Some("bin") { continue; }
+                let meta = match entry.metadata() { Ok(m) => m, Err(_) => continue };
+                let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+                let size = meta.len();
+                let pick = match &best {
+                    Some((t, _, _)) => mtime > *t,
+                    None => true,
+                };
+                if pick { best = Some((mtime, path, size)); }
+            }
+        }
+        if let Some((_, path, size)) = best {
+            let fname = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            // Convention: r2-rocker-firmware-<fw_ver>.bin
+            let version = fname
+                .strip_prefix("r2-rocker-firmware-")
+                .and_then(|s| s.strip_suffix(".bin"))
+                .unwrap_or(fname)
+                .to_string();
+            if version > latest_version { latest_version = version.clone(); }
+            assets.push(FirmwareAsset {
+                carrier: carrier.to_string(),
+                version,
+                url: path.to_string_lossy().into_owned(),
+                size: Some(size),
+            });
+        }
+    }
+
+    if !assets.is_empty() {
+        FirmwareAvailable {
+            source: "local".to_string(),
+            version: latest_version,
+            assets,
+            note: Some(gh_note.to_string()),
+            fetched_at_ms: now_ms,
+        }
+    } else {
+        FirmwareAvailable {
+            source: "none".to_string(),
+            version: String::new(),
+            assets: Vec::new(),
+            note: Some("No firmware found on GitHub or in local releases/".to_string()),
+            fetched_at_ms: now_ms,
+        }
+    }
 }
 
 fn encode_raw_frame_envelope(rf: &RawFrame) -> Vec<u8> {

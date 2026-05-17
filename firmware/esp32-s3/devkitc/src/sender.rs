@@ -50,22 +50,19 @@ const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// synthetic accelerometer (ADXL355 init failed). Built per-instance
 /// in `Sender::new` so it reflects runtime reality, not a compile-time
 /// guess.
-fn build_fw_ver(real_adxl: bool) -> String {
-    if real_adxl {
-        format!(
-            "{}-{}+{}",
-            env!("CARGO_PKG_VERSION"),
-            env!("R2_BUILD_TIMESTAMP"),
-            env!("R2_GIT_SHA"),
-        )
-    } else {
-        format!(
-            "{}-{}-sim+{}",
-            env!("CARGO_PKG_VERSION"),
-            env!("R2_BUILD_TIMESTAMP"),
-            env!("R2_GIT_SHA"),
-        )
-    }
+fn build_fw_ver(_real_adxl: bool) -> String {
+    // The fw_ver string is composed once at build time and emitted
+    // verbatim — see firmware/.../build.rs. In dev mode it's the
+    // semver + UTC timestamp + git sha; in release mode (R2_RELEASE=1)
+    // it's just the tag (e.g. `v0.2.0`) so the dashboard can match it
+    // 1:1 against the GitHub Releases tag list for "needs update?"
+    // comparison.
+    //
+    // The `-sim` suffix that used to differ between real/sim ADXL was
+    // dropped — runtime sim-fallback is signalled via the announce
+    // payload's `data_source` field per SPEC-R2-ROCKER-SENSOR-HEALTH,
+    // which the dashboard already shows on the device card.
+    env!("R2_FW_VER").to_string()
 }
 
 pub struct Sender {
