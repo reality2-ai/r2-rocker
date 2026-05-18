@@ -768,15 +768,17 @@
 </div>
 
 <script>
-// Service worker — caches index.html + /pkg/* so the dashboard shell
-// loads from cache after the first visit. /api/* and /ws/* are
-// passed through to the network. Bump CACHE in sw.js to force a
-// refresh across every connected browser.
+// Service-worker registration is currently DISABLED — an earlier
+// SW (v15/v16) got into a state where it intercepted every /api/*
+// fetch and returned `Failed to fetch`. `sw.js` is now a self-
+// uninstalling kill switch that drops every cache it ever made;
+// any browser that previously installed one will clear itself the
+// next time it lands on this page. Re-enabling the stale-while-
+// revalidate behaviour is a separate, careful refactor (track in
+// PLAN or git history).
 if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js').catch((err) => {
-      console.warn('[sw] registration failed:', err);
-    });
+  navigator.serviceWorker.getRegistrations().then((regs) => {
+    regs.forEach((r) => r.unregister().catch(() => {}));
   });
 }
 </script>
