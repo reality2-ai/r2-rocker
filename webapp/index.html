@@ -1453,21 +1453,23 @@ async function connectRelay(relayUrl) {
       return;
     }
     relayJoinParam = joinParam;
-    // tg_hash on the wire is the 16-hex-char (8-byte) SHA-256
-    // prefix of TG_PK. The dashboard's invite token uses an
-    // 8-hex-char (4-byte) prefix for short URLs. They aren't
-    // interchangeable — but the static-host webapp doesn't know
-    // TG_PK yet, so it has to ask the relay's bucket by the
-    // dashboard's published 8-hex `tg_hash` first. Relay accepts
-    // prefix-length 2..6 hex chars (r2-relay/src/ws.rs:249). 8
-    // chars = 4 bytes — relay will accept as a prefix match
-    // against the dashboard's full 8-byte hash.
+    // tg_hash on the wire is one of two forms (r2-relay/src/ws.rs:236):
+    //   - exactly 16 hex chars = the dashboard's full 8-byte
+    //     SHA-256(TG_PK) prefix
+    //   - or 2..6 hex chars = a *prefix* that must uniquely match
+    //     a currently-active bucket
+    // The dashboard's invite token carries an 8-hex (4-byte) tg_hash,
+    // which falls in neither bucket — the relay rejects it as
+    // "invalid trust_group length". Truncate to 6 chars (3-byte
+    // prefix) so the unpaired HELLO succeeds. Once we're paired,
+    // R2Member.sign_relay_hello will use the full 16-hex form.
+    const tgHashPrefix = joinParam.tg_hash.slice(0, 6);
     const kp = wasmGenerateDeviceKeypair();
     relayEphemeralSk = new Uint8Array(kp.secret_key);
     relayEphemeralPk = new Uint8Array(kp.public_key);
     const device_id_hex = bytesToHex(relayEphemeralPk);
     const ts = Math.floor(Date.now() / 1000);
-    const msg = `${joinParam.tg_hash}:${device_id_hex}:${ts}`;
+    const msg = `${tgHashPrefix}:${device_id_hex}:${ts}`;
     // Sign with the ephemeral SK. WASM doesn't expose a raw
     // Ed25519 sign primitive on the ephemeral key, but we can
     // reconstruct via SubtleCrypto. Simpler: use the WASM
@@ -1477,7 +1479,7 @@ async function connectRelay(relayUrl) {
     helloJson = JSON.stringify({
       type: 'hello',
       version: 1,
-      trust_group: joinParam.tg_hash,
+      trust_group: tgHashPrefix,
       device_id: device_id_hex,
       timestamp: ts,
       signature: bytesToHex(sig),
