@@ -1188,17 +1188,23 @@ function handleBootstrapEvent(msg) {
   const evt = msg.event;
   if (!evt) return;
 
-  // Reset event clears the bootstrap log panel for a fresh run. Note:
-  // we intentionally do NOT clear the `sensors` map — a "restart the
-  // bootstrap loop" gesture is distinct from "all sensors are gone".
-  // The dashboard's cached `last_announce` is only replayed on /ws/raw
-  // open, not on every bootstrap restart, so wiping fwVer/dataSource/
-  // virtual-LED here would leave the device cards permanently blank
-  // until each sensor next reboots and re-announces.
+  // Reset event clears the bootstrap log panel for a fresh run AND
+  // wipes the sensor cards. Pressing Connect Sensors cycles the
+  // hotspot (BootstrapConfig::cycle_hotspot = true), so every
+  // currently-streaming sensor is about to lose WiFi and re-pair —
+  // their cards represent stale state until they reconnect. Clearing
+  // makes that explicit: the Live / Devices tabs show "Waiting for
+  // sensors…" and repopulate as each sensor's fresh announce lands
+  // over the new TCP session.
   if (evt === null || 'Reset' in msg.event) {
     document.getElementById('bootstrap-log').innerHTML = '';
     document.getElementById('bootstrap-panel').classList.add('visible');
     addBootstrapLine('↺ Restarting…', 'amber');
+    sensors.clear();
+    document.getElementById('sensorsArea').innerHTML =
+      '<div class="card" id="sensorPlaceholder" style="color:#475569; text-align:center; padding:60px;">Waiting for sensors…</div>';
+    if (typeof renderDevicesIfVisible === 'function') renderDevicesIfVisible();
+    updateSensorList();
     return;
   }
 
