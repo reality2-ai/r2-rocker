@@ -1289,10 +1289,20 @@ async function bootstrapHive() {
     HASH_TO_NAME.set(hash, name);
     console.log('  0x' + hash.toString(16).padStart(8, '0'), name);
   }
-  console.log('[hive] connecting to /ws/raw …');
-  connectRaw();
-  console.log('[hive] connecting to /ws/status …');
-  connectStatus();
+  // Pick transport: if the URL has `?relay=`, we're loaded from the
+  // static-host copy of the webapp and the controller is unreachable
+  // — use the R2 relay. Otherwise the dashboard is on the same host
+  // as us and /ws/raw + /ws/status work directly.
+  const relayUrl = getRelayUrlParam();
+  if (relayUrl) {
+    console.log('[hive] using relay transport →', relayUrl);
+    connectRelay(relayUrl);
+  } else {
+    console.log('[hive] connecting to /ws/raw …');
+    connectRaw();
+    console.log('[hive] connecting to /ws/status …');
+    connectStatus();
+  }
 }
 
 let statusWs;
@@ -1360,6 +1370,191 @@ function connectRaw() {
     if (typeof e.data === 'string') return; // shouldn't happen on /ws/raw
     onRawFrame(new Uint8Array(e.data));
   };
+}
+
+// ── Off-network relay path (SPEC-R2-ROCKER-ACCESS §5.2) ──────────────
+//
+// When the page is loaded from a static host (GitHub Pages) with
+// `?relay=wss://...` in the URL, the dashboard's controller is
+// unreachable. Use the R2 relay instead: open a WSS to it, send a
+// HELLO signed with whatever identity we have (existing cert in
+// IndexedDB if paired, or an ephemeral keypair if not yet), and
+// then either (a) wait for our access request to be approved if
+// we're pre-paired, or (b) start receiving live R2-WIRE frames if
+// we're already paired.
+//
+// The relay is a dumb forwarder — every binary frame the dashboard
+// publishes to the same trust-group bucket lands here, and the
+// existing onRawFrame() handler decodes it. Trust comes from
+// end-to-end Ed25519 / DEK (not from the relay).
+
+let relayWs = null;
+let relayEphemeralSk = null;  // pre-pairing ephemeral keypair
+let relayEphemeralPk = null;
+let relayJoinParam   = null;  // {tg_hash, entropy_hex} when pre-pairing
+
+function getRelayUrlParam() {
+  const url = new URL(location.href);
+  return url.searchParams.get('relay');
+}
+
+/// Connect to the R2 relay. Identity selection:
+///   * If we already have a paired R2Member in IndexedDB, use its
+///     sign_relay_hello().
+///   * Else generate an ephemeral keypair, derive tg_hash from
+///     the `?join=` token, manually build the HELLO. Used during
+///     off-network pairing — we connect to the relay BEFORE we
+///     have a cert.
+async function connectRelay(relayUrl) {
+  if (relayWs) { try { relayWs.close(); } catch (_) {} }
+
+  // Determine HELLO identity.
+  let helloJson;
+  if (viewerIdentity) {
+    // Paired path — use the R2Member's signed HELLO. trust_group
+    // hash + device_id + signature all come from inside the cert.
+    const ts = BigInt(Math.floor(Date.now() / 1000));
+    helloJson = viewerIdentity.sign_relay_hello(ts);
+  } else {
+    // Pre-pairing path. Need a `?join=` token; without it we have
+    // no idea which TG to dial.
+    const joinParam = parseJoinParam();
+    if (!joinParam) {
+      console.warn('[relay] no cert + no ?join= — cannot connect');
+      return;
+    }
+    relayJoinParam = joinParam;
+    // tg_hash on the wire is the 16-hex-char (8-byte) SHA-256
+    // prefix of TG_PK. The dashboard's invite token uses an
+    // 8-hex-char (4-byte) prefix for short URLs. They aren't
+    // interchangeable — but the static-host webapp doesn't know
+    // TG_PK yet, so it has to ask the relay's bucket by the
+    // dashboard's published 8-hex `tg_hash` first. Relay accepts
+    // prefix-length 2..6 hex chars (r2-relay/src/ws.rs:249). 8
+    // chars = 4 bytes — relay will accept as a prefix match
+    // against the dashboard's full 8-byte hash.
+    const kp = wasmGenerateDeviceKeypair();
+    relayEphemeralSk = new Uint8Array(kp.secret_key);
+    relayEphemeralPk = new Uint8Array(kp.public_key);
+    const device_id_hex = bytesToHex(relayEphemeralPk);
+    const ts = Math.floor(Date.now() / 1000);
+    const msg = `${joinParam.tg_hash}:${device_id_hex}:${ts}`;
+    // Sign with the ephemeral SK. WASM doesn't expose a raw
+    // Ed25519 sign primitive on the ephemeral key, but we can
+    // reconstruct via SubtleCrypto. Simpler: use the WASM
+    // R2Member shim — but that requires a Member, which we don't
+    // have yet. Fall back to subtlecrypto.
+    const sig = await ed25519SignViaSubtle(relayEphemeralSk, msg);
+    helloJson = JSON.stringify({
+      type: 'hello',
+      version: 1,
+      trust_group: joinParam.tg_hash,
+      device_id: device_id_hex,
+      timestamp: ts,
+      signature: bytesToHex(sig),
+    });
+  }
+
+  relayWs = new WebSocket(relayUrl);
+  relayWs.binaryType = 'arraybuffer';
+  relayWs.onopen = () => {
+    relayWs.send(helloJson);
+    document.getElementById('wsStatus').textContent = 'Connecting…';
+  };
+  relayWs.onclose = (ev) => {
+    document.getElementById('wsDot').className = 'status-dot';
+    document.getElementById('wsStatus').textContent = `Disconnected (${ev.code})`;
+    setTimeout(() => connectRelay(relayUrl), 3000);
+  };
+  relayWs.onerror = (e) => console.warn('[relay] error', e);
+  relayWs.onmessage = (e) => {
+    if (typeof e.data === 'string') {
+      handleRelayText(e.data);
+    } else {
+      // Binary R2-WIRE frame — same envelope as /ws/raw.
+      onRawFrame(new Uint8Array(e.data));
+    }
+  };
+}
+
+/// Sign `msg` (string) with Ed25519 SK (32-byte seed) via SubtleCrypto.
+/// Returns 64-byte signature. Used for pre-pairing HELLO before the
+/// browser has an R2Member to call sign_relay_hello on.
+async function ed25519SignViaSubtle(sk_seed, msg) {
+  // PKCS#8 wrapping for the 32-byte Ed25519 seed.
+  const pkcs8 = new Uint8Array([
+    0x30,0x2e,0x02,0x01,0x00,0x30,0x05,0x06,0x03,0x2b,0x65,0x70,0x04,0x22,0x04,0x20,
+    ...sk_seed,
+  ]);
+  const key = await crypto.subtle.importKey('pkcs8', pkcs8, {name:'Ed25519'}, false, ['sign']);
+  const sig = await crypto.subtle.sign({name:'Ed25519'}, key, new TextEncoder().encode(msg));
+  return new Uint8Array(sig);
+}
+
+function handleRelayText(text) {
+  let msg;
+  try { msg = JSON.parse(text); } catch (_) { return; }
+  if (msg.type === 'welcome') {
+    document.getElementById('wsDot').className = 'status-dot connected';
+    document.getElementById('wsStatus').textContent = 'Connected (relay)';
+    // If we're pre-pairing, send the access request now.
+    if (!viewerIdentity && relayJoinParam) {
+      relaySendAccessRequest(relayJoinParam);
+    }
+    return;
+  }
+  if (msg.type === 'pong') return;
+  if (msg.type === 'access.response') {
+    // Approval came back. Decode + persist + reload as a paired
+    // viewer (the regular load path will then HELLO with the cert).
+    relayHandleAccessResponse(msg);
+    return;
+  }
+  if (msg.type === 'access.denied') {
+    if (msg.device_pk && relayEphemeralPk &&
+        msg.device_pk.toLowerCase() === bytesToHex(relayEphemeralPk).toLowerCase()) {
+      renderNotEnrolledLanding('The operator declined this request.');
+    }
+    return;
+  }
+}
+
+function relaySendAccessRequest(joinParam) {
+  if (!relayWs || relayWs.readyState !== WebSocket.OPEN) return;
+  const device_pk_hex = bytesToHex(relayEphemeralPk);
+  // Use a friendly default name — operator sees it in the Link tab.
+  const name = ((location.hostname || 'browser').slice(0, 32)) + ' (relay)';
+  const payload = JSON.stringify({
+    type: 'access.request',
+    tg_hash:     joinParam.tg_hash,
+    entropy_hex: joinParam.entropy_hex,
+    device_pk:   device_pk_hex,
+    name,
+  });
+  relayWs.send(payload);
+}
+
+async function relayHandleAccessResponse(msg) {
+  if (!relayEphemeralSk || !relayEphemeralPk) return;
+  // Filter to our device_pk so we ignore responses for other peers
+  // in the same bucket.
+  if (msg.device_pk && msg.device_pk.toLowerCase() !== bytesToHex(relayEphemeralPk).toLowerCase()) {
+    return;
+  }
+  try {
+    const tg_pk = hexToBytes(msg.tg_pk_hex);
+    const encrypted = b64ToBytes(msg.encrypted_b64);
+    const nowSecs = BigInt(Math.floor(Date.now() / 1000));
+    const member = wasmCompleteJoin(relayEphemeralSk, tg_pk, encrypted, nowSecs);
+    await idbPut(IDB_KEY, new Uint8Array(member.to_bytes()));
+    viewerIdentity = member;
+    viewerIdentityPkHex = bytesToHex(relayEphemeralPk);
+    // Reload — the page comes up paired, with the cert in IndexedDB,
+    // and connectRelay() this time uses the paired HELLO.
+    location.reload();
+  } catch (err) {
+    console.error('[relay] access response decode failed:', err);
+  }
 }
 
 // Envelope from dashboard's /ws/raw (Phase 5d step 3):
@@ -2760,6 +2955,21 @@ function updateRunNameDisplay() {
 
 async function accessGate() {
   const joinParam = parseJoinParam();
+  const relayUrl  = getRelayUrlParam();
+
+  // Off-network path: `?relay=` is set in the URL. The dashboard's
+  // HTTP /api/access/* endpoints aren't reachable from a static-
+  // host origin — pairing happens over the relay instead (see
+  // connectRelay + relaySendAccessRequest). accessGate just lets
+  // bootstrapHive proceed; connectRelay takes care of the
+  // ephemeral HELLO + request + waiting-for-approval state.
+  if (relayUrl) {
+    // The URL bar still shows `?join=...&relay=...` — leave both
+    // in place; connectRelay reads them.
+    isControllerRole = false;
+    applyRoleVisibility();
+    return true;
+  }
 
   // First-load enrolment via QR / link. Takes precedence over both
   // the IndexedDB cache and the localhost shortcut so a private /

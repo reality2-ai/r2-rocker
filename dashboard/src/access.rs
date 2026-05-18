@@ -640,6 +640,16 @@ impl Access {
         }
     }
 
+    /// Snapshot the cached `approved` body without consuming the
+    /// pending record. Used by the relay path: after the operator
+    /// approves, the dashboard pushes the body onto the relay text
+    /// channel so off-network viewers receive it via WS rather than
+    /// polling /check.
+    pub fn peek_response(&self, device_pk_hex: &str) -> Option<serde_json::Value> {
+        let device_pk = hex_to_arr32(device_pk_hex)?;
+        self.pending.get(&device_pk).and_then(|r| r.approved.clone())
+    }
+
     /// Requester polls this to see if the operator has decided yet.
     pub fn check_request(&mut self, device_pk_hex: &str) -> CheckOutcome {
         let Some(device_pk) = hex_to_arr32(device_pk_hex) else {

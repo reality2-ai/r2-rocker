@@ -586,6 +586,12 @@ struct AppState {
     /// generated a KeyHolder key yet; the /api/access/* routes
     /// return 503 in that case so the dashboard still boots.
     access: Option<access::AccessHandle>,
+    /// Outbound JSON text frames bound for the R2 relay session.
+    /// Anyone (e.g. access::approve_request) pushes a string here;
+    /// relay.rs subscribes and forwards each string verbatim as a
+    /// WS text frame. None when the dashboard isn't running with
+    /// `--relay-url`.
+    relay_text_tx: Option<broadcast::Sender<String>>,
 }
 
 const FIRMWARE_CACHE_TTL_SECS: u64 = 300;
@@ -623,6 +629,12 @@ async fn main() {
     let (event_tx, _) = broadcast::channel::<DashboardEvent>(256);
     let (raw_frame_tx, _) = broadcast::channel::<RawFrame>(1024);
     let (ws_broadcast_tx, _) = broadcast::channel::<String>(256);
+    // Relay outbound-text channel — only allocated when --relay-url is
+    // set so the access handlers can branch on `state.relay_text_tx`.
+    let relay_text_tx: Option<broadcast::Sender<String>> = if args.relay_url.is_some() {
+        let (tx, _) = broadcast::channel::<String>(256);
+        Some(tx)
+    } else { None };
 
     // Phase 5: try to load the KeyHolder signing key. A successful load
     // unlocks /api/access/*; a failure logs + leaves Access disabled.
@@ -651,17 +663,25 @@ async fn main() {
         bootstrap_task: Mutex::new(None),
         firmware_cache: Mutex::new(None),
         access: access_handle.clone(),
+        relay_text_tx: relay_text_tx.clone(),
     });
 
     // Phase 5 / SPEC-R2-ROCKER-ACCESS §5.2 — off-network viewer path
     // via the R2 relay. Only spawn when both --relay-url is set AND
     // the KeyHolder loaded; viewers need both to be useful.
-    if let (Some(url), Some(handle)) = (args.relay_url.clone(), access_handle) {
+    if let (Some(url), Some(handle), Some(tx)) = (args.relay_url.clone(), access_handle, relay_text_tx) {
         let (sk, pk) = {
             let a = handle.lock().await;
             (a.tg_signing_key(), a.tg_pk_bytes())
         };
-        relay::spawn_relay_session(url.clone(), sk, pk, raw_frame_tx.clone());
+        relay::spawn_relay_session(
+            url.clone(),
+            sk,
+            pk,
+            raw_frame_tx.clone(),
+            tx,
+            state.clone(),
+        );
         eprintln!("[relay] session spawned → {url}");
     }
 
@@ -3168,9 +3188,14 @@ async fn access_approve_handler(
             "error": "only the KeyHolder (localhost) may approve requests in v0.1",
         }))).into_response();
     }
-    let outcome = {
+    let (outcome, response_body) = {
         let mut access = handle.lock().await;
-        access.approve_request(&device_pk)
+        let o = access.approve_request(&device_pk);
+        // Snapshot the cached response body so we can publish it via
+        // the relay too — relay-side viewers don't poll /check, they
+        // wait for an access.response text frame.
+        let body = access.peek_response(&device_pk);
+        (o, body)
     };
     use access::ApproveOutcome::*;
     match outcome {
@@ -3183,6 +3208,16 @@ async fn access_approve_handler(
                 "event": "request_approved",
                 "device_pk": pk_hex.clone(),
             }).to_string());
+            // Relay-side: push the bundle into the relay text channel
+            // so off-network viewers receive it without polling.
+            if let (Some(tx), Some(body)) = (state.relay_text_tx.as_ref(), response_body) {
+                let mut envelope = body;
+                if let Some(obj) = envelope.as_object_mut() {
+                    obj.insert("type".into(), serde_json::Value::String("access.response".into()));
+                    obj.insert("device_pk".into(), serde_json::Value::String(pk_hex.clone()));
+                }
+                let _ = tx.send(envelope.to_string());
+            }
             (axum::http::StatusCode::OK, Json(serde_json::json!({
                 "ok": true,
                 "device_pk": pk_hex,

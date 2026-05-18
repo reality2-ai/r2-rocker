@@ -43,11 +43,13 @@ pub fn spawn_relay_session(
     signing_key: SigningKey,
     tg_pub: [u8; 32],
     raw_frame_tx: broadcast::Sender<crate::RawFrame>,
+    text_tx: broadcast::Sender<String>,
+    state: std::sync::Arc<crate::AppState>,
 ) {
     tokio::spawn(async move {
         let mut backoff_ms = RECONNECT_MIN_MS;
         loop {
-            match run_one_session(&relay_url, &signing_key, &tg_pub, &raw_frame_tx).await {
+            match run_one_session(&relay_url, &signing_key, &tg_pub, &raw_frame_tx, &text_tx, &state).await {
                 Ok(()) => {
                     eprintln!("[relay] session ended cleanly — reconnecting in {} ms", backoff_ms);
                 }
@@ -66,6 +68,8 @@ async fn run_one_session(
     signing_key: &SigningKey,
     tg_pub: &[u8; 32],
     raw_frame_tx: &broadcast::Sender<crate::RawFrame>,
+    text_tx: &broadcast::Sender<String>,
+    state: &std::sync::Arc<crate::AppState>,
 ) -> Result<()> {
     let (ws_stream, _resp) = tokio_tungstenite::connect_async(relay_url)
         .await
@@ -131,7 +135,8 @@ async fn run_one_session(
     // Every R2-WIRE frame the dashboard forwards to /ws/raw also
     // gets pushed up to the relay. Viewers in the same TG bucket
     // see it in real time.
-    let mut raw_rx = raw_frame_tx.subscribe();
+    let mut raw_rx  = raw_frame_tx.subscribe();
+    let mut text_rx = text_tx.subscribe();
 
     // Inbound: viewer-to-controller frames could arrive here in a
     // later slice. For v0.1 we drain and discard — the bridge
@@ -174,9 +179,13 @@ async fn run_one_session(
                     }
                     Some(Ok(WsMessage::Pong(_))) => { /* ours, expected */ }
                     Some(Ok(WsMessage::Text(t))) => {
-                        // Pong messages, catchup_incomplete, etc.
-                        // Logged once at debug; no action in v0.1.
-                        if !t.contains("\"pong\"") {
+                        // JSON access-protocol frames from off-network
+                        // viewers (pairing flow per SPEC-R2-ROCKER-ACCESS).
+                        // Other text (pong / catchup_incomplete) is
+                        // dropped silently.
+                        if t.contains("\"access.request\"") {
+                            handle_relay_access_request(state, text_tx, &t).await;
+                        } else if !t.contains("\"pong\"") {
                             eprintln!("[relay] text in: {}", t.trim());
                         }
                     }
@@ -195,6 +204,26 @@ async fn run_one_session(
                 }
             }
 
+            // Outbound text: anything pushed to AppState.relay_text_tx
+            // (e.g. access::approve_request pushing an access.response
+            // JSON) goes out as a WS text frame for viewers in this
+            // trust-group bucket.
+            res = text_rx.recv() => {
+                match res {
+                    Ok(s) => {
+                        if let Err(e) = sink.send(WsMessage::Text(s.into())).await {
+                            return Err(format!("write text: {e}"));
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        eprintln!("[relay] text_rx lagged by {n}");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return Err("text_rx closed".to_string());
+                    }
+                }
+            }
+
             // Keepalive — ping the relay every 25 s so it doesn't
             // close us at the 60-s heartbeat-timeout boundary.
             _ = ping_tick.tick() => {
@@ -205,4 +234,46 @@ async fn run_one_session(
             }
         }
     }
+}
+
+/// Handle an inbound `access.request` text frame from a viewer that
+/// arrived via the relay. Same effect as if the viewer had POSTed to
+/// `/api/access/request` over HTTP: we record a pending request the
+/// operator can approve in the Link tab.
+async fn handle_relay_access_request(
+    state: &std::sync::Arc<crate::AppState>,
+    text_tx: &broadcast::Sender<String>,
+    text: &str,
+) {
+    #[derive(serde::Deserialize)]
+    struct ReqBody {
+        device_pk: String,
+        name: String,
+        // tg_hash + entropy_hex are present but unused here — relay
+        // forwards by tg_hash so it's already verified, and the
+        // request-and-approve flow doesn't consume an invite token.
+    }
+    let Ok(body) = serde_json::from_str::<ReqBody>(text) else {
+        eprintln!("[relay] malformed access.request: {}", text.chars().take(120).collect::<String>());
+        return;
+    };
+    let Some(handle) = state.access.as_ref() else { return; };
+    let outcome = {
+        let mut a = handle.lock().await;
+        a.submit_request(&body.device_pk, &body.name, "relay")
+    };
+    use crate::access::RequestOutcome;
+    if let RequestOutcome::Submitted(pk) = outcome {
+        // Mirror what the HTTP handler does — broadcast on /ws/status
+        // so the controller's Link tab shows the new pending row.
+        let _ = state.ws_broadcast_tx.send(serde_json::json!({
+            "type": "access",
+            "event": "request_pending",
+            "device_pk": hex::encode(&pk[..]),
+            "name": body.name,
+            "hint": "via relay",
+        }).to_string());
+    }
+    // Suppress unused-warning when text_tx is only used in select arm.
+    let _ = text_tx;
 }
