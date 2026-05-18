@@ -374,6 +374,134 @@ the dashboard's HTTP port (`http://localhost:8080/`) and you have
 the freshly-rebuilt viewer. Hard-refresh the browser (or bump the
 service worker cache key) if a stale cached version sticks.
 
+## Under the hood
+
+The architecture diagram earlier is the **operator's** view —
+boxes for sensors / controller / browser, arrows for "data flows
+here." This section drops one level lower for someone reading the
+code: where in the firmware does each piece live, how do the
+threads talk, what hits the network in what shape.
+
+### End-to-end data path
+
+```
+  ADXL355
+    │  SPI @ 5 MHz
+    ▼
+  firmware sender thread ──── on every sample (10 Hz) ────────┐
+    │                                                          │
+    │  R2-WIRE frame                                           │  Ring::append
+    │  (12-byte header + CBOR payload)                         ▼
+    │                                              /sdcard/logNNNN.csv
+    ▼                                              (durable backstop,
+  TCP 21042 ──────► dashboard sender-handler        ACK-driven freeing)
+                          │
+                          ├──► state.peers map (per-peer tx channel)
+                          │
+                          └──► ws_broadcast_tx ─► /ws/raw  (binary frames)
+                                              └─► /ws/logs (per-sensor tail)
+                                                       │
+                                                       ▼
+                                                browser tab (WASM + JS)
+                                                       │
+                                                       ├─► Chart.js charts
+                                                       ├─► Devices card grid
+                                                       └─► capture state →
+                                                           Start/Mark/Stop UI
+```
+
+Why each hop exists:
+* **SPI → sender thread** keeps the SPI bus off the main thread so
+  BLE bootstrap can keep listening for re-provisioning offers even
+  while WiFi is up.
+* **Sender → SD ring first** is the durability guarantee — every
+  sample lands on the card *before* it goes out on the wire, so a
+  network blip doesn't lose data. The dashboard's `r2.dash.ack`
+  back-channel frees old SD segments as records are acknowledged.
+* **TCP 21042 → ws_broadcast → /ws/raw** keeps the dashboard a
+  thin proxy: the heavy decode work (CBOR → JSON, schema mapping)
+  happens in the browser's WASM bundle.
+* **Per-sensor /ws/logs** opens an on-demand `nc`-equivalent to the
+  sensor's `log_tcp` listener — used by the "Logs" toggle on each
+  device card.
+
+### Capture state machine (SPEC-R2-ROCKER-CAPTURE)
+
+The Live tab's Start → Mark → Stop buttons drive this FSM on every
+connected sensor in parallel:
+
+```
+                  r2.dash.capture.start
+            ┌────────────────────────────────┐
+            │       (any state → restart)    │
+            ▼                                │
+        ┌────────┐                    ┌──────┴───────┐
+        │  Idle  │                    │  Calibrating │
+        │        │                    │   2 s window │
+        │ LED    │                    │   accumulate │
+        │ green  │                    │   mean off.  │
+        │ heart- │                    │   LED purple │
+        │ beat   │                    └──────┬───────┘
+        └────────┘                           │
+            ▲                                │ r2.dash.capture.mark
+            │                                │ (validates name + prefix,
+            │                                │  opens capture CSV,
+            │                                │  locks offset)
+            │                                ▼
+            │                          ┌──────────────┐
+            │                          │  Recording   │
+            └──────────────────────────┤              │
+              r2.dash.capture.stop     │  write each  │
+              (always → Idle,          │  sample as   │
+               closes file if any)     │  raw − off   │
+                                       │  LED green   │
+                                       └──────────────┘
+```
+
+The `capture.state` event fires on every transition so the webapp
+can mirror the FSM state in the run-control panel (IDLE / CALIBRATING
+/ RECORDING with colour-matched indicator).
+
+### TCP port map (per sensor)
+
+The sensor exposes four listeners, each with its own purpose:
+
+| Port  | Purpose | Spec |
+|-------|---|---|
+| 21042 | Events — canonical R2-WIRE TCP transport (samples, status, time-sync) | `SPEC-R2-ROCKER-WIRE` |
+| 21043 | OTA — receives a `.bin` push from `/api/ota/{addr}` | `SPEC-R2-ROCKER-SENSOR` §12 |
+| 21046 | log_tcp — telnet-style fan-out of `log!()` output for `nc <ip> 21046` | `SPEC-R2-ROCKER-SENSOR-LIVE-LOGS` |
+| 21047 | data_tcp — LIST/GET/DEL/DEL_ALL of capture files on the SD card | `SPEC-R2-ROCKER-CAPTURE` §6 |
+
+The dashboard reaches each port through a matching HTTP route
+(`/api/ota/{addr}`, `/ws/logs/{addr}`, `/api/data/{addr}/*`).
+Browsers never connect to sensor ports directly.
+
+### SD card layout
+
+Both the rolling ring and the named captures live on the same
+FAT32 partition, side-by-side:
+
+```
+/sdcard/
+├─ logNNNN.csv               ← rolling ring (durable backstop,
+├─ logNNNN.csv                   rotates per SPEC-R2-ROCKER-SENSOR §6,
+├─ …                             ACK-driven free)
+│
+└─ captures/
+   ├─ 2026-05-18_18-05-06-test.csv     ← operator-driven, named
+   ├─ 2026-05-18_18-19-55-test.csv         (Start → Mark → Stop
+   └─ …                                     produces one of these)
+```
+
+Same row format on both (62-byte fixed-width
+`seq, ts_ms, x, y, z`) — captures just carry calibrated values
+instead of raw. The dashboard's single-sensor download prepends
+a CSV header on the wire (`seq,ts_ms,x,y,z\n`) so the on-disk
+file stays compact and the spreadsheet view is self-describing.
+
+---
+
 ## Where to look when something doesn't work
 
 | Symptom | First place to look |
