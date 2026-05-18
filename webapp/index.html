@@ -1553,8 +1553,11 @@ function handleRelayText(text) {
 function relaySendAccessRequest(joinParam) {
   if (!relayWs || relayWs.readyState !== WebSocket.OPEN) return;
   const device_pk_hex = bytesToHex(relayEphemeralPk);
-  // Use a friendly default name — operator sees it in the Link tab.
-  const name = ((location.hostname || 'browser').slice(0, 32)) + ' (relay)';
+  // Prefer the name the user typed on the landing page; fall back
+  // to hostname so older auto-pairing-without-form paths still work.
+  const name = (_pendingRequestName && _pendingRequestName.trim())
+    ? _pendingRequestName.trim().slice(0, 64) + ' (relay)'
+    : ((location.hostname || 'browser').slice(0, 32)) + ' (relay)';
   const payload = JSON.stringify({
     type: 'access.request',
     tg_hash:     joinParam.tg_hash,
@@ -2834,6 +2837,7 @@ let _pendingRequestPoller = null;
 let _pendingRequestPk = null;
 let _pendingDeviceSk = null;
 let _pendingDevicePk = null;
+let _pendingRequestName = null;
 
 async function requestAccess() {
   const name = (document.getElementById('landingNameInput').value || '').trim();
@@ -2841,25 +2845,50 @@ async function requestAccess() {
     alert("Please type a name the operator will recognise.");
     return;
   }
+  const relayUrl  = getRelayUrlParam();
+  const joinParam = parseJoinParam();
+  if (relayUrl && !joinParam) {
+    alert("This pairing link is missing the invite token. Ask the operator for a fresh link.");
+    return;
+  }
   document.getElementById('landingRequestBtn').disabled = true;
-  // Generate ephemeral keypair. If the operator approves, the
-  // dashboard issues a cert against this key.
   try {
-    const kp = wasmGenerateDeviceKeypair();
-    _pendingDeviceSk = new Uint8Array(kp.secret_key);
-    _pendingDevicePk = new Uint8Array(kp.public_key);
-    const pk_hex = bytesToHex(_pendingDevicePk);
-    _pendingRequestPk = pk_hex;
-    const res = await fetch('/api/access/request', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ device_pk: pk_hex, name }),
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-    document.getElementById('landingRequestForm').hidden = true;
-    document.getElementById('landingWaiting').hidden = false;
-    document.getElementById('landingWaitingName').textContent = name;
-    startPendingRequestPoll(pk_hex);
+    if (relayUrl) {
+      // Relay-mode pairing. connectRelay handles the
+      // ephemeral-keypair HELLO + auto-sends access.request once the
+      // relay WELCOMEs us. The approved access.response comes back
+      // through the relay text channel; relayHandleAccessResponse
+      // persists the cert and reloads. No HTTP polling here — the
+      // relay pushes the answer.
+      _pendingRequestName = name;
+      document.getElementById('landingRequestForm').hidden = true;
+      document.getElementById('landingWaiting').hidden = false;
+      document.getElementById('landingWaitingName').textContent = name;
+      const waitingHint = document.querySelector('#landingWaiting p.invite-help + p.invite-help');
+      if (waitingHint) {
+        waitingHint.textContent =
+          "They'll see your request on their dashboard's Link tab. We'll switch over automatically once they approve.";
+      }
+      connectRelay(relayUrl);
+    } else {
+      // In-room HTTP path. Same ephemeral-keypair → /api/access/request
+      // pattern that was here before the relay was added.
+      const kp = wasmGenerateDeviceKeypair();
+      _pendingDeviceSk = new Uint8Array(kp.secret_key);
+      _pendingDevicePk = new Uint8Array(kp.public_key);
+      const pk_hex = bytesToHex(_pendingDevicePk);
+      _pendingRequestPk = pk_hex;
+      const res = await fetch('/api/access/request', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ device_pk: pk_hex, name }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+      document.getElementById('landingRequestForm').hidden = true;
+      document.getElementById('landingWaiting').hidden = false;
+      document.getElementById('landingWaitingName').textContent = name;
+      startPendingRequestPoll(pk_hex);
+    }
   } catch (err) {
     document.getElementById('landingRequestBtn').disabled = false;
     alert(`Couldn't send the request: ${err.message || err}`);
@@ -3067,18 +3096,31 @@ async function accessGate() {
   const joinParam = parseJoinParam();
   const relayUrl  = getRelayUrlParam();
 
-  // Off-network path: `?relay=` is set in the URL. The dashboard's
-  // HTTP /api/access/* endpoints aren't reachable from a static-
-  // host origin — pairing happens over the relay instead (see
-  // connectRelay + relaySendAccessRequest). accessGate just lets
-  // bootstrapHive proceed; connectRelay takes care of the
-  // ephemeral HELLO + request + waiting-for-approval state.
+  // Off-network path: `?relay=` is set in the URL.
+  //
+  //  Paired (cert in IndexedDB)   → straight through; bootstrapHive
+  //                                  will open the relay WSS with a
+  //                                  signed HELLO and receive live
+  //                                  frames.
+  //  Unpaired (no cert) + `?join=`  → render the same "Ask to pair"
+  //                                  landing the in-room HTTP path
+  //                                  uses; the "Ask to pair" button
+  //                                  routes the request through the
+  //                                  relay text channel instead of
+  //                                  HTTP /api/access/request (which
+  //                                  isn't reachable from the
+  //                                  static-host origin).
+  //  Unpaired + no `?join=`         → landing with no relay context.
+  //                                  The pairing form will refuse to
+  //                                  submit without a token.
   if (relayUrl) {
-    // The URL bar still shows `?join=...&relay=...` — leave both
-    // in place; connectRelay reads them.
     isControllerRole = false;
     applyRoleVisibility();
-    return true;
+    if (await loadExistingIdentity()) {
+      return true;
+    }
+    renderNotEnrolledLanding();
+    return false;
   }
 
   // First-load enrolment via QR / link. Takes precedence over both
