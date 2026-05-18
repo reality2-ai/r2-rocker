@@ -179,21 +179,36 @@ async fn run_one_session(
                     }
                     Some(Ok(WsMessage::Pong(_))) => { /* ours, expected */ }
                     Some(Ok(WsMessage::Text(t))) => {
-                        // JSON access-protocol frames from off-network
-                        // viewers (pairing flow per SPEC-R2-ROCKER-ACCESS).
-                        // Other text (pong / catchup_incomplete) is
-                        // dropped silently.
-                        if t.contains("\"access.request\"") {
-                            handle_relay_access_request(state, text_tx, &t).await;
-                        } else if !t.contains("\"pong\"") {
+                        // r2-relay only inspects text for `ping` /
+                        // `catchup`; everything else from peers is
+                        // dropped without forwarding (r2-relay
+                        // ws.rs:67-93). The only text we should see
+                        // here is the relay's own pong / informational
+                        // frames. Log anything unexpected.
+                        if !t.contains("\"pong\"") {
                             eprintln!("[relay] text in: {}", t.trim());
                         }
                     }
                     Some(Ok(WsMessage::Binary(b))) => {
-                        // Viewer→controller frame. v0.1: log size + drop.
-                        // Wired into the existing inbound dispatch in a
-                        // follow-up slice.
-                        let _ = b;
+                        // Binary frames from other peers. Two shapes:
+                        //   1. Sensor envelope from another dashboard
+                        //      (cross-controller bridging — not used
+                        //      in v0.1, drop).
+                        //   2. Access-protocol control frame wrapped
+                        //      in our R2C\x01 magic — pairing flow per
+                        //      SPEC-R2-ROCKER-ACCESS §5.2. r2-relay
+                        //      only forwards binary, so we tunnel JSON
+                        //      access.request / access.response inside
+                        //      binary frames.
+                        if let Some(payload) = strip_control_magic(&b) {
+                            if let Ok(text) = std::str::from_utf8(payload) {
+                                if text.contains("\"access.request\"") {
+                                    handle_relay_access_request(state, text_tx, text).await;
+                                } else {
+                                    eprintln!("[relay] ctrl in: {}", text.trim());
+                                }
+                            }
+                        }
                     }
                     Some(Ok(WsMessage::Close(frame))) => {
                         return Err(format!("relay closed: {frame:?}"));
@@ -204,15 +219,17 @@ async fn run_one_session(
                 }
             }
 
-            // Outbound text: anything pushed to AppState.relay_text_tx
+            // Outbound control: anything pushed to AppState.relay_text_tx
             // (e.g. access::approve_request pushing an access.response
-            // JSON) goes out as a WS text frame for viewers in this
-            // trust-group bucket.
+            // JSON) goes out as a *binary* WS frame wrapped in our
+            // R2C\x01 magic — r2-relay only forwards binary, so we
+            // tunnel JSON access protocol frames inside binary.
             res = text_rx.recv() => {
                 match res {
                     Ok(s) => {
-                        if let Err(e) = sink.send(WsMessage::Text(s.into())).await {
-                            return Err(format!("write text: {e}"));
+                        let envelope = wrap_control_magic(s.as_bytes());
+                        if let Err(e) = sink.send(WsMessage::Binary(envelope.into())).await {
+                            return Err(format!("write ctrl: {e}"));
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -234,6 +251,25 @@ async fn run_one_session(
             }
         }
     }
+}
+
+/// 4-byte magic prefix marking a binary frame as an access-protocol
+/// control message (JSON payload) rather than a sensor data envelope.
+/// r2-relay forwards all binary frames between peers regardless of
+/// content; sensor envelopes start with `[u16 BE src_addr_len]` where
+/// src_addr_len ≤ 64, so the first byte is always 0x00 — this magic
+/// (`R2C\x01`) is unambiguous against any real sensor frame.
+const CONTROL_MAGIC: &[u8; 4] = b"R2C\x01";
+
+fn wrap_control_magic(payload: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(payload.len() + CONTROL_MAGIC.len());
+    v.extend_from_slice(CONTROL_MAGIC);
+    v.extend_from_slice(payload);
+    v
+}
+
+fn strip_control_magic(frame: &[u8]) -> Option<&[u8]> {
+    frame.strip_prefix(CONTROL_MAGIC.as_slice())
 }
 
 /// Handle an inbound `access.request` text frame from a viewer that

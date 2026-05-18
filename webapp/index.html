@@ -1502,8 +1502,17 @@ async function connectRelay(relayUrl) {
     if (typeof e.data === 'string') {
       handleRelayText(e.data);
     } else {
-      // Binary R2-WIRE frame — same envelope as /ws/raw.
-      onRawFrame(new Uint8Array(e.data));
+      // Binary frame. Two possibilities:
+      //   1. Access-protocol control wrapped in R2C\x01 magic — pairing
+      //      flow from the dashboard (access.response / access.denied).
+      //   2. Sensor R2-WIRE envelope, same shape as /ws/raw.
+      const buf = new Uint8Array(e.data);
+      const ctrl = relayStripControl(buf);
+      if (ctrl !== null) {
+        handleRelayText(ctrl);
+      } else {
+        onRawFrame(buf);
+      }
     }
   };
 }
@@ -1550,6 +1559,29 @@ function handleRelayText(text) {
   }
 }
 
+// Magic prefix marking a binary WS frame as an access-protocol
+// control message (JSON inside) rather than a sensor data envelope.
+// r2-relay forwards all binary frames peer-to-peer but drops text
+// frames it doesn't recognise as ping/catchup, so we tunnel JSON
+// inside binary. Must match dashboard/src/relay.rs CONTROL_MAGIC.
+const RELAY_CONTROL_MAGIC = new Uint8Array([0x52, 0x32, 0x43, 0x01]); // "R2C\x01"
+
+function relayWrapControl(jsonStr) {
+  const body = new TextEncoder().encode(jsonStr);
+  const out  = new Uint8Array(RELAY_CONTROL_MAGIC.length + body.length);
+  out.set(RELAY_CONTROL_MAGIC, 0);
+  out.set(body, RELAY_CONTROL_MAGIC.length);
+  return out;
+}
+
+function relayStripControl(frame) {
+  if (frame.length < RELAY_CONTROL_MAGIC.length) return null;
+  for (let i = 0; i < RELAY_CONTROL_MAGIC.length; i++) {
+    if (frame[i] !== RELAY_CONTROL_MAGIC[i]) return null;
+  }
+  return new TextDecoder().decode(frame.subarray(RELAY_CONTROL_MAGIC.length));
+}
+
 function relaySendAccessRequest(joinParam) {
   if (!relayWs || relayWs.readyState !== WebSocket.OPEN) return;
   const device_pk_hex = bytesToHex(relayEphemeralPk);
@@ -1565,7 +1597,7 @@ function relaySendAccessRequest(joinParam) {
     device_pk:   device_pk_hex,
     name,
   });
-  relayWs.send(payload);
+  relayWs.send(relayWrapControl(payload));
 }
 
 async function relayHandleAccessResponse(msg) {
