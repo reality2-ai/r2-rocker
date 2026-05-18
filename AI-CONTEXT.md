@@ -149,18 +149,39 @@ Project is **self-contained** — no path deps on `../r2-core`. R2 protocol
 crates will be vendored into `crates/` when they're needed (Phase 4+
 onwards). Don't add `path = "../../r2-core"` style references.
 
-## Current state (2026-05-08)
+## Current state (2026-05-18, evening)
 
-**Wireless end-to-end demo alive on real hardware.** ESP32-S3
-sensor (still ADXL-simulated; soldering imminent) BLE-advertises,
-accepts a signed `#wifi_offer` over L2CAP from the dashboard's
-bootstrap loop, persists creds to NVS, reboots, joins WiFi, opens
-TCP, streams R2-WIRE frames. The dashboard decodes, decimates 100→
-10 Hz for the WASM viewer at `/v/`, and lights both physical RGB
-LED and dashboard's virtual LEDs in lockstep through every FSM
-state. Firmware updates push wirelessly via `/api/ota/{addr}` —
-the USB cable is unplugged for entire bench sessions. Same chip
-MAC `1c:db:d4:41:28:3c`.
+**Phase 5 pairing-over-relay in progress — partial:** off-network
+viewers can load the webapp from `https://reality2.ai/r2-rocker/`
+(GitHub Pages, workflow deploys `webapp/` on push to `main`); the
+"Anywhere" QR encodes a relay URL; the page renders the "Pair this
+device" landing instead of the full dashboard. **Open bug:** the
+phone's `access.request` (now sent as a binary `R2C\x01`-magic
+control frame, since r2-relay drops text frames it doesn't
+recognise) is **not yet reaching the controller's Link tab**.
+Diagnostic logging is in `dashboard/src/relay.rs` (`bin ctrl in:`
+/ `bin in: not ctrl`) — next session should pair from a freshly
+hard-refreshed phone and watch the dashboard log to confirm
+whether the frame arrives (cached webapp on the phone is the most
+likely cause). Same binary-envelope work covers `access.response`
+in the reverse direction.
+
+In-room path remains the working baseline: invite modal has an
+In-room ↔ Anywhere toggle below the dashboard QR; In-room shows
+both the WiFi-join QR and the dashboard QR; viewer pairs over
+LAN HTTP `/api/access/request` + operator approves on the Link
+tab. Tested working end-to-end.
+
+**Earlier state preserved (2026-05-08):** Wireless end-to-end demo
+alive on real hardware. ESP32-S3 sensor (still ADXL-simulated;
+soldering imminent) BLE-advertises, accepts a signed `#wifi_offer`
+over L2CAP from the dashboard's bootstrap loop, persists creds to
+NVS, reboots, joins WiFi, opens TCP, streams R2-WIRE frames. The
+dashboard decodes, decimates 100→10 Hz for the WASM viewer at
+`/v/`, and lights both physical RGB LED and dashboard's virtual
+LEDs in lockstep through every FSM state. Firmware updates push
+wirelessly via `/api/ota/{addr}` — the USB cable is unplugged for
+entire bench sessions. Same chip MAC `1c:db:d4:41:28:3c`.
 
 | Folder / file | Status |
 |---|---|
