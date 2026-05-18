@@ -807,6 +807,18 @@
       <div class="invite-qr-wrap">
         <img id="inviteWifiQrImg" alt="WiFi-join QR" />
       </div>
+      <div class="invite-url-group">
+        <label>Or type these by hand:</label>
+        <div class="invite-url-row">
+          <input id="inviteWifiSsid" readonly />
+          <button onclick="copyInputToClipboard('inviteWifiSsid', this)">Copy</button>
+        </div>
+        <div class="invite-url-row" style="margin-top:6px;">
+          <input id="inviteWifiPsk" type="password" readonly />
+          <button onclick="toggleWifiPskReveal()" id="inviteWifiPskReveal">Show</button>
+          <button onclick="copyInputToClipboard('inviteWifiPsk', this)">Copy</button>
+        </div>
+      </div>
     </div>
 
     <p class="invite-step-label" id="inviteStep2Label">Open the dashboard</p>
@@ -2037,6 +2049,14 @@ async function openInviteModal() {
       document.getElementById('inviteWifiQrImg').src = inv.qr_wifi_data_url;
       const ssidLabel = document.getElementById('inviteWifiSsidLabel');
       ssidLabel.textContent = inv.wifi_ssid ? `(${inv.wifi_ssid})` : '';
+      // Manual SSID + PSK fields so the operator can read them out
+      // or copy them when the QR scan flakes out.
+      if (inv.wifi_ssid) document.getElementById('inviteWifiSsid').value = inv.wifi_ssid;
+      if (inv.wifi_psk)  {
+        document.getElementById('inviteWifiPsk').value = inv.wifi_psk;
+        document.getElementById('inviteWifiPsk').type = 'password';
+        document.getElementById('inviteWifiPskReveal').textContent = 'Show';
+      }
       wifiBlock.hidden = false;
       document.getElementById('inviteStep2Label').textContent = 'Step 2: Open the dashboard';
     } else {
@@ -2084,6 +2104,14 @@ function startInviteCountdown(expiresAtMs) {
   };
   tick();
   _inviteCountdownTimer = setInterval(tick, 250);
+}
+
+function toggleWifiPskReveal() {
+  const inp = document.getElementById('inviteWifiPsk');
+  const btn = document.getElementById('inviteWifiPskReveal');
+  const showing = inp.type === 'text';
+  inp.type = showing ? 'password' : 'text';
+  btn.textContent = showing ? 'Show' : 'Hide';
 }
 
 async function copyInputToClipboard(inputId, btn) {
@@ -2372,23 +2400,72 @@ function landingTryPaste() {
 /// Top-level access-gate run on page load. Returns true if the rest of
 /// the dashboard is allowed to come up; false if the landing page is
 /// rendered instead.
-async function accessGate() {
-  // KeyHolder shortcut — the controller's own browser bypasses the
-  // viewer-enrolment requirement (§2.3: KeyHolder is "TG member
-  // automatically by config"). v0.1 detects "this is the controller"
-  // via the localhost loopback check (same gate the dashboard uses
-  // server-side for /api/access/*).
-  if (isLocalHost()) return true;
+///
+/// Order matters:
+///   1. `?join=` first — even on localhost (an operator testing the
+///      pairing flow from an incognito window on the same machine
+///      legitimately wants to enrol as a fresh viewer, not silently
+///      slip past the gate via the loopback shortcut).
+///   2. Existing IndexedDB cert next — persistent viewer identity.
+///   3. KeyHolder loopback shortcut — only if no token and no cert.
+///   4. Landing page — non-localhost, no token, no cert.
+/// Global role flag set by accessGate(). True if this browser is
+/// driving the controller (KeyHolder identity), false if it's a paired
+/// viewer. The controller sees mutate-controls (Connect Sensors, OTA,
+/// Reset, Start/Mark/Stop, Grant access, Revoke, Delete-all data);
+/// viewers see the read-only surface.
+let isControllerRole = false;
 
+/// Apply role-driven hide/show to the controller-only elements once
+/// `isControllerRole` is settled. Called at end of accessGate.
+function applyRoleVisibility() {
+  // Selectors driven by the controller-only feature surface — keep
+  // this list together so it's auditable in one place. Calm-tech:
+  // viewers see fewer buttons, not greyed-out buttons.
+  const controllerOnlyIds = [
+    'btn-connect',           // Connect Sensors (BLE bootstrap)
+    'bulkPullLatestBtn',     // Update Outdated from Latest
+    'bulkUpdateBtn',         // Update All Firmware
+    'bulkResetBtn',          // Reset All Sensors
+    'captureStartBtn',       // Run-control Start
+    'captureMarkBtn',        // Run-control Mark
+    'captureStopBtn',        // Run-control Stop
+    'dataDeleteAllBtn',      // Data — Delete all across fleet
+    'linkInviteBtn',         // Link — Grant access (already gated, double-up is fine)
+  ];
+  for (const id of controllerOnlyIds) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    if (isControllerRole) {
+      // Restore previous visibility — only the bulkPullLatest
+      // button starts hidden, the rest are visible by default.
+      if (id !== 'bulkPullLatestBtn') el.hidden = false;
+    } else {
+      el.hidden = true;
+    }
+  }
+  // Per-card "Update Firmware" / "Reset Sensor" buttons are
+  // rendered by R2DeviceCard's _update; the renderer reads
+  // window.isControllerRole and skips them for viewers. The
+  // capture state indicator stays visible for both roles —
+  // viewers see CALIBRATING / RECORDING just like the controller.
+}
+
+async function accessGate() {
   const joinParam = parseJoinParam();
 
-  // First-load enrolment via QR / link.
+  // First-load enrolment via QR / link. Takes precedence over both
+  // the IndexedDB cache and the localhost shortcut so a private /
+  // incognito window opened on the controller's own laptop with
+  // ?join= correctly enrols as a viewer instead of being treated as
+  // the KeyHolder.
   if (joinParam) {
-    // Don't re-enrol on a refresh — strip the token immediately.
     const deviceName = (location.hostname || 'browser').slice(0, 32);
     try {
       await runEnrolment(joinParam, deviceName);
       clearJoinParam();
+      isControllerRole = false;
+      applyRoleVisibility();
       return true;
     } catch (err) {
       console.error('[access] enrolment failed:', err);
@@ -2399,9 +2476,24 @@ async function accessGate() {
   }
 
   // Returning enrolled device.
-  if (await loadExistingIdentity()) return true;
+  if (await loadExistingIdentity()) {
+    isControllerRole = false;
+    applyRoleVisibility();
+    return true;
+  }
 
-  // Not enrolled, no token in URL → landing page.
+  // KeyHolder shortcut — the controller's own browser, with no token
+  // and no persisted viewer identity, bypasses the landing page
+  // (§2.3: KeyHolder is "TG member automatically by config"). v0.1
+  // detects "this is the controller" via the localhost loopback
+  // check (same gate the dashboard uses server-side for /api/access/*).
+  if (isLocalHost()) {
+    isControllerRole = true;
+    applyRoleVisibility();
+    return true;
+  }
+
+  // Not enrolled, no token in URL, not on localhost → landing page.
   renderNotEnrolledLanding();
   return false;
 }
@@ -2545,6 +2637,15 @@ class R2DeviceCard extends HTMLElement {
     this._refs.btnUpdate.addEventListener('click', () => this._sensor && this.pickAndUpdateFirmware());
     this._refs.btnReset .addEventListener('click', () => this._sensor && this.reset());
     this._refs.btnLogs  .addEventListener('click', () => this._sensor && this.toggleLogs());
+    // Hide controller-only buttons (firmware + reset) on viewer
+    // builds. Logs panel stays — viewers can inspect device logs
+    // without changing anything. The same controller/viewer split
+    // governs the bulk buttons (top of Devices view) and the
+    // capture run-controls (Live view); see applyRoleVisibility.
+    if (!isControllerRole) {
+      this._refs.btnUpdate.hidden = true;
+      this._refs.btnReset .hidden = true;
+    }
   }
 
   // ── action methods ─────────────────────────────────────────────
@@ -3296,6 +3397,7 @@ Object.assign(window, {
   copyInputToClipboard,
   revokeMember,
   landingTryPaste,
+  toggleWifiPskReveal,
 });
 </script>
 </body>

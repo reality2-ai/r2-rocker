@@ -98,6 +98,12 @@ pub struct InviteEnvelope {
     pub qr_wifi_data_url: Option<String>,
     /// Hotspot SSID — paired with `qr_wifi_data_url` for the URL chip.
     pub wifi_ssid: Option<String>,
+    /// Hotspot PSK — operator-side reveal so the password can be
+    /// read out or copy-pasted when QR scanning fails. v0.1: the
+    /// dashboard already trusts the loopback gate, so handing this
+    /// to the localhost browser doesn't widen the trust boundary —
+    /// the same browser already has access to /api/access/invite.
+    pub wifi_psk: Option<String>,
     /// Unix-ms wall-clock when this token expires.
     pub expires_at_ms: i64,
 }
@@ -303,21 +309,25 @@ impl Access {
         let qr_png_data_url = render_qr_png(&url_local)?;
 
         // Optional WiFi-join QR. Standard format:
-        //   WIFI:T:<auth>;S:<ssid>;P:<psk>;;
-        // Both iOS and Android camera apps prompt to join when
-        // they decode this. Skipped when wifi_creds is None.
-        let (qr_wifi_data_url, wifi_ssid) = match &self.wifi_creds {
+        //   WIFI:T:<auth>;S:<ssid>;P:<psk>;H:<hidden>;;
+        // Both iOS and Android camera apps prompt to join when they
+        // decode this. We send `T:WPA2` (rather than the broader
+        // `T:WPA`) because some Android builds 12+ refuse the
+        // auto-join when the hint doesn't match the AP's actual
+        // security (NetworkManager hotspot is WPA2-PSK). We also
+        // explicitly send `H:false` so scanners don't assume the
+        // SSID is hidden and skip the AP scan. Skipped when
+        // wifi_creds is None.
+        let (qr_wifi_data_url, wifi_ssid, wifi_psk) = match &self.wifi_creds {
             Some((ssid, psk)) => {
                 let payload = format!(
-                    "WIFI:T:WPA;S:{};P:{};;",
+                    "WIFI:T:WPA2;S:{};P:{};H:false;;",
                     qr_escape(ssid), qr_escape(psk)
                 );
-                match render_qr_png(&payload) {
-                    Ok(png) => (Some(png), Some(ssid.clone())),
-                    Err(_)  => (None, Some(ssid.clone())),
-                }
+                let png = render_qr_png(&payload).ok();
+                (png, Some(ssid.clone()), Some(psk.clone()))
             }
-            None => (None, None),
+            None => (None, None, None),
         };
 
         Ok(InviteEnvelope {
@@ -328,6 +338,7 @@ impl Access {
             url_relay,
             qr_wifi_data_url,
             wifi_ssid,
+            wifi_psk,
             expires_at_ms,
         })
     }
