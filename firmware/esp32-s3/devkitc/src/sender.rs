@@ -347,9 +347,12 @@ impl Sender {
             }
             EVT_DASH_CAPTURE_MARK => {
                 match (self.capture.as_mut(), parse_capture_mark(payload)) {
-                    (Some(cap), Some((ts_ms, name))) => {
-                        match cap.mark(ts_ms, name) {
-                            Ok(()) => info!("[capture] mark ts={} name={:?}", ts_ms, name),
+                    (Some(cap), Some((ts_ms, name, prefix))) => {
+                        match cap.mark(ts_ms, name, prefix) {
+                            Ok(()) => info!(
+                                "[capture] mark ts={} name={:?} prefix={:?}",
+                                ts_ms, name, prefix,
+                            ),
                             Err(e) => warn!("[capture] mark failed: {}", e),
                         }
                         self.send_capture_state(stream)?;

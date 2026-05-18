@@ -267,12 +267,15 @@ pub fn parse_set_clock_offset(payload: &[u8]) -> Option<i64> {
     }
 }
 
-/// Parse `r2.dash.capture.mark` — a CBOR map `{0: i64 ts_ms, 1: str name}` per
-/// SPEC-R2-ROCKER-CAPTURE §3. Returns `(ts_ms, name)` on success. `name`
-/// is validated downstream by the capture sentant against the
-/// `[A-Za-z0-9_-]{1,32}` charset (§3 last paragraph) — this parser
-/// just hands back whatever bytes the dashboard sent.
-pub fn parse_capture_mark<'a>(payload: &'a [u8]) -> Option<(i64, &'a str)> {
+/// Parse `r2.dash.capture.mark` — a CBOR map per SPEC-R2-ROCKER-CAPTURE §3:
+///   `{0: i64 ts_ms, 1: str name, 2: str prefix (optional)}`
+/// Returns `(ts_ms, name, prefix)` on success. `name` is validated
+/// downstream by the capture sentant against `[A-Za-z0-9_-]{1,32}`;
+/// `prefix` (when present) is the dashboard-built local-time stem like
+/// `"2026-05-18_13-35-00"` used as the file's date portion. Older
+/// dashboards that omit key 2 still parse — firmware falls back to
+/// `{ts_ms:016}` for the date stem.
+pub fn parse_capture_mark<'a>(payload: &'a [u8]) -> Option<(i64, &'a str, Option<&'a str>)> {
     let mut p = 0;
     if payload.len() <= p { return None; }
     let head = payload[p]; p += 1;
@@ -282,13 +285,12 @@ pub fn parse_capture_mark<'a>(payload: &'a [u8]) -> Option<(i64, &'a str)> {
 
     let mut ts_ms: Option<i64> = None;
     let mut name: Option<&'a str> = None;
+    let mut prefix: Option<&'a str> = None;
 
-    // Parse exactly the first two map entries we expect; any extras are
-    // tolerated but unused.
     for _ in 0..n_entries {
         if payload.len() <= p { return None; }
         let kh = payload[p]; p += 1;
-        // We expect single-byte uint keys 0 and 1.
+        // We expect single-byte uint keys 0..2.
         if kh & 0xE0 != MT_UINT { return None; }
         let key = (kh & 0x1F) as u8;
         if payload.len() <= p { return None; }
@@ -313,17 +315,24 @@ pub fn parse_capture_mark<'a>(payload: &'a [u8]) -> Option<(i64, &'a str)> {
                 p += len;
                 name = Some(s);
             }
+            (2, MT_TEXT) => {
+                let (mag, _mt2, used) = read_cbor_string_head_at(&payload[p..])?;
+                p += used;
+                let len = mag as usize;
+                if payload.len() < p + len { return None; }
+                let s = core::str::from_utf8(&payload[p..p + len]).ok()?;
+                p += len;
+                prefix = Some(s);
+            }
             _ => {
-                // Skip an unknown key/value pair. We only handle uint and
-                // text values in this parser; if the dashboard sends
-                // something else, refuse the whole frame so we don't
-                // mis-attribute fields.
+                // Refuse anything we don't recognise — better to fail
+                // loudly than mis-attribute fields.
                 return None;
             }
         }
     }
 
-    Some((ts_ms?, name?))
+    Some((ts_ms?, name?, prefix))
 }
 
 /// Read a CBOR string head (MT_BYTES or MT_TEXT) and return its byte

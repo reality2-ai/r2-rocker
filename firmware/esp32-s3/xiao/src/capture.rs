@@ -167,11 +167,23 @@ impl CaptureMgr {
     }
 
     /// Lock the calibration mean, validate `name`, open the capture
-    /// file. Filename built from the dashboard-supplied `ts_ms` so
-    /// every sensor in the fleet writes the same name.
-    pub fn mark(&mut self, ts_ms: i64, name: &str) -> Result<()> {
+    /// file. Filename built from `prefix-name.csv` if a dashboard-built
+    /// prefix is supplied (e.g. `"2026-05-18_13-35-00"`), otherwise
+    /// falls back to `{ts_ms:016}-name.csv`. Every sensor receives the
+    /// same prefix + name in the mark frame, so the fleet ends up with
+    /// identical filenames for a given run.
+    pub fn mark(&mut self, ts_ms: i64, name: &str, prefix: Option<&str>) -> Result<()> {
         if !is_valid_name(name) {
             return Err(anyhow!("invalid capture name {:?}", name));
+        }
+        // Belt-and-braces: refuse a prefix that contains anything other
+        // than the date-stem charset. The dashboard is the only sender
+        // and it builds the prefix itself, so this is defence-in-depth
+        // against a malformed remote.
+        if let Some(p) = prefix {
+            if !is_valid_prefix(p) {
+                return Err(anyhow!("invalid capture prefix {:?}", p));
+            }
         }
 
         // If we're not Calibrating, refuse — the operator has to
@@ -202,7 +214,10 @@ impl CaptureMgr {
             }
         };
 
-        let file_name = format!("{:016}-{}.csv", ts_ms.max(0), name);
+        let file_name = match prefix {
+            Some(p) => format!("{}-{}.csv", p, name),
+            None    => format!("{:016}-{}.csv", ts_ms.max(0), name),
+        };
         // Try to open the file — but a failure here (no SD, FS
         // refused) is no longer fatal: we still transition to
         // Recording so the wire-path calibration kicks in. The
@@ -389,6 +404,14 @@ fn is_valid_name(name: &str) -> bool {
     name.bytes().all(|b| matches!(b,
         b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-'
     ))
+}
+
+/// Validate a date-prefix per SPEC-R2-ROCKER-CAPTURE §3 — same digits+
+/// dash+underscore charset, cap at 32 bytes so a worst-case ISO-ish
+/// string still fits inside the LFN budget.
+fn is_valid_prefix(p: &str) -> bool {
+    if p.is_empty() || p.len() > 32 { return false; }
+    p.bytes().all(|b| matches!(b, b'0'..=b'9' | b'_' | b'-'))
 }
 
 #[cfg(test)]

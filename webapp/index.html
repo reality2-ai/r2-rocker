@@ -785,10 +785,8 @@ if ('serviceWorker' in navigator) {
 
 <script type="module">
 const MAX_POINTS = 200;
-const CALIBRATION_MIN = 10;
 
 // ── Global state ──
-let runState = 'idle';
 let totalEvents = 0;
 
 // Latest firmware snapshot from `/api/firmware/available`. Refreshed
@@ -873,8 +871,6 @@ function getOrCreateSensor(addr) {
     lastSeen: Date.now(),
     online: true,
     chart,
-    calibrationSamples: [],
-    calibrationOffset: { x: 0, y: 0, z: 0 },
     sampleTimes: [],
     logCount: 0,
   };
@@ -1401,26 +1397,15 @@ function handleEvent(msg) {
 
 function handleAcceleration(msg, sensor) {
   if (!msg.payload) return;
-  const rawX = msg.payload.x ?? 0;
-  const rawY = msg.payload.y ?? 0;
-  const rawZ = msg.payload.z ?? 0;
-
-  if (runState === 'calibrating') {
-    sensor.calibrationSamples.push({ x: rawX, y: rawY, z: rawZ });
-    const n = sensors.size > 0
-      ? Math.min(...[...sensors.values()].map(s => s.calibrationSamples.length))
-      : 0;
-    document.getElementById('calStatus').textContent =
-      `Calibrating\u2026 ${n} sample${n !== 1 ? 's' : ''}`;
-    document.getElementById('btnMark').disabled = (n < CALIBRATION_MIN);
-  }
-
-  const x = rawX - sensor.calibrationOffset.x;
-  const y = rawY - sensor.calibrationOffset.y;
-  const z = rawZ - sensor.calibrationOffset.z;
+  // The sensor already applies its captured calibration offset to the
+  // wire payload while Recording (sender.rs reads CaptureMgr::current_offset),
+  // so what arrives here is the value the operator wants charted.
+  const x = msg.payload.x ?? 0;
+  const y = msg.payload.y ?? 0;
+  const z = msg.payload.z ?? 0;
   const mag = Math.sqrt(x*x + y*y + z*z);
 
-  const unit = runState === 'rocking' ? ' \u0394g' : ' g';
+  const unit = ' g';
   const sk = sensor.key.replace(/\./g, '-');
   const setText = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
   setText('vx-' + sk, x.toFixed(3) + unit);
@@ -1454,77 +1439,6 @@ function handleAcceleration(msg, sensor) {
     sensor.chart.data.datasets[2].data.shift();
   }
   sensor.chart.update('none'); // skip animation on streaming updates — 10Hz * 2 sensors = too slow otherwise
-}
-
-const ORDER = { idle: 0, calibrating: 1, rocking: 2 };
-const STATE_NAMES = ['idle', 'calibrating', 'rocking'];
-
-// Sensor sends state as a float (0.0=idle, 1.0=calibrating, 2.0=rocking).
-// Map it back to a string name; fall back to 'idle' for unknown values.
-function decodeStateNum(raw) {
-  if (typeof raw === 'string' && ORDER[raw] !== undefined) return raw;
-  const idx = typeof raw === 'number' ? Math.round(raw) : -1;
-  return STATE_NAMES[idx] ?? 'idle';
-}
-
-function handleRunState(msg) {
-  if (!msg.payload) return;
-  // Decode numeric state (0/1/2) OR accept string if somehow already decoded
-  const s = decodeStateNum(msg.payload.state ?? 0);
-  // Rule: idle always resets; any other state only applies if it advances the FSM.
-  if (s !== 'idle' && ORDER[s] <= ORDER[runState]) return;
-  applyState(s);
-}
-
-function applyState(s) {
-  runState = s;
-  const el = document.getElementById('stateIndicator');
-  el.textContent = s.toUpperCase();
-  el.className = 'state-indicator state-' + s;
-  document.getElementById('btnStart').disabled = (s !== 'idle');
-  document.getElementById('btnStop').disabled = (s === 'idle');
-  if (s !== 'calibrating') document.getElementById('btnMark').disabled = true;
-}
-
-function sendCmd(cmd) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify({ command: cmd }));
-
-  switch (cmd) {
-    case 'start':
-      sensors.forEach(s => {
-        s.calibrationSamples = [];
-        s.calibrationOffset = { x: 0, y: 0, z: 0 };
-        s.chart.data.labels.length = 0;
-        s.chart.data.datasets.forEach(ds => { ds.data.length = 0; });
-        s.chart.update();
-      });
-      document.getElementById('calStatus').textContent = 'Calibrating\u2026';
-      applyState('calibrating');
-      break;
-
-    case 'mark':
-      let calSummary = [];
-      sensors.forEach(s => {
-        const samps = s.calibrationSamples;
-        if (samps.length >= CALIBRATION_MIN) {
-          const n = samps.length;
-          s.calibrationOffset.x = samps.reduce((a, v) => a + v.x, 0) / n;
-          s.calibrationOffset.y = samps.reduce((a, v) => a + v.y, 0) / n;
-          s.calibrationOffset.z = samps.reduce((a, v) => a + v.z, 0) / n;
-          calSummary.push(`${s.key}: z=${s.calibrationOffset.z.toFixed(3)}`);
-        }
-        s.calibrationSamples = [];
-      });
-      document.getElementById('calStatus').textContent =
-        calSummary.length ? 'Cal: ' + calSummary.join(' | ') : '\u2014';
-      applyState('rocking');
-      break;
-
-    case 'stop':
-      applyState('idle');
-      break;
-  }
 }
 
 function addLog(msg) {
@@ -1655,14 +1569,21 @@ function updateCaptureUiFromFleet() {
       : 'state-idle'
     );
   }
-  // Button availability: Start is always live; Mark only while
-  // calibrating; Stop only while recording.
+  // Button availability:
+  //   Start — always live so the operator can re-enter Calibrating
+  //           from any state (firmware `start()` is idempotent: it
+  //           closes any open file and resets the cal window).
+  //   Mark  — only while calibrating (locks offset + opens file).
+  //   Stop  — any non-idle state. Firmware Stop always transitions to
+  //           Idle, so this also serves as the escape from a stuck
+  //           Calibrating session (e.g. the operator decided not to
+  //           commit a Mark).
   const btnStart = document.getElementById('captureStartBtn');
   const btnMark  = document.getElementById('captureMarkBtn');
   const btnStop  = document.getElementById('captureStopBtn');
   if (btnStart) btnStart.disabled = (peers.length === 0);
   if (btnMark)  btnMark .disabled = (aggregate !== 'calibrating');
-  if (btnStop)  btnStop .disabled = (aggregate !== 'recording');
+  if (btnStop)  btnStop .disabled = (aggregate === 'idle');
 
   const merged = document.getElementById('dataMergedBtn');
   if (merged) merged.disabled = !lastMarkedFilename;
@@ -1700,28 +1621,37 @@ async function captureMark() {
     alert('Run name must match [A-Za-z0-9_-]{1,32}');
     return;
   }
+  // Build a local-time stem like "2026-05-18_13-35-00". Filename
+  // becomes `<prefix>-<name>.csv` on every sensor in the fleet, so
+  // each shared run ends up with the same human-readable file.
+  const prefix = buildLocalTimePrefix(new Date());
   try {
     const res = await fetch('/api/capture/mark', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ name, prefix }),
     });
     if (!res.ok) {
       console.warn('[capture] mark', await res.text());
       return;
     }
-    const out = await res.json();
-    // Sensors will independently rename to `<ts16>-<name>.csv`.
-    // Build the same filename here so "Download merged" knows which
-    // file to ask each sensor for.
-    if (out.ts_ms != null) {
-      const ts16 = String(Math.max(0, out.ts_ms)).padStart(16, '0');
-      lastMarkedFilename = `${ts16}-${name}.csv`;
-      updateCaptureUiFromFleet();
-    }
+    // Mirror the prefix locally so "Download merged" knows which file
+    // to fetch from each sensor — the dashboard echoes prefix back in
+    // the response, but we already know what we sent.
+    lastMarkedFilename = `${prefix}-${name}.csv`;
+    updateCaptureUiFromFleet();
   } catch (err) {
     console.warn('[capture] mark', err);
   }
+}
+
+/// Format a Date as `YYYY-MM-DD_HH-MM-SS` in the operator's local
+/// timezone. Charset stays within `[0-9_-]` so it survives the
+/// dashboard's and firmware's prefix validators and is FAT-LFN-safe.
+function buildLocalTimePrefix(d) {
+  const p2 = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p2(d.getMonth()+1)}-${p2(d.getDate())}` +
+         `_${p2(d.getHours())}-${p2(d.getMinutes())}-${p2(d.getSeconds())}`;
 }
 
 async function captureStop() {
@@ -2285,7 +2215,15 @@ class R2DataCard extends HTMLElement {
       } else {
         const rows = files.map((f) => {
           const sizeKb = (f.size / 1024).toFixed(1);
-          const mt = f.mtime_ms ? new Date(f.mtime_ms).toISOString().replace('T', ' ').slice(0, 19) : '—';
+          // Show file mtime in the operator's local timezone — the sensor
+          // pushes UTC epoch ms (see firmware Clock::push_to_system_clock).
+          const mt = f.mtime_ms
+            ? new Date(f.mtime_ms).toLocaleString('en-NZ', {
+                year: 'numeric', month: '2-digit', day: '2-digit',
+                hour: '2-digit', minute: '2-digit', second: '2-digit',
+                hour12: false,
+              })
+            : '—';
           const nameEsc = escapeText(f.name);
           const nameAttr = escapeAttr(f.name);
           const addrAttr = escapeAttr(s.key);
@@ -2640,7 +2578,6 @@ setInterval(refreshFirmwareAvailability, 60_000);
 Object.assign(window, {
   setView,
   startBootstrap,
-  sendCmd,
   closeBootstrapPanel,
   requestFirmwareUpdate,
   requestReset,

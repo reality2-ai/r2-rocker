@@ -315,13 +315,17 @@ fn encode_sync_pulse(req_id: u32, dash_ts_ms: u64) -> Vec<u8> {
     buf[..used].to_vec()
 }
 
-/// Encode `r2.dash.capture.mark` payload `{0: ts_ms i64, 1: name str}`
-/// per SPEC-R2-ROCKER-CAPTURE §3.
-fn encode_capture_mark(ts_ms: i64, name: &str) -> Vec<u8> {
-    let mut buf = vec![0u8; 8 + 8 + name.len() + 8];
+/// Encode `r2.dash.capture.mark` payload per SPEC-R2-ROCKER-CAPTURE §3.
+///   `{0: ts_ms i64, 1: name str, 2: prefix str}` when a date prefix
+///   like `"2026-05-18_13-35-00"` is supplied; otherwise the prefix
+///   key is omitted and firmware falls back to `{ts_ms:016}` as the
+///   filename stem.
+fn encode_capture_mark(ts_ms: i64, name: &str, prefix: Option<&str>) -> Vec<u8> {
+    let prefix_len = prefix.map(|p| p.len() + 4).unwrap_or(0);
+    let mut buf = vec![0u8; 8 + 8 + name.len() + prefix_len + 8];
     let used = {
         let mut enc = r2_cbor::Encoder::new(&mut buf);
-        let _ = enc.map(2);
+        let _ = enc.map(if prefix.is_some() { 3 } else { 2 });
         let v_ts = if ts_ms >= 0 {
             r2_cbor::Value::UInt(ts_ms as u64)
         } else {
@@ -329,6 +333,9 @@ fn encode_capture_mark(ts_ms: i64, name: &str) -> Vec<u8> {
         };
         let _ = enc.kv(0, &v_ts);
         let _ = enc.kv(1, &r2_cbor::Value::Text(name));
+        if let Some(p) = prefix {
+            let _ = enc.kv(2, &r2_cbor::Value::Text(p));
+        }
         enc.len()
     };
     buf.truncate(used);
@@ -2240,7 +2247,16 @@ mod firmware_snapshot_tests {
 // ── SPEC-R2-ROCKER-CAPTURE handlers ───────────────────────────────────
 
 #[derive(serde::Deserialize)]
-struct CaptureMarkBody { name: String }
+struct CaptureMarkBody {
+    name: String,
+    /// Optional pre-formatted local-time stem like `"2026-05-18_13-35-00"`.
+    /// The webapp builds this with `Intl.DateTimeFormat` so the operator
+    /// sees the file dated in their local timezone (the dashboard avoids
+    /// the localtime/TZ rabbit hole by trusting the browser). Firmware
+    /// uses `<prefix>-<name>.csv`; if absent, falls back to ts_ms-padded.
+    #[serde(default)]
+    prefix: Option<String>,
+}
 
 /// Fan a frame out to every connected peer's tx channel. Returns the
 /// count of peers reached. Failures (channel full / closed) are
@@ -2324,13 +2340,25 @@ async fn capture_mark_handler(
             })),
         );
     }
+    if let Some(p) = body.prefix.as_deref() {
+        if !is_valid_capture_prefix(p) {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "ok": false,
+                    "error": "invalid prefix (use [0-9_-]{1,32})",
+                })),
+            );
+        }
+    }
     let ts_ms = dash_wall_ms() as i64;
-    let payload = encode_capture_mark(ts_ms, &body.name);
+    let payload = encode_capture_mark(ts_ms, &body.name, body.prefix.as_deref());
     let sent = fan_out_dash_frame(&state, DASH_CAPTURE_MARK, 0x0002, payload).await;
     let _ = state.ws_broadcast_tx.send(serde_json::json!({
         "type": "capture",
         "phase": "mark",
         "name": body.name,
+        "prefix": body.prefix,
         "ts_ms": ts_ms,
         "peers": sent,
     }).to_string());
@@ -2338,6 +2366,7 @@ async fn capture_mark_handler(
         "ok": true,
         "ts_ms": ts_ms,
         "name": body.name,
+        "prefix": body.prefix,
         "peers": sent,
     })))
 }
@@ -2359,6 +2388,12 @@ async fn capture_stop_handler(
 fn is_valid_capture_name(n: &str) -> bool {
     !n.is_empty() && n.len() <= 32 && n.bytes().all(|b| matches!(
         b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-'
+    ))
+}
+
+fn is_valid_capture_prefix(p: &str) -> bool {
+    !p.is_empty() && p.len() <= 32 && p.bytes().all(|b| matches!(
+        b, b'0'..=b'9' | b'_' | b'-'
     ))
 }
 

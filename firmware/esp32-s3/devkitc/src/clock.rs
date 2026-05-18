@@ -18,6 +18,22 @@ use std::time::Instant;
 const NVS_NAMESPACE: &str = "r2_rocker";
 const NVS_KEY: &str = "clock_offset";
 
+/// Push the current synchronised time into the libc system clock via
+/// `settimeofday`. ESP-IDF FATFS reads `time(NULL)` whenever it stamps
+/// a file's mtime; without this, files written to the SD card all
+/// carry the FAT-default 1980-01-01 date.
+fn push_to_system_clock(epoch_ms: i64) {
+    if epoch_ms <= 0 { return; }
+    let tv = esp_idf_svc::sys::timeval {
+        tv_sec:  (epoch_ms / 1000) as esp_idf_svc::sys::time_t,
+        tv_usec: ((epoch_ms % 1000) * 1000) as esp_idf_svc::sys::suseconds_t,
+    };
+    let rc = unsafe { esp_idf_svc::sys::settimeofday(&tv, std::ptr::null()) };
+    if rc != 0 {
+        warn!("[clock] settimeofday failed: rc={}", rc);
+    }
+}
+
 /// NVS-backed monotonic + offset clock. Cheap to clone (`Arc`-shared).
 ///
 /// `offset_ms` is held under a `Mutex` rather than an atomic because
@@ -43,6 +59,16 @@ impl Clock {
             _ => 0,
         };
         info!("[clock] loaded clock_offset_ms = {} from NVS", offset_ms);
+
+        // If we have a persisted wall-clock offset from a prior session,
+        // seed the libc system clock with it right away — uptime is ~0
+        // so `offset_ms` is itself a passable estimate of "now" until
+        // the next dashboard sync refines it. Without this, the SD ring
+        // and any capture files opened before the first sync_pulse
+        // round-trip get stamped at 1980-01-01.
+        if offset_ms > 0 {
+            push_to_system_clock(offset_ms);
+        }
 
         Ok(Arc::new(Self {
             boot: Instant::now(),
@@ -92,6 +118,11 @@ impl Clock {
             "[clock] applied delta {:+} ms — new clock_offset_ms = {}",
             delta_ms, new_offset
         );
+        // Mirror the new synchronised wall clock into the libc system
+        // clock so FATFS file mtimes (and any other libc time() reader)
+        // report real dates instead of the FAT-default 1980-01-01.
+        let uptime_ms = self.boot.elapsed().as_millis() as i64;
+        push_to_system_clock(uptime_ms.wrapping_add(new_offset));
         if let Ok(mut nvs) = self.nvs.lock() {
             let bytes = new_offset.to_le_bytes();
             if let Err(e) = nvs.set_blob(NVS_KEY, &bytes) {
