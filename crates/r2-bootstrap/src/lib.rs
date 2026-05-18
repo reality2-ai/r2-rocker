@@ -127,7 +127,14 @@ pub async fn run_bootstrap(
     config: BootstrapConfig,
     progress_tx: mpsc::Sender<BootstrapEvent>,
 ) -> Result<()> {
-    const RETRY_INTERVAL_SECS: u64 = 20;
+    // Shorter than the previous 20s default: when a sensor misses the
+    // first BLE scan window (advertise-interval / RSSI variance / post-
+    // hotspot-cycle reboot timing), the dashboard rescans faster so the
+    // operator doesn't sit through 30+ seconds of "only one sensor
+    // shown." Pair this with `scan_secs` in dashboard/src/main.rs
+    // — together they make the worst-case detection ~25s (20s scan +
+    // 5s wait) instead of ~30s (10s scan + 20s wait).
+    const RETRY_INTERVAL_SECS: u64 = 5;
 
     let target_class_hash = fnv::fnv1a_32(config.target_class.to_lowercase().as_bytes());
     let _ = progress_tx.send(BootstrapEvent::Log(format!(

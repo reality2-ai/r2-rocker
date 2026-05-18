@@ -839,7 +839,12 @@ async fn bootstrap_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
     let config = BootstrapConfig {
         ssid: None,
         psk: None,
-        scan_secs: 10,
+        // Longer scan window than the prior 10s default: missed-on-first-pass
+        // sensors (BLE advertise interval / RSSI variance / sensor reboot
+        // timing right after cycle_hotspot) get caught in the same pass
+        // instead of waiting another full retry cycle to be picked up.
+        // Pair this with the shorter RETRY_INTERVAL_SECS in r2-bootstrap.
+        scan_secs: 20,
         // Reverse-DNS class identifier (R2-BEACON §4); FNV-1a-32 hashed
         // on the wire to 0x6A3B0860. Sensor firmware (Phase 6) MUST
         // advertise the same string. See SPEC-R2-ROCKER-DASHBOARD §6.3.
