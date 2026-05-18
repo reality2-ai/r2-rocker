@@ -789,9 +789,18 @@
      is visually obvious (the fleet action is just the card action
      applied to every card). */
   .devices-bulk-actions {
+    /* Same card chrome as Live's `.run-control-bar` so the
+       "toolbar slot" reads consistently across Devices / Data /
+       Link / Live tabs. */
+    background: #0c1017;
+    border: 1px solid #1e293b;
+    border-radius: 12px;
+    padding: 10px 14px;
     display: flex;
+    align-items: center;
     gap: 10px;
     margin-bottom: 12px;
+    flex-wrap: wrap;
   }
   .btn-bulk-update,
   .btn-bulk-reset {
