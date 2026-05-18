@@ -202,12 +202,15 @@ async fn run_one_session(
                         //      binary frames.
                         if let Some(payload) = strip_control_magic(&b) {
                             if let Ok(text) = std::str::from_utf8(payload) {
+                                eprintln!("[relay] bin ctrl in ({} bytes): {}", b.len(), text.trim());
                                 if text.contains("\"access.request\"") {
                                     handle_relay_access_request(state, text_tx, text).await;
-                                } else {
-                                    eprintln!("[relay] ctrl in: {}", text.trim());
                                 }
+                            } else {
+                                eprintln!("[relay] bin ctrl in ({} bytes): non-utf8", b.len());
                             }
+                        } else {
+                            eprintln!("[relay] bin in ({} bytes, not ctrl)", b.len());
                         }
                     }
                     Some(Ok(WsMessage::Close(frame))) => {
