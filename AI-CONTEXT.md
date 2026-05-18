@@ -168,6 +168,7 @@ MAC `1c:db:d4:41:28:3c`.
 | `specifications/SECRETS-POLICY.md` | ✅ |
 | `specifications/SPEC-R2-ROCKER-{WIRE,SENSOR,DASHBOARD,SYSTEM}.md` | ✅ updated through Phase 6 + 9-light |
 | `specifications/SPEC-R2-ROCKER-BRIDGE.md` | ✅ NEW — first R2 entanglement implementation (R2-TRUST §7), two-TG topology lock-in |
+| `specifications/SPEC-R2-ROCKER-ACCESS.md` | ✅ NEW (2026-05-18) — Phase 5 Trust-Group access model in spec form: QR / link / 3-word-code viewer enrolment, `/api/access/{invite,claim,members,revoke}` routes, KeyHolder-only invitations + revocations, offline revocation guaranteed, IndexedDB cert persistence in the webapp. Implementation slice is the follow-on plan. |
 | `PROCESS.md`, `README.md`, `.gitignore` | ✅ README rewritten 2026-05-08 for total-beginner audience |
 | `plan/PLAN.md` | ✅ updated through Phase 6, 9-light, 9-fwreg |
 | `conversation/` | ✅ accumulating per-session |

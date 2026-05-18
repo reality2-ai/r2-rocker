@@ -331,8 +331,14 @@ whichever occurs first (per WIRE §4.1).
 | `/api/data/{addr}/file/{name}` | GET, DELETE | `GET` opens TCP 21047, prepends a `seq,ts_ms,x,y,z\n` header, and streams the raw fixed-width rows. `DELETE` issues `DEL`. |
 | `/api/data/{addr}/all` | DELETE | `DEL_ALL` against the named sensor. |
 | `/api/data/merged` | GET `?file=<basename>` | Wide-format merge across the fleet: header is `ts_ms` followed by three columns per sensor (`<ip>_x, <ip>_y, <ip>_z`, IP dots → underscores, sensors in sorted-IP order). One row per unique `ts_ms`, ascending; cells are blank where that sensor has no sample at that `ts_ms`. |
-| `/ws/raw` | WebSocket | **Binary** R2-WIRE frames forwarded verbatim from sensors (canonical Phase-5d transport) |
-| `/ws/status` | WebSocket | **Text JSON** status events: bootstrap progress, hotspot up/down, server-side errors |
+| `/api/access/invite` | POST `{name?: str}` | KeyHolder-only. Mint a single-use, 5-minute-expiring enrolment token; return QR PNG + `url_local` + optional `url_relay` + optional `words_3`. See SPEC-R2-ROCKER-ACCESS §4.1. |
+| `/api/access/claim` | POST `{tg_hash, entropy_hex, device_pk, device_name}` | Public — the token IS the auth. Consumes the token, issues a `DeviceCertificate` + encrypted `(DEK, HK)` credential bundle, broadcasts `r2.dash.access.member_added` on `/ws/status`. Idempotent for the same `device_pk` within the window. See SPEC-R2-ROCKER-ACCESS §4.2. |
+| `/api/access/members` | GET | KeyHolder-only. Returns the full member list (including revoked rows) with role / paired-at / last-seen. See SPEC-R2-ROCKER-ACCESS §4.3. |
+| `/api/access/revoke/{device_pk}` | POST | KeyHolder-only. Adds to revocation G-Set, broadcasts `r2.dash.access.revoked` on `/ws/status`, tears down the offending connection. **Succeeds regardless of whether the target is online.** See SPEC-R2-ROCKER-ACCESS §4.4 + §7.6. |
+| `/api/enrol-init` | POST | **DEPRECATED** — replaced by `/api/access/invite`. v0.1 stub returns 501. |
+| `/api/enrol-complete` | POST | **DEPRECATED** — replaced by `/api/access/claim`. v0.1 stub returns 501. |
+| `/ws/raw` | WebSocket | **Binary** R2-WIRE frames forwarded verbatim from sensors (canonical Phase-5d transport). v0.1 anonymous per the additive auth model in SPEC-R2-ROCKER-ACCESS §5.1; v1 target is a cert-handshake variant. |
+| `/ws/status` | WebSocket | **Text JSON** status events: bootstrap progress, hotspot up/down, server-side errors, and the `r2.dash.access.{member_added, revoked}` events from SPEC-R2-ROCKER-ACCESS §4.2 + §7.2. |
 
 Auth: v0.1 has no auth — the dashboard is bound to localhost-or-LAN
 on a private hotspot. Future versions SHOULD add a session cookie or

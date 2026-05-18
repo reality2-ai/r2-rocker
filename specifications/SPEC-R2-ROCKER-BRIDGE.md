@@ -145,6 +145,20 @@ There is exactly one such entanglement. Adding more (e.g. a second
 viewing TG for a different operator team) is a future extension out of
 v0.1 scope.
 
+**Member lifecycle in each TG.** Viewer enrolment into the
+**viewing** TG is specified in `SPEC-R2-ROCKER-ACCESS.md` §3-§4
+(the QR / link / 3-word-code flow the operator drives from the
+Access tab). Sensor enrolment into the **production** TG happens
+during BLE bootstrap per `SPEC-R2-ROCKER-SENSOR.md` §4. The
+controller process holds the **KeyHolder** role in both TGs (see
+ACCESS §2.4) and is the sole authority that may invite a new
+member into either; invitations are explicit, KeyHolder-initiated,
+and time-limited per ACCESS §3.0. Revocation in either TG is
+KeyHolder-only, propagates per ACCESS §7, and works regardless of
+whether the revoked device is currently online (ACCESS §7.6) —
+this is the routine operator path for retiring a sensor or
+removing a viewer that has left the project.
+
 ### 2.3 Negotiation handshake
 
 The bridge initiates the entanglement at startup per R2-TRUST §7.6:

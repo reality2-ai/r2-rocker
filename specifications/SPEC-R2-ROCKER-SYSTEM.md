@@ -147,6 +147,15 @@ Compromise of either invalidates the corresponding part of the trust
 graph; recovery is via key rotation (`SECRETS-POLICY.md` §key-rotation
 or sensor factory reset, respectively).
 
+Member device lifecycle (how new devices join, who can invite
+them, what their certs look like, how a KeyHolder removes a
+device that has been lost / compromised / decommissioned) is
+specified in **`SPEC-R2-ROCKER-ACCESS.md`**. That spec is the
+authoritative source for the Access tab in the dashboard, the
+QR/link enrolment flow, and revocation propagation across the
+fleet. Subsequent sections of this document (Lifecycle §3,
+Failure modes §5) reference ACCESS where relevant.
+
 ---
 
 ## 3. Lifecycle
