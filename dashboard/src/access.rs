@@ -176,10 +176,19 @@ impl Access {
         relay_url: Option<String>,
         wifi_config_path: Option<&Path>,
     ) -> Result<Self> {
-        // Parse SSID + PSK from the optional wifi_config.toml. This is
-        // a v0.1 convenience so the invite modal can show a "join the
-        // hotspot" QR; absence is fine.
-        let wifi_creds = wifi_config_path.and_then(|p| parse_wifi_config(p).ok());
+        // Resolve the hotspot creds. Prefer the LIVE NetworkManager
+        // config because a stale `wifi_config.toml` lies — and a
+        // QR pointing at a non-existent SSID is worse than no QR
+        // at all (the phone "tries", "fails", and asks the operator
+        // to type the password instead).
+        //
+        // Probe order:
+        //   1. nmcli — read the currently-active AP-mode connection.
+        //   2. wifi_config.toml — file-backed fallback for hosts
+        //      without NetworkManager.
+        //   3. None — no WiFi QR; modal hides Step 1.
+        let wifi_creds = nmcli_active_hotspot_creds()
+            .or_else(|| wifi_config_path.and_then(|p| parse_wifi_config(p).ok()));
         let bytes = std::fs::read(tg_priv_path).map_err(|e| {
             format!(
                 "Open KeyHolder signing key at {:?}: {}. \
@@ -616,6 +625,73 @@ fn is_valid_device_name(name: &str) -> bool {
     name.chars().all(|c| {
         c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | '_' | '-')
     })
+}
+
+/// Query NetworkManager for the SSID + PSK of the currently-active
+/// AP-mode wifi connection. Returns `None` if `nmcli` isn't on PATH,
+/// no AP connection is active, or the user's NM polkit doesn't allow
+/// reading secrets (typical for a non-owning user).
+///
+/// This is the *current truth* about the hotspot — preferred over a
+/// stale `wifi_config.toml` that gets out of sync when the operator
+/// brings up the hotspot via the GNOME UI or re-runs setup with
+/// `--rotate`. A QR pointing at a non-existent SSID is the worst
+/// possible UX: the phone tries, fails, and silently falls back to
+/// asking for the password (which is also stale, so the operator
+/// types it in correctly and STILL can't join).
+fn nmcli_active_hotspot_creds() -> Option<(String, String)> {
+    use std::process::Command;
+
+    // 1. Find the active AP-mode wifi connection's profile name.
+    let active = Command::new("nmcli")
+        .args(["-t", "-f", "NAME,DEVICE,TYPE", "connection", "show", "--active"])
+        .output()
+        .ok()?;
+    if !active.status.success() { return None; }
+    let text = std::str::from_utf8(&active.stdout).ok()?;
+    let mut profile_name: Option<String> = None;
+    for line in text.lines() {
+        // Each row is `NAME:DEVICE:TYPE`.
+        let cols: Vec<&str> = line.split(':').collect();
+        if cols.len() < 3 { continue; }
+        if cols[2] != "802-11-wireless" && cols[2] != "wifi" { continue; }
+        // Confirm AP mode by querying the profile's mode field.
+        let mode = Command::new("nmcli")
+            .args(["-t", "-f", "802-11-wireless.mode", "connection", "show", cols[0]])
+            .output().ok()?;
+        let mode_s = std::str::from_utf8(&mode.stdout).ok()?;
+        if mode_s.contains("ap") {
+            profile_name = Some(cols[0].to_string());
+            break;
+        }
+    }
+    let profile = profile_name?;
+
+    // 2. Read the SSID + PSK from the profile. `-s` reveals the PSK
+    //    (otherwise it's redacted as `<HIDDEN>`); the dashboard user
+    //    owns the connection so NM's polkit allows it.
+    let secrets = Command::new("nmcli")
+        .args(["-s", "-t",
+               "-f", "802-11-wireless.ssid,802-11-wireless-security.psk",
+               "connection", "show", &profile])
+        .output().ok()?;
+    if !secrets.status.success() { return None; }
+    let s = std::str::from_utf8(&secrets.stdout).ok()?;
+    let mut ssid: Option<String> = None;
+    let mut psk:  Option<String> = None;
+    for line in s.lines() {
+        let Some((k, v)) = line.split_once(':') else { continue };
+        match k {
+            "802-11-wireless.ssid"           => ssid = Some(v.trim().to_string()),
+            "802-11-wireless-security.psk"   => psk  = Some(v.trim().to_string()),
+            _ => {}
+        }
+    }
+    let ssid = ssid?;
+    let psk  = psk?;
+    if ssid.is_empty() || psk.is_empty() { return None; }
+    eprintln!("[access] hotspot creds resolved from NetworkManager profile {:?} → SSID {:?}", profile, ssid);
+    Some((ssid, psk))
 }
 
 /// Parse `ssid` + `password` lines out of the rocker's
