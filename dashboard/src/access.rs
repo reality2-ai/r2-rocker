@@ -79,13 +79,25 @@ pub struct InviteEnvelope {
     /// 32-hex-char raw entropy. The webapp embeds this in URLs alongside
     /// `tg_hash` separated by '.'; the wire form is `{tg_hash}.{entropy_hex}`.
     pub entropy_hex: String,
-    /// `data:image/png;base64,...` source for the QR `<img>`.
+    /// `data:image/png;base64,...` source for the invite QR `<img>`.
+    /// Encodes `url_local` so a phone scanning it opens the webapp's
+    /// `?join=` flow directly.
     pub qr_png_data_url: String,
     /// `http://<controller_lan_ip>:8080/?join=<tg_hash>.<entropy_hex>` —
     /// always present.
     pub url_local: String,
     /// Static-host URL — only present if `--relay-url` was configured.
     pub url_relay: Option<String>,
+    /// `data:image/png;base64,...` source for the WiFi-join QR, encoded
+    /// in the standard `WIFI:T:WPA;S:<ssid>;P:<psk>;;` form that every
+    /// modern phone camera handles natively. Only present when the
+    /// dashboard was started with `--wifi-config <path>` pointing at a
+    /// readable wifi credentials TOML; absent otherwise. v0.1 bridge
+    /// for "phone needs to join the hotspot first" until the relay
+    /// path (SPEC §5.2) ships.
+    pub qr_wifi_data_url: Option<String>,
+    /// Hotspot SSID — paired with `qr_wifi_data_url` for the URL chip.
+    pub wifi_ssid: Option<String>,
     /// Unix-ms wall-clock when this token expires.
     pub expires_at_ms: i64,
 }
@@ -127,6 +139,12 @@ pub struct Access {
     /// `http://<host>:<port>` prefix used to build `url_local` —
     /// supplied at startup from the bind config.
     local_origin: String,
+    /// Hotspot WiFi credentials, when the dashboard was started with
+    /// a readable `--wifi-config` (or fell back to the default path).
+    /// `Some((ssid, psk))` → invite envelopes carry a WiFi-join QR
+    /// so a phone can join the hotspot before scanning the second QR.
+    /// `None` → no WiFi help in the modal (operator-configured).
+    wifi_creds: Option<(String, String)>,
     /// Per-device human-readable name from claim time, keyed by
     /// `device_pk`. The TG itself stores the name on `MemberInfo`,
     /// but this side-cache lets us serve `/api/access/members`
@@ -150,7 +168,12 @@ impl Access {
         tg_priv_path: &Path,
         local_origin: String,
         relay_url: Option<String>,
+        wifi_config_path: Option<&Path>,
     ) -> Result<Self> {
+        // Parse SSID + PSK from the optional wifi_config.toml. This is
+        // a v0.1 convenience so the invite modal can show a "join the
+        // hotspot" QR; absence is fine.
+        let wifi_creds = wifi_config_path.and_then(|p| parse_wifi_config(p).ok());
         let bytes = std::fs::read(tg_priv_path).map_err(|e| {
             format!(
                 "Open KeyHolder signing key at {:?}: {}. \
@@ -185,6 +208,7 @@ impl Access {
             tg_hash,
             relay_url,
             local_origin,
+            wifi_creds,
             names: HashMap::new(),
             paired_at_ms: HashMap::new(),
         })
@@ -272,16 +296,29 @@ impl Access {
             )
         });
 
-        // The QR encodes the regular `http://` `url_local`, NOT the
-        // `r2://` deeplink form notekeeper uses. The latter is the
-        // R2-ecosystem-pure choice but no off-the-shelf phone browser
-        // handles the scheme, so scanning the QR just yields a
-        // useless raw "r2://join/..." string. The http URL works
-        // directly in the camera app's "open URL" prompt and lands
-        // the viewer on the webapp's `?join=` flow, no special
-        // handler needed. A future PWA / installed-app deployment
-        // MAY register the r2: scheme and switch.
+        // Invite QR encodes the regular `http://` `url_local`. A
+        // future PWA / installed-app deployment MAY register the r2:
+        // scheme and switch, but every phone camera handles http
+        // URLs out of the box.
         let qr_png_data_url = render_qr_png(&url_local)?;
+
+        // Optional WiFi-join QR. Standard format:
+        //   WIFI:T:<auth>;S:<ssid>;P:<psk>;;
+        // Both iOS and Android camera apps prompt to join when
+        // they decode this. Skipped when wifi_creds is None.
+        let (qr_wifi_data_url, wifi_ssid) = match &self.wifi_creds {
+            Some((ssid, psk)) => {
+                let payload = format!(
+                    "WIFI:T:WPA;S:{};P:{};;",
+                    qr_escape(ssid), qr_escape(psk)
+                );
+                match render_qr_png(&payload) {
+                    Ok(png) => (Some(png), Some(ssid.clone())),
+                    Err(_)  => (None, Some(ssid.clone())),
+                }
+            }
+            None => (None, None),
+        };
 
         Ok(InviteEnvelope {
             tg_hash: self.tg_hash.clone(),
@@ -289,6 +326,8 @@ impl Access {
             qr_png_data_url,
             url_local,
             url_relay,
+            qr_wifi_data_url,
+            wifi_ssid,
             expires_at_ms,
         })
     }
@@ -568,6 +607,46 @@ fn is_valid_device_name(name: &str) -> bool {
     })
 }
 
+/// Parse `ssid` + `password` lines out of the rocker's
+/// `wifi_config.toml` (auto-generated by `tools/setup-hotspot.sh`).
+/// Forgiving parser — `key = "value"` pairs, whitespace tolerated.
+fn parse_wifi_config(p: &Path) -> Result<(String, String)> {
+    let text = std::fs::read_to_string(p)
+        .map_err(|e| format!("read {:?}: {}", p, e))?;
+    let mut ssid: Option<String> = None;
+    let mut psk:  Option<String> = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') { continue; }
+        let Some((k, v)) = line.split_once('=') else { continue };
+        let key = k.trim();
+        let val = v.trim().trim_matches('"');
+        match key {
+            "ssid"     => ssid = Some(val.to_string()),
+            "password" => psk  = Some(val.to_string()),
+            _ => {}
+        }
+    }
+    match (ssid, psk) {
+        (Some(s), Some(p)) => Ok((s, p)),
+        _ => Err(format!("{:?} missing ssid/password keys", p)),
+    }
+}
+
+/// Escape SSID / PSK for the `WIFI:` QR payload. Per the de-facto
+/// spec (https://en.wikipedia.org/wiki/QR_code#Wi-Fi_network_login),
+/// special chars `\\ ; , : "` are backslash-escaped.
+fn qr_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for c in s.chars() {
+        if matches!(c, '\\' | ';' | ',' | ':' | '"') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 fn urlencode(s: &str) -> String {
     // Minimal URL-component encoder — we only ever embed our own
     // operator-configured relay URL, so the worst case is `:` and `/`.
@@ -643,15 +722,22 @@ pub type AccessHandle = Arc<Mutex<Access>>;
 /// failure so the dashboard still boots without an Access tab on
 /// installs that haven't yet generated a TG keypair. The /api/access
 /// routes return 503 in that case.
-pub async fn maybe_load(local_origin: String, relay_url: Option<String>) -> Option<AccessHandle> {
+pub async fn maybe_load(
+    local_origin: String,
+    relay_url: Option<String>,
+    wifi_config_path: Option<PathBuf>,
+) -> Option<AccessHandle> {
     let path = default_tg_priv_path();
-    match Access::load(&path, local_origin, relay_url) {
+    match Access::load(&path, local_origin, relay_url, wifi_config_path.as_deref()) {
         Ok(a) => {
             eprintln!(
                 "[access] KeyHolder loaded from {:?} — TG hash {}",
                 path,
                 a.tg_hash()
             );
+            if a.wifi_creds.is_some() {
+                eprintln!("[access] WiFi-join QR enabled (hotspot creds resolved)");
+            }
             Some(Arc::new(Mutex::new(a)))
         }
         Err(e) => {

@@ -141,6 +141,11 @@
     text-align: center; color: #94a3b8; font-size: 13px; margin-top: 16px;
   }
   .invite-countdown.expired { color: #ef4444; }
+  .invite-step-label {
+    color: #cbd5e1; font-size: 13px; margin: 12px 0 6px 0;
+    text-transform: uppercase; letter-spacing: 1px;
+  }
+  .invite-step-side { color: #64748b; text-transform: none; letter-spacing: 0; font-size: 12px; }
 
   .link-member-card {
     background: #0c1017; border: 1px solid #1e293b; border-radius: 12px;
@@ -794,13 +799,22 @@
       <button class="bootstrap-close" onclick="closeInviteModal()">&times;</button>
     </div>
     <p class="invite-help">
-      Scan the QR code on the new device's camera, or copy the link below and open it on the device's browser.
+      On the new device's camera, scan <strong>step 1</strong> to join the hotspot, then <strong>step 2</strong> to open the dashboard. If the phone already knows the WiFi, you can skip straight to step 2 or use the link.
     </p>
+
+    <div id="inviteWifiBlock" hidden>
+      <p class="invite-step-label">Step 1: Join the hotspot WiFi <span id="inviteWifiSsidLabel" class="invite-step-side"></span></p>
+      <div class="invite-qr-wrap">
+        <img id="inviteWifiQrImg" alt="WiFi-join QR" />
+      </div>
+    </div>
+
+    <p class="invite-step-label" id="inviteStep2Label">Open the dashboard</p>
     <div class="invite-qr-wrap">
-      <img id="inviteQrImg" alt="QR code" />
+      <img id="inviteQrImg" alt="Dashboard-link QR" />
     </div>
     <div class="invite-url-group">
-      <label>On the same WiFi as this dashboard:</label>
+      <label>Or copy the link manually:</label>
       <div class="invite-url-row">
         <input id="inviteUrlLocal" readonly />
         <button onclick="copyInputToClipboard('inviteUrlLocal', this)">Copy</button>
@@ -2013,6 +2027,22 @@ async function openInviteModal() {
     );
     document.getElementById('inviteQrImg').src = inv.qr_png_data_url;
     document.getElementById('inviteUrlLocal').value = fixedLocal;
+
+    // Step-1 WiFi-join QR (present iff the dashboard knows the
+    // hotspot creds — i.e. --wifi-config pointed at a readable
+    // wifi_config.toml). Hidden otherwise, and the Step-2 label is
+    // simplified.
+    const wifiBlock = document.getElementById('inviteWifiBlock');
+    if (inv.qr_wifi_data_url) {
+      document.getElementById('inviteWifiQrImg').src = inv.qr_wifi_data_url;
+      const ssidLabel = document.getElementById('inviteWifiSsidLabel');
+      ssidLabel.textContent = inv.wifi_ssid ? `(${inv.wifi_ssid})` : '';
+      wifiBlock.hidden = false;
+      document.getElementById('inviteStep2Label').textContent = 'Step 2: Open the dashboard';
+    } else {
+      wifiBlock.hidden = true;
+      document.getElementById('inviteStep2Label').textContent = 'Open the dashboard';
+    }
     const relayGroup = document.getElementById('inviteRelayGroup');
     if (inv.url_relay) {
       document.getElementById('inviteUrlRelay').value = inv.url_relay;
