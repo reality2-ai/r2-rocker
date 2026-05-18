@@ -204,7 +204,32 @@ impl Access {
 
     /// SPEC §4.1 — mint a single-use 5-min-expiring invite token and
     /// build the three representations.
+    ///
+    /// `host_override` is the host:port the operator's browser used
+    /// to reach the dashboard (typically the Host: header on the
+    /// /api/access/invite request). When supplied, it replaces the
+    /// startup-time `local_origin` for THIS invite — that origin was
+    /// built from the bind address (often `0.0.0.0`), which isn't a
+    /// usable URL on a phone. The Host header is what the operator
+    /// is actually using right now, so a viewer on the same network
+    /// can reach the same URL.
+    pub fn mint_invite_with_host(
+        &mut self,
+        host_override: Option<&str>,
+    ) -> std::result::Result<InviteEnvelope, String> {
+        self.mint_invite_inner(host_override)
+    }
+
+    /// Back-compat wrapper for callers that don't have a Host header.
+    /// Falls back to the startup-time local_origin.
     pub fn mint_invite(&mut self) -> std::result::Result<InviteEnvelope, String> {
+        self.mint_invite_inner(None)
+    }
+
+    fn mint_invite_inner(
+        &mut self,
+        host_override: Option<&str>,
+    ) -> std::result::Result<InviteEnvelope, String> {
         let now_secs = now_secs();
         let now_ms = (now_secs as i64) * 1000;
         let expires_at_ms = now_ms + (TOKEN_TTL_SECS as i64) * 1000;
@@ -228,7 +253,17 @@ impl Access {
         // Build the URLs.
         let entropy_hex = hex::encode(entropy);
         let token_param = format!("{}.{}", self.tg_hash, entropy_hex);
-        let url_local = format!("{}/?join={}", self.local_origin, token_param);
+        // Pick the host that a viewer device (typically a phone on the
+        // hotspot) can actually reach:
+        //   1. Request Host header if it's NOT a loopback name.
+        //      Common when the operator opens the dashboard via the
+        //      hotspot IP (10.42.0.1:8080 etc.).
+        //   2. Else first non-loopback IPv4 interface address on this
+        //      host. Phones on the hotspot reach it on this address.
+        //   3. Else the startup-time local_origin as last resort.
+        let local_origin = resolve_public_origin(host_override)
+            .unwrap_or_else(|| self.local_origin.clone());
+        let url_local = format!("{}/?join={}", local_origin, token_param);
         let url_relay = self.relay_url.as_ref().map(|relay| {
             format!(
                 "https://reality2-ai.github.io/r2-rocker/?join={}&relay={}",
@@ -237,15 +272,16 @@ impl Access {
             )
         });
 
-        // The QR encodes the `r2:` deeplink form (matches notekeeper).
-        let r2_url = match &self.relay_url {
-            Some(r) => format!(
-                "r2://join/{}/{}?relay={}",
-                self.tg_hash, entropy_hex, urlencode(r)
-            ),
-            None => format!("r2://join/{}/{}", self.tg_hash, entropy_hex),
-        };
-        let qr_png_data_url = render_qr_png(&r2_url)?;
+        // The QR encodes the regular `http://` `url_local`, NOT the
+        // `r2://` deeplink form notekeeper uses. The latter is the
+        // R2-ecosystem-pure choice but no off-the-shelf phone browser
+        // handles the scheme, so scanning the QR just yields a
+        // useless raw "r2://join/..." string. The http URL works
+        // directly in the camera app's "open URL" prompt and lands
+        // the viewer on the webapp's `?join=` flow, no special
+        // handler needed. A future PWA / installed-app deployment
+        // MAY register the r2: scheme and switch.
+        let qr_png_data_url = render_qr_png(&url_local)?;
 
         Ok(InviteEnvelope {
             tg_hash: self.tg_hash.clone(),
@@ -539,6 +575,65 @@ fn urlencode(s: &str) -> String {
         'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
         other => format!("%{:02X}", other as u32),
     }).collect()
+}
+
+/// Pick the `http://<host>:<port>` origin that a viewer device (phone
+/// on the hotspot, etc.) can use to reach this dashboard, in
+/// preference order:
+///   1. Request Host header, if not loopback.
+///   2. First non-loopback IPv4 address on any interface on this host,
+///      paired with the dashboard's HTTP port (8080 by default).
+///   3. None — caller falls back to startup-time local_origin.
+fn resolve_public_origin(host_override: Option<&str>) -> Option<String> {
+    if let Some(h) = host_override {
+        if !is_loopback_host(h) {
+            return Some(format!("http://{}", h));
+        }
+        // Host was localhost / 127.0.0.1 — extract its port to reuse
+        // with the interface IP we'll find next.
+        if let Some(ip) = detect_public_ipv4() {
+            let port = h.rsplit(':').next()
+                .and_then(|p| p.parse::<u16>().ok())
+                .unwrap_or(8080);
+            return Some(format!("http://{}:{}", ip, port));
+        }
+    }
+    detect_public_ipv4().map(|ip| format!("http://{}:8080", ip))
+}
+
+fn is_loopback_host(host_port: &str) -> bool {
+    let host = host_port.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_port);
+    matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1")
+}
+
+/// Pick an IPv4 address that a viewer device on the hotspot can reach.
+///
+/// Trick: open a UDP socket, `connect()` to a target IP (no packets
+/// sent — the kernel just runs route lookup), read back
+/// `local_addr()` which is the source IP the kernel would use for
+/// that route. Works on hosts with no internet path.
+///
+/// Probe order matters because a controller laptop typically has BOTH
+/// a regular LAN connection (192.168.x.x) AND a hotspot
+/// (10.42.x.x — NetworkManager's default for "Wi-Fi share"). The
+/// hotspot is where viewer phones live, so probe it first.
+///
+///   1. `10.42.0.1` — NetworkManager hotspot default. If the route
+///      table has an entry for 10.42.0.0/24 (i.e. the hotspot is up),
+///      the kernel returns this interface's address.
+///   2. `192.0.2.1` — IETF documentation prefix, used as a "neutral"
+///      target for default-route lookup if there's no hotspot.
+fn detect_public_ipv4() -> Option<std::net::IpAddr> {
+    for target in &["10.42.0.1:1", "192.0.2.1:1"] {
+        let Ok(s) = std::net::UdpSocket::bind("0.0.0.0:0") else { continue };
+        if s.connect(target).is_err() { continue; }
+        let Ok(addr) = s.local_addr() else { continue };
+        let ip = addr.ip();
+        if !ip.is_loopback() && !ip.is_unspecified() {
+            return Some(ip);
+        }
+    }
+    None
 }
 
 /// `AppState`-shaped wrapper.

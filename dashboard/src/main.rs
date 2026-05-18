@@ -2855,6 +2855,7 @@ fn is_keyholder(connect: SocketAddr) -> bool {
 async fn access_invite_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
     let handle = match require_access(&state).await {
         Ok(h) => h,
@@ -2868,8 +2869,16 @@ async fn access_invite_handler(
             })),
         ).into_response();
     }
+    // The operator's browser is loading the dashboard from some
+    // host:port the viewer can also reach — use that as the URL we
+    // bake into the invite, rather than the dashboard's bind
+    // address (which is often 0.0.0.0 and useless to a phone).
+    let host_override = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
     let mut access = handle.lock().await;
-    match access.mint_invite() {
+    match access.mint_invite_with_host(host_override.as_deref()) {
         Ok(env) => (axum::http::StatusCode::OK, Json(serde_json::to_value(&env).unwrap_or_default())).into_response(),
         Err(e) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
