@@ -2696,25 +2696,42 @@ function parseRunNameFromFilename(filename) {
 }
 
 /// Reflect the current recording's run name into the read-only
-/// runName input on viewers. The controller keeps whatever the
-/// operator typed (might be empty before Mark). Called whenever
-/// capture.state arrives via /ws/raw and from
-/// updateCaptureUiFromFleet for general consistency.
+/// runName input on viewers, AND track the current capture filename
+/// in `lastMarkedFilename` so the "Download merged CSV" button
+/// works for viewers too. The controller keeps whatever the
+/// operator typed in the input (might be empty before Mark), but
+/// also benefits from the filename tracking — though the
+/// controller path already sets `lastMarkedFilename` in captureMark.
 function updateRunNameDisplay() {
-  if (isControllerRole) return;
-  const input = document.getElementById('runName');
-  if (!input) return;
   // Find any sensor currently in 'recording' state and read its
   // file. They should all share the same filename (operator marked
   // once for the fleet) so first match wins.
+  let activeFilename = null;
   let runName = null;
   for (const s of sensors.values()) {
     if (s.captureState === 'recording' && s.captureFile) {
+      activeFilename = s.captureFile;
       runName = parseRunNameFromFilename(s.captureFile);
       if (runName) break;
     }
   }
-  input.value = runName || '';
+  // Viewers: the run-name input is read-only — mirror the active
+  // run there (or clear when idle).
+  if (!isControllerRole) {
+    const input = document.getElementById('runName');
+    if (input) input.value = runName || '';
+  }
+  // Both roles: keep lastMarkedFilename in sync with the latest
+  // recording so the "Download merged CSV" button is correctly
+  // enabled. Viewers never call captureMark themselves, so without
+  // this they'd never see the button enable. Update the button's
+  // disabled state inline — calling updateCaptureUiFromFleet here
+  // would recurse (it's the caller).
+  if (activeFilename) {
+    lastMarkedFilename = activeFilename;
+    const merged = document.getElementById('dataMergedBtn');
+    if (merged) merged.disabled = false;
+  }
 }
 
 async function accessGate() {
@@ -3290,12 +3307,17 @@ class R2DataCard extends HTMLElement {
           const nameEsc = escapeText(f.name);
           const nameAttr = escapeAttr(f.name);
           const addrAttr = escapeAttr(s.key);
+          // Per-file 🗑 is destructive — controller only. Viewers
+          // see only the 📥 download.
+          const delBtn = isControllerRole
+            ? `<button class="danger" onclick="deleteCaptureFile('${addrAttr}','${nameAttr}')">🗑</button>`
+            : '';
           return `
             <div class="data-file-row">
               <span class="name" title="${nameEsc}">${nameEsc}</span>
               <span class="meta">${sizeKb} KB · ${mt}</span>
               <button onclick="downloadCaptureFile('${addrAttr}','${nameAttr}')">📥</button>
-              <button class="danger" onclick="deleteCaptureFile('${addrAttr}','${nameAttr}')">🗑</button>
+              ${delBtn}
             </div>`;
         }).join('');
         r.files.innerHTML = rows;
@@ -3304,6 +3326,8 @@ class R2DataCard extends HTMLElement {
     }
 
     r.btnDelAll.disabled = (files.length === 0);
+    // "Delete all on this sensor" is destructive — controller only.
+    r.btnDelAll.hidden = !isControllerRole;
   }
 
   async refresh() {
