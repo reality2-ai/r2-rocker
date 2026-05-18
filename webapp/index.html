@@ -262,8 +262,23 @@
     margin-top: 8px;
     font-family: 'SF Mono', monospace;
     font-size: 12px;
+    /* Tabular figures + a fixed-width container per value stops the
+       layout from reflowing every ~10 ms as `-0.123 g` becomes
+       ` 0.045 g` etc. Numbers stay aligned, eyes can read them. */
+    font-variant-numeric: tabular-nums;
   }
   .sensor-stats span { opacity: 0.7; }
+  /* Each chip occupies a stable width regardless of value sign / digit
+     count. Width chosen so a 6-char value + 2-char unit (" g" or " Hz")
+     fits without truncation: e.g., "-1.234 g". */
+  .sensor-stats .vx,
+  .sensor-stats .vy,
+  .sensor-stats .vz,
+  .sensor-stats .vmag {
+    display: inline-block;
+    min-width: 7ch;
+    text-align: right;
+  }
   .sensor-stats .vx { color: #ff6384; }
   .sensor-stats .vy { color: #36a2eb; }
   .sensor-stats .vz { color: #4bc0c0; }
@@ -973,7 +988,7 @@ function getOrCreateSensor(addr) {
       <span>y: <span class="vy" id="vy-${safeKey}">&mdash;</span></span>
       <span>z: <span class="vz" id="vz-${safeKey}">&mdash;</span></span>
       <span>|A|: <span class="vmag" id="vmag-${safeKey}">&mdash;</span></span>
-      <span style="margin-left:auto; color:#475569;" id="rate-${safeKey}">&mdash; Hz</span>
+      <span style="margin-left:auto; color:#475569; min-width: 7ch; text-align: right;" id="rate-${safeKey}">&mdash; Hz</span>
     </div>
     <div class="sensor-event-log" id="slog-${safeKey}"></div>
   `;
