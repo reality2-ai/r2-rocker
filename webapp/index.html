@@ -852,7 +852,7 @@
   </div>
 </div>
 
-<!-- Invite modal — opened by "Link a new device" -->
+<!-- Invite modal — opened by "Link a new viewer" -->
 <div class="invite-overlay" id="inviteOverlay" hidden onclick="if(event.target.id==='inviteOverlay') closeInviteModal()">
   <div class="invite-modal">
     <div class="invite-header">
@@ -2344,7 +2344,7 @@ function renderLinkMembersList(members, opts) {
   } else if (members.length === 0) {
     html += `<div class="card" id="linkEmpty" style="color:#64748b; padding:30px; text-align:center;">
       No devices linked yet.<br>
-      ${_isKeyHolder ? 'Click <strong>Link a new device</strong> above to invite one.' : ''}
+      ${_isKeyHolder ? 'Click <strong>Link a new viewer</strong> above to invite one.' : ''}
     </div>`;
   } else {
     html += members
@@ -2402,7 +2402,7 @@ async function revokeMember(device_pk, name) {
   }
 }
 
-// ── Invite modal (Link a new device) ──────────────────────────────────
+// ── Invite modal (Link a new viewer) ──────────────────────────────────
 
 async function openInviteModal() {
   try {
