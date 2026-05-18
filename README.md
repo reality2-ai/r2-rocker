@@ -1,45 +1,42 @@
 # r2-rocker
 
-A wireless sensor system for monitoring a tyre-testing rig.
+An open wireless sensor network for measuring movement and vibration
+in laboratory machinery — instrumenting joints, actuators, bearings
+and similar load-bearing components to detect incipient mechanical
+failure before it becomes obvious.
 
-![r2-rocker dashboard — Live tab during a two-sensor rocking-motion run](docs/screenshots/dashboard-live.png)
+![r2-rocker dashboard — Live tab during a two-sensor run](docs/screenshots/dashboard-live.png)
 
 ## What this does, in one paragraph
 
-There's a half-tonne machine in a lab that studies how tyre rubber
-wears against road surfaces. The asphalt sits as a flat bed at the
-bottom; a slab of rubber sample is mounted on the *rocker* — the
-moving upper part — and is driven back and forth across the asphalt
-by hydraulic actuators to simulate a tyre travelling over a road.
-The actuators bolt to the rocker through metal joints, and these
-joints are showing stress in a way that suggests the rocker is
-moving *sideways* a tiny bit when it's only meant to move *along
-the direction of travel*. r2-rocker is the instrument that watches
-for that sideways motion. Small battery-powered sensors clip onto
-each joint, send their accelerometer readings live to a laptop on
-the lab bench, and the laptop computes the difference in sideways
-motion between joints — which is what we believe correlates with
-the joint-shear failure mode.
+Small battery-powered sensors clip onto the points you want to
+watch on a machine — a joint, an actuator bolt, a bearing housing
+— and stream their accelerometer readings live to a laptop on the
+lab bench. The laptop records the data, runs a dashboard that
+shows the relative motion between sensors in real time, and keeps
+every sample on durable SD storage for offline analysis. Comparing
+how two joints move (or fail to move together) is what surfaces
+shear, fatigue, drift, or other failure modes that don't show up
+as a single-point measurement. The hardware is open, the protocol
+stack is open, and the whole thing is designed to be handed off to
+a university group who can run, modify, or extend it without
+depending on any third-party service.
 
-The hardware is open. The protocol stack is open. The whole thing is
-designed to be handed off to a university group, who can run, modify,
-or extend it without depending on any third-party service.
+The first deployment is a two-sensor setup on a hydraulic
+tyre-wear test rig at the University of Auckland, watching for
+sideways joint motion in the rocker arm that drives a rubber
+sample across an asphalt sample — hence the project name. But
+the system itself is sensor-agnostic and machine-agnostic: any
+ESP32-attachable sensor (accelerometer, strain gauge, temperature,
+microphone, current sense, magnetometer, …) and any rigid
+machinery within WiFi range of the controller fits the same
+template. Swap the ADXL355 driver in the firmware for your sensor
+of choice, adjust the wire schema, and the rest of the stack —
+hotspot, dashboard, web app, OTA, SD ring, time-sync, log fan-out
+— applies unchanged.
 
-Although r2-rocker was built for this specific tyre-wear rig, the
-shape of the system — battery-powered ESP32 sensors streaming over
-a local WiFi hotspot to a controller-hosted dashboard with durable
-SD-card buffering, BLE bootstrap, OTA, and end-to-end signing —
-isn't tyre-rig-specific. Any sensor that can be wired to an ESP32
-(accelerometers, temperature, strain gauges, environmental,
-chemical, hall, magnetometer, microphone, current sense, …) fits
-the same template. Swap the ADXL355 driver in the firmware for
-your sensor of choice, adjust the wire schema, and the rest of the
-stack — hotspot, dashboard, web app, OTA, SD ring, time-sync,
-log fan-out — applies unchanged. WiFi-range coverage is the only
-hard constraint on physical deployment.
-
-The protocol stack underneath the rig is **Reality2 (R2)** — an
-open messaging substrate for distributed sentant-based systems. See
+The protocol stack underneath is **Reality2 (R2)** — an open
+messaging substrate for distributed sentant-based systems. See
 [reality2.ai](https://www.reality2.ai) for the wider project that
 r2-rocker is built on; the R2 specs and reference crates this repo
 vendors live under [`crates/`](crates/) and [`specifications/`](specifications/).
