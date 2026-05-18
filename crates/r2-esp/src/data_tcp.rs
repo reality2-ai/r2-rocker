@@ -84,7 +84,12 @@ pub fn start_listener(mount_point: &'static str, current: CurrentRecording) {
     log::info!("[data-tcp] spawning listener thread");
     if let Err(e) = std::thread::Builder::new()
         .name("data-tcp".into())
-        .stack_size(8192)
+        // 16 KiB: FATFS LFN allocates ~512 B per directory entry on
+        // the stack, and a LIST traverses every file in two
+        // directories. 8 KiB overflowed and reset the socket
+        // mid-LIST; 16 KiB matches `ota_tcp` and tested clean
+        // across captures/ + the ring's logNNNN.csv files.
+        .stack_size(16384)
         .spawn(move || listener_loop(mount_point, current))
     {
         error!("[data-tcp] failed to spawn listener: {} — capture files unreachable", e);
