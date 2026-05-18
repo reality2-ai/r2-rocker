@@ -798,6 +798,7 @@
       <button id="viewLink"                  onclick="setView('link')">Link</button>
     </div>
     <button class="btn-connect" id="btn-connect" onclick="startBootstrap()">&#x1F50D; Connect Sensors</button>
+    <button class="btn-connect" id="btn-show-log" onclick="toggleBootstrapPanel()" title="Show / hide the connection log">&#x1F4DD; Log</button>
     <div class="connection-status">
       <div class="status-dot" id="wsDot"></div>
       <span id="wsStatus">Connecting...</span>
@@ -1179,6 +1180,18 @@ function startBootstrap() {
 
 function closeBootstrapPanel() {
   document.getElementById('bootstrap-panel').classList.remove('visible');
+}
+
+// Header "📝 Log" button — flips panel visibility so the operator can
+// reopen the Connection Log after dismissing it (or after a bootstrap
+// / OTA run has finished and they want to re-read the history).
+function toggleBootstrapPanel() {
+  const panel = document.getElementById('bootstrap-panel');
+  if (panel.classList.contains('visible')) {
+    panel.classList.remove('visible');
+  } else {
+    panel.classList.add('visible');
+  }
 }
 
 function handleBootstrapEvent(msg) {
@@ -4101,6 +4114,7 @@ Object.assign(window, {
   setView,
   startBootstrap,
   closeBootstrapPanel,
+  toggleBootstrapPanel,
   requestFirmwareUpdate,
   requestReset,
   requestResetAll,
