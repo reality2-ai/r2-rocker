@@ -1,0 +1,57 @@
+name: Deploy webapp to GitHub Pages
+
+# SPEC-R2-ROCKER-ACCESS §5.2 — off-network viewer path.
+#
+# The dashboard's invite envelope sets
+#   url_relay = https://reality2-ai.github.io/r2-rocker/?join=…&relay=…
+# so a QR-scanned phone with only cellular internet loads the webapp
+# from this host, opens a WSS to the configured relay, and runs the
+# JSON access.request/access.response pairing handshake. The webapp
+# is fully static — HTML + the prebuilt `webapp/pkg/` WASM bundle —
+# so a `git push` to main is sufficient to roll out a new version.
+#
+# Pages must be set to "GitHub Actions" as the source under
+# repo Settings → Pages before the first deploy will publish.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "webapp/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload webapp/ as artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: webapp
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

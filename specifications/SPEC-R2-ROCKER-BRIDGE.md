@@ -85,7 +85,22 @@ spec) but the rocker work plan must accommodate the possibility.
 
 ### 1.4 v0.1 scope
 
-* Exactly **two TGs**: rocker production + rocker viewing.
+* **Target state:** exactly **two TGs** — rocker production + rocker
+  viewing.
+* **v0.1 reality:** a single TG with role tagging.
+  SPEC-R2-ROCKER-ACCESS §2.4.1 is the authoritative description of
+  the staged migration: viewers in the current cut are members of
+  the production TG with the `r2-rocker:variant = viewer` extension
+  on their cert; the bridge policy in §3–§4 is enforced as an
+  in-process filter, not as a TG boundary. The two-TG split lands
+  in a follow-up slice. Until then, "production TG" and "viewing
+  TG" in this document refer to the eventual structure; on the
+  wire there is one TG hash and one relay bucket.
+
+  This v0.1 simplification does not break the R2-TRUST "one device,
+  one TG" invariant: every cert lives in exactly one TG (the
+  production TG) — viewers and sensors just happen to share it,
+  disambiguated by the variant tag.
 * Cross-organisation entanglement (e.g. with a university's existing
   TG, or a customer's TG) is **out of scope**. The architecture
   permits it, but no interop testing or naming negotiation is

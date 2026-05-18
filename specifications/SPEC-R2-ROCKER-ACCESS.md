@@ -85,8 +85,8 @@ Out of scope:
 | **Member-Sensor** | A sensor firmware instance that has been issued a `DeviceCertificate` by the KeyHolder. v0.1 sensors are enrolled during BLE bootstrap (SPEC-R2-ROCKER-SENSOR §4 — already operational). |
 | **Member-Viewer** | A browser instance that has been issued a `DeviceCertificate` by the KeyHolder via the QR/link flow defined in this spec. |
 | **Token** | A 16-byte single-use secret + 8-hex-char TG hash that authorises exactly one `/api/access/claim`. See §3. |
-| **Production TG** | The Trust Group sensors and the controller belong to. Carries telemetry. SPEC-R2-ROCKER-BRIDGE §2. |
-| **Viewing TG** | The Trust Group viewers belong to. Receives a policy-filtered subset of production-TG traffic via the bridge. SPEC-R2-ROCKER-BRIDGE §2. The two TGs are bilaterally entangled at the KeyHolder layer. |
+| **Production TG** | **Target state** — the Trust Group sensors and the controller belong to. Carries telemetry. SPEC-R2-ROCKER-BRIDGE §2. *In v0.1 this is the only TG; see §2.4.1.* |
+| **Viewing TG** | **Target state** — the Trust Group viewers belong to. Receives a policy-filtered subset of production-TG traffic via the bridge. SPEC-R2-ROCKER-BRIDGE §2. The two TGs are bilaterally entangled at the KeyHolder layer. *In v0.1 viewers are members of the production TG with the `viewer` variant tag; the split lands in a follow-up slice — see §2.4.1.* |
 | **"this device"** | The browser instance currently rendering the dashboard, whatever its role. Used in the Access tab to mark the operator's own session as non-revocable (§8). |
 
 ### 1.3 Notation
@@ -139,18 +139,62 @@ controllers on the same hotspot, both holding `tg_priv.bin`, is
 operator misconfiguration and the dashboard SHOULD detect it
 (see §9 future work — the v0.1 detection is best-effort).
 
-### 2.4 Two TGs, one KeyHolder
+### 2.4 Two TGs, one KeyHolder — target state
 
-Per SPEC-R2-ROCKER-BRIDGE §2, the system has two Trust Groups
-(production + viewing) bilaterally entangled. The controller
-process holds the KeyHolder role in **both**. Member-Sensors
-belong to the production TG; Member-Viewers belong to the
-viewing TG; the bridge governs traffic between them.
+Per SPEC-R2-ROCKER-BRIDGE §2, the **target state** is two Trust
+Groups (production + viewing) bilaterally entangled (R2-TRUST §7.5).
+In that state:
 
-Enrolment of a Member-Viewer per this spec therefore yields a
-member of the **viewing TG**. Enrolment of a Member-Sensor per
-SPEC-R2-ROCKER-SENSOR §4 yields a member of the **production TG**.
-The two paths never cross.
+* Member-Sensors belong to the **production TG** (enrolment path:
+  SPEC-R2-ROCKER-SENSOR §4 BLE bootstrap).
+* Member-Viewers belong to the **viewing TG** (enrolment path:
+  this spec, §3–§5).
+* The controller process is a member of the production TG with
+  `DeviceRole::KeyHolder`, and **separately** a member of the
+  viewing TG with `DeviceRole::KeyHolder`. Two device certs, two
+  TG identities, one physical process holding both signing keys.
+  This is consistent with R2-TRUST: a *device* may be a member of
+  at most one TG at a time, but a *process* may hold several
+  device identities (one per TG it participates in) just as a
+  laptop can run two browser tabs paired to two different TGs.
+* The bridge sentant (SPEC-R2-ROCKER-BRIDGE §2.1) is a
+  Member-Bridge in the production TG only; the entanglement
+  itself lives at the TG level, derived from both TGs'
+  `TG_PK` / `TG_SK` per R2-TRUST §7.5.
+
+### 2.4.1 v0.1 reality — single TG, role tag
+
+In v0.1 (the current cut) the dashboard operates with **one** TG.
+A single `tg_priv.bin` signs every cert, sensors and viewers
+alike. The "two TGs" terminology above describes the design
+target; on the wire there is one TG hash and one relay bucket.
+
+Role disambiguation between Member-Sensor and Member-Viewer is
+carried in the cert metadata (`DeviceCertificate::role`, plus a
+v0.1 `r2-rocker:variant` extension distinguishing
+`"sensor"` / `"viewer"`); the bridge policy (BRIDGE §3–§4) is
+enforced at the controller as an in-process filter, not as a TG
+boundary. Implementations **MUST** persist the variant in the
+cert and **MUST** reject any frame whose variant does not match
+the source's known role.
+
+The split into two TGs is **deferred** to a follow-up slice
+(tracked as `task #52`). When that slice lands:
+
+* A second TG keypair (`tg_priv_view.bin`) is generated alongside
+  the production key. Existing viewer certs are reissued under
+  the viewing TG via a one-shot migration the operator triggers
+  from the Access tab.
+* The relay session opens **two** WSS connections — one signed
+  with each TG key — and viewers in the viewing-TG bucket can no
+  longer see production-TG frames except those the bridge re-emits.
+* Detection of "one device in two TGs" becomes meaningful and
+  the dashboard MUST refuse to issue a viewer cert under
+  production-TG (and vice versa).
+
+Until that slice ships, the "one device / one TG" invariant is
+**not** under threat: nobody is in two TGs, because there is only
+one TG.
 
 ---
 
