@@ -411,7 +411,10 @@
      the Devices tab; `margin-top` adds the gap that was missing
      between the cards and the log on that tab. */
   .log-row {
-    padding: 0 24px 16px;
+    /* Match .bootstrap-panel padding so Events and Connection Log
+       have identical width when both are visible (16px horizontal,
+       not 24px). */
+    padding: 0 16px 16px;
     max-width: 1600px;
     margin: 16px auto 0;
   }
@@ -960,10 +963,10 @@
   </div>
 </div>
 
-<!-- Event log -->
+<!-- Events -->
 <div class="log-row" id="eventLogRow">
   <div class="card log-card">
-    <h2>Event Log</h2>
+    <h2>Events</h2>
     <div class="log-entries" id="logEntries"></div>
   </div>
 </div>
