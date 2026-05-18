@@ -673,6 +673,37 @@ Future work for multi-KeyHolder + operator-managed save/restore
 None of the above is required by this spec. The §2.1 role
 table is **closed** for v0.1 and **open** for v0.2.
 
+### 9.1 Future tab split — Link vs Admin
+
+In v0.1 the operator-facing "Link" tab (§8) handles exactly one
+flow: inviting a **viewer** browser. A second, conceptually
+distinct flow — inviting a **standby / alternative controller**
+machine — is queued for v0.2.
+
+Standby-controller pairing is not a pure cryptographic act. The
+receiving laptop must already have the native dashboard binary
+built, a WiFi adapter capable of hosting a hotspot, and
+operator-side access to install / configure the prerequisites.
+A QR-or-link affordance only handles the **cert-delegation
+half** of the handoff; the **binary + OS setup half** is
+out-of-band and operator-managed. v0.1 deployments use file
+transfer of `tg_priv.bin` for both halves; v0.2 separates them.
+
+When the v0.2 flow lands, the two affordances **SHALL** live on
+**separate tabs**:
+
+* **Link** (existing, this spec §8) — for adding viewers. Routine,
+  low-impact, frequently used.
+* **Admin** (new) — for the rare, higher-impact operations:
+  pairing a standby controller, transferring KeyHolder duty,
+  rotating the TG signing key, post-incident audit. The Admin
+  tab is visible only to the currently-active KeyHolder.
+
+Implementations that ship before the v0.2 multi-KeyHolder work
+**MUST NOT** preemptively render an empty Admin tab — it would
+confuse the operator. The tab arrives with the first concrete
+admin operation.
+
 ---
 
 ## 10. OTA-signing implications

@@ -446,15 +446,20 @@ fn encode_claim_response(
     encrypted: &EncryptedJoinResponse,
     paired_at_ms: i64,
 ) -> serde_json::Value {
-    // EncryptedJoinResponse is `(nonce: [u8; 24], ciphertext: Vec<u8>)`.
-    // No canonical wire format on r2-trust — emit them as separate b64
-    // fields so the browser-side decoder can rebuild the struct
-    // verbatim. SPEC-R2-ROCKER-ACCESS §4.2 leaves the credential
-    // bundle's exact JSON shape to this implementation; future
-    // versions MAY use a single concatenated b64.
+    // Packed wire format: 24-byte nonce ++ 4-byte BE u32 ciphertext_len
+    // ++ ciphertext. This is the layout that r2-wasm's
+    // `deserialize_encrypted_response` (consumed by `complete_join`)
+    // expects, so the browser-side WASM can decrypt the bundle in one
+    // step rather than re-packing two separate b64 fields. See
+    // crates/r2-wasm/src/lib.rs:925.
+    let mut packed = Vec::with_capacity(28 + encrypted.ciphertext.len());
+    packed.extend_from_slice(&encrypted.nonce);
+    let ct_len = encrypted.ciphertext.len() as u32;
+    packed.extend_from_slice(&ct_len.to_be_bytes());
+    packed.extend_from_slice(&encrypted.ciphertext);
+
     serde_json::json!({
-        "nonce_b64": B64.encode(encrypted.nonce),
-        "ciphertext_b64": B64.encode(&encrypted.ciphertext),
+        "encrypted_b64": B64.encode(&packed),
         "tg_pk_hex": hex::encode(tg.verifying_key().to_bytes()),
         "paired_at_ms": paired_at_ms,
     })

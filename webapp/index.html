@@ -1180,6 +1180,10 @@ import init, {
   fnv1a_32 as wasmFnv1a32,
   decode_compact_frame as wasmDecodeFrame,
   r2_version as wasmVersion,
+  // SPEC-R2-ROCKER-ACCESS — viewer enrolment + cert lifecycle.
+  generate_device_keypair as wasmGenerateDeviceKeypair,
+  complete_join as wasmCompleteJoin,
+  R2Member as WasmR2Member,
 } from './pkg/r2_wasm.js';
 
 let ws;
@@ -1208,6 +1212,21 @@ async function bootstrapHive() {
     return;
   }
   console.log('[hive] r2-wasm loaded:', wasmVersion());
+
+  // SPEC-R2-ROCKER-ACCESS §8 trailing paragraph + §11.2:
+  //   * KeyHolder-on-localhost shortcut → straight through.
+  //   * `?join=` → runs the claim handshake, persists cert, then through.
+  //   * Existing IndexedDB cert → through.
+  //   * Otherwise → render the not-enrolled landing page in place of
+  //     the regular tabs. The /ws/* connects below are skipped to
+  //     avoid a "connected, see live data" view leaking through the
+  //     pairing gate.
+  const allowed = await accessGate();
+  if (!allowed) {
+    console.log('[hive] not enrolled — landing page rendered, deferring WS setup');
+    return;
+  }
+
   console.log('[hive] hash table:');
   for (const name of KNOWN_EVENT_NAMES) {
     const hash = wasmFnv1a32(new TextEncoder().encode(name)) >>> 0;
@@ -2053,11 +2072,308 @@ async function copyInputToClipboard(inputId, btn) {
 
 /// Called from the /ws/status message dispatcher — keeps the Link tab
 /// in sync when a member is added (claim) or revoked, without polling.
+/// Also handles the spec §7.3 self-revoke case: if a revoked event
+/// matches our own device_pk, wipe local identity + force the
+/// not-enrolled landing page.
 function handleAccessWsEvent(msg) {
+  if (msg.event === 'revoked' && viewerIdentity && msg.device_pk) {
+    const myPk = viewerIdentityPkHex;
+    if (myPk && msg.device_pk.toLowerCase() === myPk.toLowerCase()) {
+      console.warn('[access] this device has been revoked by the controller');
+      forgetViewerIdentity().then(() => renderNotEnrolledLanding('Your device has been removed from this dashboard by the operator.'));
+      return;
+    }
+  }
   if (currentView !== 'link') return;
   if (msg.event === 'member_added' || msg.event === 'revoked') {
     loadLinkMembers();
   }
+}
+
+// ── Viewer identity (SPEC-R2-ROCKER-ACCESS §6) ────────────────────────
+//
+// Browser-side cert + key persistence. IndexedDB stores a single
+// 277-byte serialised `R2Member` blob keyed by 'self' under the
+// 'r2-rocker-access' database. Survives refresh / tab close /
+// browser restart; wiped on self-revoke (§7.3) or on operator-side
+// "Leave" (out of scope for v0.1).
+
+const IDB_NAME    = 'r2-rocker-access';
+const IDB_STORE   = 'members';
+const IDB_KEY     = 'self';
+const IDB_VERSION = 1;
+
+let viewerIdentity     = null;  // WasmR2Member instance once enrolled
+let viewerIdentityPkHex = null;  // cached hex form (lowercase)
+
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, IDB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(IDB_STORE)) {
+        db.createObjectStore(IDB_STORE);
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror   = () => reject(req.error);
+  });
+}
+
+async function idbGet(key) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx  = db.transaction(IDB_STORE, 'readonly');
+    const req = tx.objectStore(IDB_STORE).get(key);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror   = () => reject(req.error);
+  });
+}
+
+async function idbPut(key, value) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx  = db.transaction(IDB_STORE, 'readwrite');
+    tx.objectStore(IDB_STORE).put(value, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror    = () => reject(tx.error);
+  });
+}
+
+async function idbDelete(key) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx  = db.transaction(IDB_STORE, 'readwrite');
+    tx.objectStore(IDB_STORE).delete(key);
+    tx.oncomplete = () => resolve();
+    tx.onerror    = () => reject(tx.error);
+  });
+}
+
+function bytesToHex(u8) {
+  return [...u8].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function hexToBytes(hex) {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(hex.substr(i * 2, 2), 16);
+  }
+  return out;
+}
+
+function b64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/// Parse the `?join=` token + optional `&relay=` URL out of the URL.
+/// Returns `{ tg_hash, entropy_hex, relay }` or null.
+function parseJoinParam() {
+  const url = new URL(location.href);
+  const join = url.searchParams.get('join');
+  if (!join) return null;
+  const parts = join.split('.');
+  if (parts.length !== 2) return null;
+  const [tg_hash, entropy_hex] = parts;
+  if (tg_hash.length !== 8 || !/^[0-9a-fA-F]+$/.test(tg_hash)) return null;
+  if (entropy_hex.length !== 32 || !/^[0-9a-fA-F]+$/.test(entropy_hex)) return null;
+  return {
+    tg_hash: tg_hash.toLowerCase(),
+    entropy_hex: entropy_hex.toLowerCase(),
+    relay: url.searchParams.get('relay'),
+  };
+}
+
+/// Strip `?join=` (and `?relay=`) from the URL bar without reloading,
+/// so a refresh doesn't try to re-enrol with an already-consumed token.
+function clearJoinParam() {
+  const url = new URL(location.href);
+  url.searchParams.delete('join');
+  url.searchParams.delete('relay');
+  history.replaceState(null, '', url.pathname + (url.search || '') + url.hash);
+}
+
+/// Run the enrolment handshake: generate a device keypair, POST claim,
+/// decode the response, persist to IndexedDB. Returns true on success.
+async function runEnrolment(joinParam, deviceName) {
+  // 1. Generate the device keypair in WASM (uses getrandom — CSPRNG).
+  const kp = wasmGenerateDeviceKeypair();
+  const device_sk = new Uint8Array(kp.secret_key);
+  const device_pk = new Uint8Array(kp.public_key);
+  const device_pk_hex = bytesToHex(device_pk);
+
+  // 2. POST /api/access/claim.
+  const res = await fetch('/api/access/claim', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      tg_hash:     joinParam.tg_hash,
+      entropy_hex: joinParam.entropy_hex,
+      device_pk:   device_pk_hex,
+      device_name: deviceName,
+    }),
+  });
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`claim ${res.status}: ${txt}`);
+  }
+  const body = await res.json();
+  const tg_pk = hexToBytes(body.tg_pk_hex);
+  const encrypted = b64ToBytes(body.encrypted_b64);
+
+  // 3. Decrypt the credential bundle via WASM. `complete_join` runs
+  //    the device side of the join handshake (X25519 → XChaCha20-Poly1305)
+  //    and returns an R2Member handle that holds (sk, cert, dek, hk).
+  const nowSecs = BigInt(Math.floor(Date.now() / 1000));
+  const member = wasmCompleteJoin(device_sk, tg_pk, encrypted, nowSecs);
+
+  // 4. Persist to IndexedDB. The 277-byte blob carries everything the
+  //    next page load needs to come up enrolled.
+  const blob = member.to_bytes();
+  await idbPut(IDB_KEY, new Uint8Array(blob));
+
+  viewerIdentity      = member;
+  viewerIdentityPkHex = device_pk_hex;
+
+  console.log(`[access] enrolled as ${deviceName} (${device_pk_hex.slice(0,8)}…)`);
+  return true;
+}
+
+/// Try to load an existing R2Member from IndexedDB. On success,
+/// populate `viewerIdentity` and return true. On absence or
+/// expiry, return false and (if expired) wipe the record.
+async function loadExistingIdentity() {
+  const blob = await idbGet(IDB_KEY).catch(() => null);
+  if (!blob) return false;
+  let member;
+  try {
+    member = WasmR2Member.from_bytes(new Uint8Array(blob));
+  } catch (err) {
+    console.warn('[access] stale IndexedDB blob, wiping:', err);
+    await idbDelete(IDB_KEY);
+    return false;
+  }
+  const nowSecs = BigInt(Math.floor(Date.now() / 1000));
+  if (!member.is_valid(nowSecs)) {
+    console.warn('[access] persisted cert has expired — wiping');
+    await idbDelete(IDB_KEY);
+    return false;
+  }
+  viewerIdentity      = member;
+  viewerIdentityPkHex = bytesToHex(new Uint8Array(member.public_key));
+  return true;
+}
+
+async function forgetViewerIdentity() {
+  viewerIdentity      = null;
+  viewerIdentityPkHex = null;
+  await idbDelete(IDB_KEY).catch(() => {});
+}
+
+// ── Not-enrolled landing page (SPEC-R2-ROCKER-ACCESS §8 trailing para) ─
+
+function isLocalHost() {
+  const h = location.hostname;
+  return h === 'localhost' || h === '127.0.0.1' || h === '::1';
+}
+
+function renderNotEnrolledLanding(banner) {
+  // Hide every regular tab + the connect/bootstrap button.
+  for (const id of ['liveMain', 'devicesMain', 'dataMain', 'linkMain', 'viewToggle', 'btn-connect']) {
+    const el = document.getElementById(id);
+    if (el) { el.hidden = true; el.style.display = 'none'; }
+  }
+  // Ensure the landing div exists.
+  let landing = document.getElementById('notEnrolledLanding');
+  if (!landing) {
+    landing = document.createElement('div');
+    landing.id = 'notEnrolledLanding';
+    landing.className = 'invite-overlay';
+    landing.style.cssText = 'position:relative; min-height: 60vh; background:transparent;';
+    landing.innerHTML = `
+      <div class="invite-modal" style="max-width: 520px;">
+        <div class="invite-header">
+          <h2>This device isn't paired yet</h2>
+        </div>
+        <p class="invite-help" id="landingBanner"></p>
+        <p class="invite-help">
+          Ask the operator to press <strong>"Link a new device"</strong> on the controller's dashboard.
+          They'll either scan a QR code with this device, or send you a link.
+        </p>
+        <div class="invite-url-group">
+          <label>Paste a link or 3-word code:</label>
+          <div class="invite-url-row">
+            <input id="landingPasteInput" placeholder="https://… or three words" />
+            <button onclick="landingTryPaste()">Open</button>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(landing);
+  }
+  document.getElementById('landingBanner').textContent =
+    banner || 'Pairing this device unlocks the dashboard for this browser.';
+  landing.hidden = false;
+  landing.style.display = 'flex';
+}
+
+function landingTryPaste() {
+  const v = (document.getElementById('landingPasteInput').value || '').trim();
+  if (!v) return;
+  // Try to extract `?join=` from a pasted URL, or accept a literal
+  // `<tg_hash>.<entropy_hex>` token.
+  let token = null;
+  try {
+    const u = new URL(v);
+    token = u.searchParams.get('join');
+  } catch (_) {
+    if (/^[0-9a-f]{8}\.[0-9a-f]{32}$/i.test(v)) token = v;
+  }
+  if (!token) {
+    alert("That doesn't look like a pairing link. Ask the operator to copy the URL again.");
+    return;
+  }
+  // Rewrite to a same-origin URL and let the normal load path handle it.
+  location.href = `/?join=${encodeURIComponent(token)}`;
+}
+
+/// Top-level access-gate run on page load. Returns true if the rest of
+/// the dashboard is allowed to come up; false if the landing page is
+/// rendered instead.
+async function accessGate() {
+  // KeyHolder shortcut — the controller's own browser bypasses the
+  // viewer-enrolment requirement (§2.3: KeyHolder is "TG member
+  // automatically by config"). v0.1 detects "this is the controller"
+  // via the localhost loopback check (same gate the dashboard uses
+  // server-side for /api/access/*).
+  if (isLocalHost()) return true;
+
+  const joinParam = parseJoinParam();
+
+  // First-load enrolment via QR / link.
+  if (joinParam) {
+    // Don't re-enrol on a refresh — strip the token immediately.
+    const deviceName = (location.hostname || 'browser').slice(0, 32);
+    try {
+      await runEnrolment(joinParam, deviceName);
+      clearJoinParam();
+      return true;
+    } catch (err) {
+      console.error('[access] enrolment failed:', err);
+      clearJoinParam();
+      renderNotEnrolledLanding(`Pairing failed: ${err.message || err}. Ask the operator to issue a new link.`);
+      return false;
+    }
+  }
+
+  // Returning enrolled device.
+  if (await loadExistingIdentity()) return true;
+
+  // Not enrolled, no token in URL → landing page.
+  renderNotEnrolledLanding();
+  return false;
 }
 
 function renderDevicesIfVisible() {
@@ -2949,6 +3265,7 @@ Object.assign(window, {
   closeInviteModal,
   copyInputToClipboard,
   revokeMember,
+  landingTryPaste,
 });
 </script>
 </body>
