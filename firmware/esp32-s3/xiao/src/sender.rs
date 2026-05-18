@@ -44,6 +44,14 @@ const BATTERY_PERIOD_MS: u64 = 30_000;
 const STATUS_PERIOD_MS: u64 = 2_000;
 const RECONNECT_BACKOFF_MS_INIT: u64 = 1_000;
 const RECONNECT_BACKOFF_MS_MAX: u64 = 30_000;
+/// Backoff value above which we read "TCP has been failing for a
+/// while, the dashboard / hotspot is probably gone" and switch the
+/// LED from WifiConnecting (cyan) to Advertising (blue). The latter
+/// is the visual signal that the sensor is now effectively in
+/// BLE-pairing mode and is waiting for a fresh #wifi_offer over
+/// Bluetooth. With doubling backoff (1s → 2s → 4s → 8s), this trips
+/// after the third failed attempt — roughly ~7s of cyan, then blue.
+const BLE_FALLBACK_THRESHOLD_MS: u64 = 5_000;
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Identifies this exact build on the wire —
@@ -161,7 +169,18 @@ impl Sender {
             // this the LED stays green through the entire reconnect
             // window (e.g. when the dashboard cycles the hotspot) and
             // the operator can't tell that the link is actually down.
-            self.led.set(crate::led::LedState::WifiConnecting);
+            //
+            // Once the backoff has grown past BLE_FALLBACK_THRESHOLD_MS
+            // we treat the outage as "WiFi is gone, fall back to
+            // BLE-pairing mode" and switch the LED to Advertising
+            // (solid blue) — same colour the firmware shows at boot
+            // when no creds are stored. The next successful session()
+            // overrides it back to Streaming*.
+            self.led.set(if backoff > BLE_FALLBACK_THRESHOLD_MS {
+                crate::led::LedState::Advertising
+            } else {
+                crate::led::LedState::WifiConnecting
+            });
             match self.session() {
                 Ok(()) => {
                     warn!("sender: session ended cleanly — reconnecting");
