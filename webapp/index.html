@@ -805,7 +805,6 @@
       <button id="viewLink"                  onclick="setView('link')">Link</button>
     </div>
     <button class="btn-connect" id="btn-connect" onclick="startBootstrap()">&#x1F50D; Connect Sensors</button>
-    <button class="btn-connect" id="btn-show-log" onclick="toggleBootstrapPanel()" title="Show / hide the connections panel">&#x1F4DD; Connections</button>
     <div class="connection-status">
       <div class="status-dot" id="wsDot"></div>
       <span id="wsStatus">Connecting...</span>
@@ -969,7 +968,6 @@
   <div class="bootstrap-log-card">
     <div class="bootstrap-log-header">
       <h2>Connections</h2>
-      <button class="bootstrap-close" onclick="closeBootstrapPanel()">&times;</button>
     </div>
     <div class="bootstrap-log-entries" id="bootstrap-log"></div>
   </div>
@@ -1185,21 +1183,6 @@ function startBootstrap() {
     });
 }
 
-function closeBootstrapPanel() {
-  document.getElementById('bootstrap-panel').classList.remove('visible');
-}
-
-// Header "📝 Log" button — flips panel visibility so the operator can
-// reopen the Connection Log after dismissing it (or after a bootstrap
-// / OTA run has finished and they want to re-read the history).
-function toggleBootstrapPanel() {
-  const panel = document.getElementById('bootstrap-panel');
-  if (panel.classList.contains('visible')) {
-    panel.classList.remove('visible');
-  } else {
-    panel.classList.add('visible');
-  }
-}
 
 function handleBootstrapEvent(msg) {
   const evt = msg.event;
@@ -2000,19 +1983,14 @@ function setView(name) {
   const bootstrapPanel = document.getElementById('bootstrap-panel');
   const eventLogRow    = document.getElementById('eventLogRow');
   const connectBtn     = document.getElementById('btn-connect');
-  const showLogBtn     = document.getElementById('btn-show-log');
   if (bootstrapPanel) bootstrapPanel.style.display = showLogs ? '' : 'none';
   if (eventLogRow)    eventLogRow.style.display    = showLogs ? '' : 'none';
-  // For the header buttons, use `visibility: hidden` rather than
-  // `display: none` so the slot keeps its width — otherwise the
-  // tabs visibly shift when switching to Data/Link and back, and
-  // the operator loses their place. Clear any inline display
-  // leftover from earlier setView calls; role-gating (the [hidden]
-  // attribute) owns display for viewers.
-  if (showLogBtn) {
-    showLogBtn.style.display    = '';
-    showLogBtn.style.visibility = showLogs ? '' : 'hidden';
-  }
+  // Connect Sensors uses `visibility: hidden` rather than
+  // `display: none` so the slot keeps its width on every tab —
+  // otherwise the tabs visibly shift when switching to Data/Link
+  // and back, and the operator loses their place. Clear any inline
+  // display leftover from earlier setView calls; role-gating (the
+  // [hidden] attribute) owns display for viewers.
   if (connectBtn) {
     connectBtn.style.display    = '';
     connectBtn.style.visibility = showLogs ? '' : 'hidden';
@@ -4152,8 +4130,6 @@ setInterval(refreshFirmwareAvailability, 60_000);
 Object.assign(window, {
   setView,
   startBootstrap,
-  closeBootstrapPanel,
-  toggleBootstrapPanel,
   requestFirmwareUpdate,
   requestReset,
   requestResetAll,
