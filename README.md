@@ -36,10 +36,13 @@ hotspot, dashboard, web app, OTA, SD ring, time-sync, log fan-out
 — applies unchanged.
 
 The protocol stack underneath is **Reality2 (R2)** — an open
-messaging substrate for distributed sentant-based systems. See
-[reality2.ai](https://www.reality2.ai) for the wider project that
-r2-rocker is built on; the R2 specs and reference crates this repo
-vendors live under [`crates/`](crates/) and [`specifications/`](specifications/).
+messaging substrate for systems built from cooperating *digital
+agents* ("sentants" in R2 vocabulary; a sentant is a small piece
+of code that handles one kind of event, like a microservice
+scoped to a single device). See [reality2.ai](https://www.reality2.ai)
+for the wider project that r2-rocker is built on; the R2 specs and
+reference crates this repo vendors live under
+[`crates/`](crates/) and [`specifications/`](specifications/).
 
 ## What you'll find in the box
 
