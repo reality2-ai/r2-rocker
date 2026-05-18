@@ -2424,10 +2424,32 @@ async function openInviteModal() {
     // the authoritative URL for the same-WiFi path. The QR encodes
     // its own `r2://` deeplink + a `?relay=` query (when relay is
     // configured), independent of this.
-    const fixedLocal = inv.url_local.replace(
-      /^http:\/\/[^/]+/,
-      `${location.protocol}//${location.host}`
-    );
+    // The server's `resolve_public_origin` already walks NetworkManager
+    // hotspot creds + route-table lookups to pick a viewer-reachable
+    // IP (e.g. 10.42.0.1). Only override with `location.host` if the
+    // server's answer is loopback / unspecified AND the browser's
+    // own host is something better — otherwise we'd substitute
+    // `localhost` when the operator browses to the dashboard from
+    // the controller laptop itself, which a phone on the hotspot
+    // can't reach.
+    const fixedLocal = (() => {
+      const serverHost = (() => {
+        try { return new URL(inv.url_local).host; } catch { return ''; }
+      })();
+      const isBadHost = (h) => {
+        if (!h) return true;
+        const bare = h.replace(/:\d+$/, '');
+        return bare === 'localhost' || bare === '127.0.0.1'
+            || bare === '0.0.0.0'   || bare === '::1'
+            || bare === '[::1]'     || bare === '[::]';
+      };
+      if (!isBadHost(serverHost)) return inv.url_local;
+      if (isBadHost(location.host)) return inv.url_local;
+      return inv.url_local.replace(
+        /^http:\/\/[^/]+/,
+        `${location.protocol}//${location.host}`
+      );
+    })();
 
     // Stash both QR + URL pairs on a global so the In-room ↔ Anywhere
     // toggle (setInviteMode) can swap them without re-fetching the
