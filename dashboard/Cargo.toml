@@ -33,3 +33,9 @@ base64 = "0.22"
 # CSPRNG for token entropy + r2-trust's RngCore/CryptoRng-requiring
 # constructors. OsRng pulls /dev/urandom on Linux.
 rand = "0.8"
+# Phase 5 / SPEC-R2-ROCKER-ACCESS §5.2: off-network viewer path via
+# the R2 relay (https://relay.reality2.ai/r2). Dashboard speaks the
+# same HELLO+binary protocol that notekeeper's webapp uses; r2-wasm
+# already covers the viewer side.
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = "0.3"

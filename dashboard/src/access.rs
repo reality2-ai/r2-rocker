@@ -269,6 +269,18 @@ impl Access {
         hex::encode(self.tg.verifying_key().to_bytes())
     }
 
+    /// TG public key as raw 32 bytes — used by `relay.rs` to derive
+    /// the trust_group hash for its HELLO.
+    pub fn tg_pk_bytes(&self) -> [u8; 32] {
+        self.tg.verifying_key().to_bytes()
+    }
+
+    /// Clone of the TG signing key — used by `relay.rs` to sign its
+    /// HELLO. Cheap clone (32-byte seed under the hood).
+    pub fn tg_signing_key(&self) -> ed25519_dalek::SigningKey {
+        self.tg.signing_key().clone()
+    }
+
     /// SPEC §4.1 — mint a single-use 5-min-expiring invite token and
     /// build the three representations.
     ///

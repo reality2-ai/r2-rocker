@@ -10,6 +10,7 @@
 //!   Browser --POST /api/bootstrap--> Gateway --BLE--> Sensor discovery
 
 mod access;
+mod relay;
 
 use axum::{
     body::Bytes,
@@ -548,7 +549,7 @@ fn append_timesync_log(addr: SocketAddr, delta_ms: i64, reason: &str, cumulative
 /// in the browser parses the envelope, then hands the inner frame to
 /// `decode_compact_frame()`.
 #[derive(Clone)]
-struct RawFrame {
+pub(crate) struct RawFrame {
     /// Source socket address (e.g. "10.42.0.103:57768"), UTF-8.
     src: String,
     /// Wall-clock arrival time at the controller (ms since epoch).
@@ -649,8 +650,20 @@ async fn main() {
         bootstrap_log: Arc::new(Mutex::new(Vec::new())),
         bootstrap_task: Mutex::new(None),
         firmware_cache: Mutex::new(None),
-        access: access_handle,
+        access: access_handle.clone(),
     });
+
+    // Phase 5 / SPEC-R2-ROCKER-ACCESS §5.2 — off-network viewer path
+    // via the R2 relay. Only spawn when both --relay-url is set AND
+    // the KeyHolder loaded; viewers need both to be useful.
+    if let (Some(url), Some(handle)) = (args.relay_url.clone(), access_handle) {
+        let (sk, pk) = {
+            let a = handle.lock().await;
+            (a.tg_signing_key(), a.tg_pk_bytes())
+        };
+        relay::spawn_relay_session(url.clone(), sk, pk, raw_frame_tx.clone());
+        eprintln!("[relay] session spawned → {url}");
+    }
 
     // Spawn TCP listener for R2-WIRE events
     let event_state = state.clone();
@@ -2807,7 +2820,7 @@ async fn read_err_msg(s: &mut TcpStream) -> Option<String> {
     Some(String::from_utf8_lossy(&msg).into_owned())
 }
 
-fn encode_raw_frame_envelope(rf: &RawFrame) -> Vec<u8> {
+pub(crate) fn encode_raw_frame_envelope(rf: &RawFrame) -> Vec<u8> {
     let src = rf.src.as_bytes();
     let mut out = Vec::with_capacity(2 + src.len() + 4 + 2 + rf.frame.len());
     out.extend_from_slice(&(src.len() as u16).to_be_bytes());
