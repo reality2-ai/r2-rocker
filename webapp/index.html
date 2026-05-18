@@ -860,7 +860,7 @@
       <button class="bootstrap-close" onclick="closeInviteModal()">&times;</button>
     </div>
     <p class="invite-help" id="inviteHelp">
-      On the new device's camera, scan <strong>step 1</strong> to join the hotspot, then <strong>step 2</strong> to open the dashboard. If the phone already knows the WiFi, you can skip straight to step 2 or use the link.
+      Scan the QR with the new device's camera. For <strong>In-room</strong> the device must already be on the dashboard's WiFi; <strong>Anywhere</strong> works on any internet connection.
     </p>
 
     <div id="inviteWifiBlock" hidden>
@@ -2231,15 +2231,9 @@ function setInviteMode(mode) {
     qrImg.src    = _currentInvite.qr_local;
     urlInput.value = _currentInvite.url_local;
     urlLabel.textContent = 'Or copy the link manually:';
-    if (_currentInvite.has_wifi) {
-      wifiBlock.hidden = false;
-      step2Lbl.textContent = 'Step 2: Open the dashboard';
-      help.innerHTML = "On the new device's camera, scan <strong>step 1</strong> to join the hotspot, then <strong>step 2</strong> to open the dashboard. If the phone already knows the WiFi, you can skip straight to step 2 or use the link.";
-    } else {
-      wifiBlock.hidden = true;
-      step2Lbl.textContent = 'Open the dashboard';
-      help.innerHTML = "Scan with the new device's camera while it's on the same WiFi as the dashboard.";
-    }
+    wifiBlock.hidden = true;
+    step2Lbl.textContent = 'Open the dashboard';
+    help.innerHTML = "Make sure the new device is on the dashboard's WiFi first, then scan with its camera.";
     hint.textContent = 'Phone must be on the dashboard’s WiFi. Fastest path; no internet needed.';
     hint.hidden = !_currentInvite.qr_relay;   // hide the hint line entirely when the toggle isn't shown
   }
@@ -2500,21 +2494,13 @@ async function openInviteModal() {
       has_wifi:  !!inv.qr_wifi_data_url,
     };
 
-    // Step-1 WiFi-join QR (present iff the dashboard knows the
-    // hotspot creds — i.e. --wifi-config pointed at a readable
-    // wifi_config.toml). Populated once here; visibility toggles
-    // with mode in setInviteMode.
-    if (inv.qr_wifi_data_url) {
-      document.getElementById('inviteWifiQrImg').src = inv.qr_wifi_data_url;
-      const ssidLabel = document.getElementById('inviteWifiSsidLabel');
-      ssidLabel.textContent = inv.wifi_ssid ? `(${inv.wifi_ssid})` : '';
-      if (inv.wifi_ssid) document.getElementById('inviteWifiSsid').value = inv.wifi_ssid;
-      if (inv.wifi_psk)  {
-        document.getElementById('inviteWifiPsk').value = inv.wifi_psk;
-        document.getElementById('inviteWifiPsk').type = 'password';
-        document.getElementById('inviteWifiPskReveal').textContent = 'Show';
-      }
-    }
+    // Step-1 WiFi-join QR is intentionally suppressed in v0.1 — the
+    // default NetworkManager PSK is too long to type by hand and
+    // we'd rather not paint it on a publicly-visible screen. In-room
+    // pairing assumes the operator can hand the WiFi creds over in
+    // person (sticker on the rig, room sign, spoken aloud); the
+    // Anywhere relay path bypasses WiFi entirely.
+    _currentInvite.has_wifi = false;
 
     // Show the In-room ↔ Anywhere switch only when the dashboard
     // actually has a relay configured. Without it, "Anywhere" has
