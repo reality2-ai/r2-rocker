@@ -114,6 +114,49 @@ cloud-app:
   `firmware/esp32-s3/<carrier>/releases/` on its local disk and
   the rig keeps running.
 
+## What it looks like
+
+The operator-facing surface is a single web page served by the
+controller. Three tabs cover everything routine:
+
+**Live** — real-time accelerometer charts, one card per sensor,
+plus the run-control buttons (Start → Mark → Stop). The "test"
+run name field at the top right is what each capture file is
+named after; the date prefix is added automatically:
+
+![Live tab during a rocking-motion run](docs/screenshots/dashboard-live.png)
+
+**Run control flow.** Pressing **Start** sends a sync-pulse round
+to every sensor and puts the fleet into calibration. Sensors
+sample for ~2 seconds at rest to learn their per-axis offset; the
+state indicator turns amber:
+
+![Calibrating state](docs/screenshots/dashboard-calibrating.png)
+
+Then **Mark** locks the offset, opens the named CSV file on every
+sensor's SD card, and starts writing calibrated rows. The Live
+chart now shows the offset-subtracted signal — exactly what's
+landing on disk:
+
+![Recording state](docs/screenshots/dashboard-recording.png)
+
+**Devices** — fleet status. Real-vs-simulated ADXL355, firmware
+version, last-seen, battery cell voltage. Per-card *Update Firmware*
+and *Reset Sensor* buttons; their fleet-wide equivalents sit above
+the cards:
+
+![Devices tab — fleet status](docs/screenshots/dashboard-devices.png)
+
+**Data** — every capture file from every sensor, with per-file
+download (📥), per-file delete (🗑), per-sensor delete-all, plus the
+fleet-wide "Download merged CSV" that produces a single
+wide-format file with one column-triple per sensor (see
+`SPEC-R2-ROCKER-CAPTURE` §7.3):
+
+![Data tab — captures across the fleet](docs/screenshots/dashboard-data.png)
+
+---
+
 ## Reference hardware
 
 You need:
