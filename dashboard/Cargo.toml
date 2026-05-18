@@ -22,3 +22,14 @@ ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["all
 hex = "0.4"
 # Phase 9-light: SHA-256 over the firmware blob for the OTA preamble.
 sha2 = "0.10"
+# Phase 5 (SPEC-R2-ROCKER-ACCESS): trust-group membership + cert issuance
+# for the QR / link viewer-enrolment flow.
+r2-trust = { path = "../crates/r2-trust" }
+# QR codes for the invite modal — PNG output, base64-embedded in the
+# JSON response so the webapp can <img src="data:image/png;base64,...">.
+qrcode = { version = "0.14", default-features = false, features = ["image"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+base64 = "0.22"
+# CSPRNG for token entropy + r2-trust's RngCore/CryptoRng-requiring
+# constructors. OsRng pulls /dev/urandom on Linux.
+rand = "0.8"

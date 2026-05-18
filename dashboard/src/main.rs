@@ -9,6 +9,8 @@
 //!   Browser --WebSocket--> Gateway --TCP--> Sensor (commands)
 //!   Browser --POST /api/bootstrap--> Gateway --BLE--> Sensor discovery
 
+mod access;
+
 use axum::{
     body::Bytes,
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
@@ -167,6 +169,12 @@ struct Args {
     /// Bind address
     #[arg(long, default_value = "0.0.0.0")]
     bind: String,
+
+    /// Phase 5 / SPEC-R2-ROCKER-ACCESS §3.4 — optional R2 relay URL
+    /// embedded in invite tokens for off-network viewer enrolment.
+    /// When unset, only the same-WiFi enrolment path is advertised.
+    #[arg(long)]
+    relay_url: Option<String>,
 }
 
 /// Build-stamped version string. Reported via /api/version, the startup
@@ -562,6 +570,11 @@ struct AppState {
     /// Refreshed lazily by `firmware_available_handler` when older
     /// than `FIRMWARE_CACHE_TTL_SECS`.
     firmware_cache: Mutex<Option<FirmwareAvailable>>,
+    /// Phase 5 — SPEC-R2-ROCKER-ACCESS state: TrustGroup, invite
+    /// tokens, member side-cache. `None` when the operator hasn't
+    /// generated a KeyHolder key yet; the /api/access/* routes
+    /// return 503 in that case so the dashboard still boots.
+    access: Option<access::AccessHandle>,
 }
 
 const FIRMWARE_CACHE_TTL_SECS: u64 = 300;
@@ -599,6 +612,15 @@ async fn main() {
     let (event_tx, _) = broadcast::channel::<DashboardEvent>(256);
     let (raw_frame_tx, _) = broadcast::channel::<RawFrame>(1024);
     let (ws_broadcast_tx, _) = broadcast::channel::<String>(256);
+
+    // Phase 5: try to load the KeyHolder signing key. A successful load
+    // unlocks /api/access/*; a failure logs + leaves Access disabled.
+    // local_origin is what we'll embed in `url_local` per
+    // SPEC-R2-ROCKER-ACCESS §4.1 step 4 — same host:port the webapp is
+    // served on.
+    let local_origin = format!("http://{}:{}", args.bind, args.http_port);
+    let access_handle = access::maybe_load(local_origin, args.relay_url.clone()).await;
+
     let state = Arc::new(AppState {
         event_tx: event_tx.clone(),
         raw_frame_tx: raw_frame_tx.clone(),
@@ -608,6 +630,7 @@ async fn main() {
         bootstrap_log: Arc::new(Mutex::new(Vec::new())),
         bootstrap_task: Mutex::new(None),
         firmware_cache: Mutex::new(None),
+        access: access_handle,
     });
 
     // Spawn TCP listener for R2-WIRE events
@@ -640,6 +663,16 @@ async fn main() {
         .route("/ws/logs/{addr}", get(ws_logs_handler))
         // Phase 5d: TG public key + KeyHolder enrolment endpoints.
         .route("/api/keyholder/tg-pub", get(tg_pub_handler))
+        // SPEC-R2-ROCKER-ACCESS §4 — viewer enrolment lifecycle.
+        // KeyHolder-only routes (invite, members, revoke) are gated by
+        // a localhost check in v0.1 per §11.1 (2); claim is public
+        // because the token IS the auth.
+        .route("/api/access/invite", post(access_invite_handler))
+        .route("/api/access/claim", post(access_claim_handler))
+        .route("/api/access/members", get(access_members_handler))
+        .route("/api/access/revoke/{device_pk}", post(access_revoke_handler))
+        // Legacy stubs from before the ACCESS spec landed — still
+        // marked DEPRECATED in SPEC-R2-ROCKER-DASHBOARD §5.1.
         .route("/api/enrol-init", post(enrol_init_handler))
         .route("/api/enrol-complete", post(enrol_complete_handler))
         .route("/api/bootstrap", post(bootstrap_handler))
@@ -707,7 +740,16 @@ async fn main() {
             eprintln!("Is another r2-dashboard already running? Kill it first: pkill r2-dashboard");
             std::process::exit(1);
         });
-    axum::serve(listener, app).await.unwrap();
+    // ConnectInfo<SocketAddr> is required by the /api/access/* handlers
+    // (KeyHolder gating is a localhost-only check in v0.1 per
+    // SPEC-R2-ROCKER-ACCESS §11.1). Without `with_connect_info`, axum
+    // panics when those handlers try to extract.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .unwrap();
 }
 
 /// POST /api/bootstrap — trigger sensor bootstrap (re-pressing cancels and restarts)
@@ -2776,6 +2818,193 @@ async fn tg_pub_handler() -> impl IntoResponse {
         "tg_public_key_len": 32,
     }))
     .into_response()
+}
+
+// ── SPEC-R2-ROCKER-ACCESS handlers ────────────────────────────────────
+//
+// All four routes share one helper that fetches the AccessHandle from
+// state. The handlers themselves are small — the heavy lifting lives in
+// `access.rs` (TrustGroup wrangling, token table, QR rendering).
+
+/// Returns the `AccessHandle` or a 503 response describing why Access
+/// is offline.
+async fn require_access(state: &Arc<AppState>) -> std::result::Result<
+    access::AccessHandle,
+    axum::response::Response,
+> {
+    match state.access.as_ref() {
+        Some(h) => Ok(h.clone()),
+        None => Err((
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "Access is not configured on this dashboard.",
+                "hint": "Run tools/r2-rocker-tg keygen to generate tg_priv.bin under ~/.config/r2-rocker/tg_signer/, then restart.",
+            })),
+        ).into_response()),
+    }
+}
+
+/// KeyHolder gate for v0.1 per SPEC-R2-ROCKER-ACCESS §11.1 (2): only
+/// the controller's own browser may invite, list, or revoke. The check
+/// is "the request came in over a loopback address." A cert-handshake
+/// gate replaces this in v1.
+fn is_keyholder(connect: SocketAddr) -> bool {
+    connect.ip().is_loopback()
+}
+
+async fn access_invite_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
+) -> impl IntoResponse {
+    let handle = match require_access(&state).await {
+        Ok(h) => h,
+        Err(r) => return r,
+    };
+    if !is_keyholder(addr) {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "only the KeyHolder (localhost) may issue invitations in v0.1",
+            })),
+        ).into_response();
+    }
+    let mut access = handle.lock().await;
+    match access.mint_invite() {
+        Ok(env) => (axum::http::StatusCode::OK, Json(serde_json::to_value(&env).unwrap_or_default())).into_response(),
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("mint_invite: {e:#}")})),
+        ).into_response(),
+    }
+}
+
+async fn access_claim_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<access::ClaimRequest>,
+) -> impl IntoResponse {
+    let handle = match require_access(&state).await {
+        Ok(h) => h,
+        Err(r) => return r,
+    };
+    let device_pk_for_broadcast = body.device_pk.clone();
+    let device_name_for_broadcast = body.device_name.clone();
+    let outcome = {
+        let mut access = handle.lock().await;
+        access.process_claim(&body)
+    };
+    use access::ClaimOutcome::*;
+    match outcome {
+        Success(resp) => {
+            // §4.2 step 8: broadcast member_added on /ws/status so
+            // every connected member can refresh its Access tab.
+            let _ = state.ws_broadcast_tx.send(serde_json::json!({
+                "type": "access",
+                "event": "member_added",
+                "device_pk": device_pk_for_broadcast,
+                "name": device_name_for_broadcast,
+                "role": "viewer",
+                "paired_at_ms": resp.get("paired_at_ms"),
+            }).to_string());
+            (axum::http::StatusCode::OK, Json(resp)).into_response()
+        }
+        BadRequest(msg) => (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": msg})),
+        ).into_response(),
+        BadRequestBoxed(msg) => (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": msg})),
+        ).into_response(),
+        NotFound => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "no such invitation (wrong TG, wrong token, or never issued)"})),
+        ).into_response(),
+        Conflict => (
+            axum::http::StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "invitation already claimed by a different device"})),
+        ).into_response(),
+        Gone => (
+            axum::http::StatusCode::GONE,
+            Json(serde_json::json!({"error": "invitation expired — ask the operator to issue a fresh one"})),
+        ).into_response(),
+    }
+}
+
+async fn access_members_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
+) -> impl IntoResponse {
+    let handle = match require_access(&state).await {
+        Ok(h) => h,
+        Err(r) => return r,
+    };
+    if !is_keyholder(addr) {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "only the KeyHolder (localhost) may list members in v0.1"})),
+        ).into_response();
+    }
+    let access = handle.lock().await;
+    let rows = access.members();
+    (axum::http::StatusCode::OK, Json(serde_json::json!({"members": rows}))).into_response()
+}
+
+async fn access_revoke_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
+    Path(device_pk): Path<String>,
+) -> impl IntoResponse {
+    let handle = match require_access(&state).await {
+        Ok(h) => h,
+        Err(r) => return r,
+    };
+    if !is_keyholder(addr) {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "only the KeyHolder (localhost) may revoke members in v0.1"})),
+        ).into_response();
+    }
+    let outcome = {
+        let mut access = handle.lock().await;
+        access.revoke(&device_pk)
+    };
+    use access::RevokeOutcome::*;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    match outcome {
+        Revoked(pk) => {
+            // §7.2 — broadcast on /ws/status so any currently-connected
+            // viewer can react. §7.4 server-side TCP teardown for the
+            // revoked peer's connections is implementation-side work
+            // that lands with the v1 cert-handshake variant; for v0.1
+            // the broadcast + future-connection-rejection is the
+            // operative guarantee.
+            let _ = state.ws_broadcast_tx.send(serde_json::json!({
+                "type": "access",
+                "event": "revoked",
+                "device_pk": hex::encode(&pk[..]),
+                "revoked_at_ms": now_ms,
+            }).to_string());
+            (axum::http::StatusCode::OK, Json(serde_json::json!({
+                "ok": true,
+                "revoked_at_ms": now_ms,
+            }))).into_response()
+        }
+        NotFound => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "no such member (already revoked, or never paired)"})),
+        ).into_response(),
+        BadRequest => (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "device_pk must be 64 hex chars"})),
+        ).into_response(),
+        Other(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        ).into_response(),
+    }
 }
 
 /// `/api/enrol-init` — KeyHolder generates a one-time join token.
