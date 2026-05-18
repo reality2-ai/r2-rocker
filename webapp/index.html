@@ -3116,6 +3116,20 @@ async function accessGate() {
   if (relayUrl) {
     isControllerRole = false;
     applyRoleVisibility();
+    // If a fresh `?join=` is present along with the relay URL, the
+    // operator is explicitly re-inviting this device — wipe any
+    // stale cert from a previous pairing and run the request flow
+    // again. Without this, a phone that was paired once before sees
+    // the full dashboard with empty charts because the relay HELLO
+    // succeeds but the cert is for a different / stale state.
+    if (joinParam && await loadExistingIdentity()) {
+      console.log('[access] fresh ?join= with stale cert — re-pairing');
+      await forgetViewerIdentity();
+      viewerIdentity = null;
+      viewerIdentityPkHex = null;
+      renderNotEnrolledLanding('This device is re-pairing because the operator issued a fresh invite link.');
+      return false;
+    }
     if (await loadExistingIdentity()) {
       return true;
     }
