@@ -2,6 +2,8 @@
 
 A wireless sensor system for monitoring a tyre-testing rig.
 
+![r2-rocker dashboard — Live tab during a two-sensor rocking-motion run](docs/screenshots/dashboard-live.png)
+
 ## What this does, in one paragraph
 
 There's a half-tonne machine in a lab that studies how tyre rubber
