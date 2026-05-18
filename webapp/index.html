@@ -952,7 +952,15 @@
   </div>
 </div>
 
-<!-- Bootstrap log panel (between graphs and event log) -->
+<!-- Events -->
+<div class="log-row" id="eventLogRow">
+  <div class="card log-card">
+    <h2>Events</h2>
+    <div class="log-entries" id="logEntries"></div>
+  </div>
+</div>
+
+<!-- Connections panel (between graphs and the events feed) -->
 <div class="bootstrap-panel" id="bootstrap-panel">
   <div class="bootstrap-log-card">
     <div class="bootstrap-log-header">
@@ -960,14 +968,6 @@
       <button class="bootstrap-close" onclick="closeBootstrapPanel()">&times;</button>
     </div>
     <div class="bootstrap-log-entries" id="bootstrap-log"></div>
-  </div>
-</div>
-
-<!-- Events -->
-<div class="log-row" id="eventLogRow">
-  <div class="card log-card">
-    <h2>Events</h2>
-    <div class="log-entries" id="logEntries"></div>
   </div>
 </div>
 
