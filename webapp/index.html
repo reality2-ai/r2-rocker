@@ -1649,6 +1649,13 @@ const STALE_MS    = 4_000;
 const OFFLINE_MS  = 6_000;
 
 function setView(name) {
+  // Viewer-role guard: if the operator-only Link tab is hidden,
+  // any stray setView('link') call (history nav, hash links, etc.)
+  // falls back to Live.
+  if (name === 'link') {
+    const btn = document.getElementById('viewLink');
+    if (btn && btn.hidden) name = 'live';
+  }
   currentView = name;
   // Toggle the `hidden` attribute (CSS hook) AND set inline `display` so we
   // win against any cached/legacy CSS that beats the [hidden] selector — past
@@ -2630,8 +2637,11 @@ function applyRoleVisibility() {
     'captureStartBtn',       // Run-control Start
     'captureMarkBtn',        // Run-control Mark
     'captureStopBtn',        // Run-control Stop
-    'dataDeleteAllBtn',      // Data — Delete all across fleet
-    'linkInviteBtn',         // Link — Grant access (already gated, double-up is fine)
+    'dataDeleteAllBtn',      // Data — Delete all across devices
+    'viewLink',              // Whole Link tab — viewers don't need
+                             //   to see who else is paired.
+    'linkInviteBtn',         // Link — Grant access (defensive,
+                             //   the tab itself is hidden too)
   ];
   for (const id of controllerOnlyIds) {
     const el = document.getElementById(id);
