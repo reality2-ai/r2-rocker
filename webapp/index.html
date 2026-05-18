@@ -961,7 +961,7 @@
 </div>
 
 <!-- Event log -->
-<div class="log-row">
+<div class="log-row" id="eventLogRow">
   <div class="card log-card">
     <h2>Event Log</h2>
     <div class="log-entries" id="logEntries"></div>
@@ -1979,6 +1979,26 @@ function setView(name) {
   if (name === 'devices') renderDevices();
   if (name === 'data')    renderDataView();
   if (name === 'link')    loadLinkMembers();
+
+  // Connection Log + Event Log are only meaningful on Live / Devices
+  // (sensor activity feeds). Hide them on Data / Link to give those
+  // tabs the full content area. The Connect Sensors + 📝 Log buttons
+  // also go away in those modes — they don't apply.
+  //
+  // Note: role gating (applyRoleVisibility) is the source of truth
+  // for whether viewers see Connect Sensors at all — we only ever
+  // *hide* it here, never unhide. On Live/Devices we call
+  // applyRoleVisibility() to restore the role-correct state.
+  const showLogs = (name === 'live' || name === 'devices');
+  const bootstrapPanel = document.getElementById('bootstrap-panel');
+  const eventLogRow    = document.getElementById('eventLogRow');
+  const connectBtn     = document.getElementById('btn-connect');
+  const showLogBtn     = document.getElementById('btn-show-log');
+  if (bootstrapPanel) bootstrapPanel.style.display = showLogs ? '' : 'none';
+  if (eventLogRow)    eventLogRow.style.display    = showLogs ? '' : 'none';
+  if (showLogBtn)     showLogBtn.style.display     = showLogs ? '' : 'none';
+  if (!showLogs && connectBtn) connectBtn.style.display = 'none';
+  if (showLogs) applyRoleVisibility();
 }
 
 // ── Data tab plumbing ────────────────────────────────────────────
