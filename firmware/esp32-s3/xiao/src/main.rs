@@ -9,6 +9,7 @@
 //!   4. On a valid offer: persist creds to NVS and reboot to apply.
 
 mod adxl355;
+mod battery;
 mod capture;
 mod clock;
 mod identity;
@@ -325,13 +326,18 @@ fn run(
                     sd::MOUNT_POINT,
                     current_recording_for_sender,
                 ));
+                // XIAO has no battery-sense divider allocated in its
+                // wiring spec yet (HARDWARE-WIRING-XIAO.md). Until that
+                // ships, the battery feed comes from BatterySim — same
+                // wire-event shape, simulated numbers.
+                let battery = battery::Battery::sim_only();
                 led_for_sender.set(if adxl.is_some() {
                     led::LedState::StreamingLive
                 } else {
                     led::LedState::StreamingDegradedSim
                 });
                 let mut s = sender::Sender::new(
-                    gateway, hostname, id_for_sender, led_for_sender, adxl, clock_for_sender, ring, capture,
+                    gateway, hostname, id_for_sender, led_for_sender, adxl, clock_for_sender, ring, capture, battery,
                 );
                 s.run();
             })

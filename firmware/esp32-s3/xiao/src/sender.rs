@@ -26,7 +26,7 @@ use crate::clock::Clock;
 use crate::identity::Identity;
 use crate::led::LedHandle;
 use crate::ring::Ring;
-use crate::sim::{AccelSim, BatterySim};
+use crate::sim::AccelSim;
 use crate::wire::{
     decode_compact_frame, frame_for_tcp, parse_capture_mark, parse_dash_ack_through_seq,
     parse_set_clock_offset, parse_sync_pulse_req_id,
@@ -78,7 +78,11 @@ pub struct Sender {
     /// Fallback / always-available simulator. Used when `adxl` is None
     /// OR when an individual sample read errors (logged + skipped).
     accel_sim: AccelSim,
-    battery: BatterySim,
+    /// Battery telemetry — ADC reader for boards with the voltage
+    /// divider fitted, simulator fallback otherwise. The picker lives
+    /// inside `Battery::sample` so the sender doesn't care which
+    /// source is driving any given reading.
+    battery: crate::battery::Battery,
     /// Per-device Ed25519 identity, NVS-persisted (Phase 5a).
     identity: Arc<Identity>,
     /// Read-only handle to the current LED FSM state. Sent on the
@@ -126,6 +130,7 @@ impl Sender {
         clock: Arc<Clock>,
         ring: Option<Ring>,
         capture: Option<crate::capture::CaptureMgr>,
+        battery: crate::battery::Battery,
     ) -> Self {
         let fw_ver = build_fw_ver(adxl.is_some());
         Self {
@@ -133,7 +138,7 @@ impl Sender {
             hostname,
             adxl,
             accel_sim: AccelSim::rocker_default(),
-            battery: BatterySim::lipo_default(),
+            battery,
             identity,
             led,
             clock,
@@ -627,9 +632,10 @@ impl Sender {
         Ok(())
     }
 
-    fn send_battery(&self, stream: &mut TcpStream) -> Result<()> {
-        let t_s = self.boot_instant.elapsed().as_secs_f32();
-        let (mv, pct) = self.battery.sample(t_s);
+    fn send_battery(&mut self, stream: &mut TcpStream) -> Result<()> {
+        // Real ADC read on boards with the divider fitted; otherwise
+        // BatterySim falls back internally — see `battery::Battery`.
+        let (mv, pct) = self.battery.sample();
 
         // LOW_BATTERY overlay (orange slow pulse) per SPEC §4.1 / §8.4.
         // Threshold 3300 mV; cleared at ≥3400 mV (hysteresis). The flag

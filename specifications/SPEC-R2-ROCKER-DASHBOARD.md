@@ -325,12 +325,12 @@ whichever occurs first (per WIRE §4.1).
 | `/api/ota` | POST `{pk, url, sha256}` | Trigger OTA (§13) |
 | `/api/reset/:pk` | POST `{factory: bool}` | Forward to sensor |
 | `/api/capture/start` | POST `{}` | Issue an immediate sync_pulse round (per SPEC-R2-ROCKER-CAPTURE §7.1), then fan out `r2.dash.capture.start` to every connected peer. |
-| `/api/capture/mark` | POST `{name: str}` | Fan out `r2.dash.capture.mark` to every connected peer with the dashboard's chosen `ts_ms` (one value, shared across the fleet so filenames match). |
+| `/api/capture/mark` | POST `{name: str, prefix?: str}` | Fan out `r2.dash.capture.mark` to every connected peer with the dashboard's chosen `ts_ms` plus the webapp-supplied local-time filename `prefix` (charset `[0-9_-]`, ≤ 32 bytes). One pair, shared across the fleet so filenames match. |
 | `/api/capture/stop` | POST `{}` | Fan out `r2.dash.capture.stop`. |
 | `/api/data/{addr}/list` | GET | Open a TCP connection to `<addr>:21047` and issue `LIST`. Returns a JSON-mapped CBOR response of `[{name, size, mtime}]`. |
-| `/api/data/{addr}/file/{name}` | GET, DELETE | `GET` opens TCP 21047 and proxies the file bytes through. `DELETE` issues `DEL`. |
+| `/api/data/{addr}/file/{name}` | GET, DELETE | `GET` opens TCP 21047, prepends a `seq,ts_ms,x,y,z\n` header, and streams the raw fixed-width rows. `DELETE` issues `DEL`. |
 | `/api/data/{addr}/all` | DELETE | `DEL_ALL` against the named sensor. |
-| `/api/data/merged` | GET `?file=<basename>` | Heap-merges the same-named capture from every connected sensor into a single long-format CSV (`ts_ms, sensor, x, y, z` ascending). |
+| `/api/data/merged` | GET `?file=<basename>` | Wide-format merge across the fleet: header is `ts_ms` followed by three columns per sensor (`<ip>_x, <ip>_y, <ip>_z`, IP dots → underscores, sensors in sorted-IP order). One row per unique `ts_ms`, ascending; cells are blank where that sensor has no sample at that `ts_ms`. |
 | `/ws/raw` | WebSocket | **Binary** R2-WIRE frames forwarded verbatim from sensors (canonical Phase-5d transport) |
 | `/ws/status` | WebSocket | **Text JSON** status events: bootstrap progress, hotspot up/down, server-side errors |
 

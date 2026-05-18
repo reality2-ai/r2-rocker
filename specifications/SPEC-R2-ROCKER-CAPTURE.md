@@ -117,7 +117,7 @@ integer-key + smallest-encoding convention from R2-WIRE / R2-CBOR.
 | Event name | Hash (FNV-1a-32) | Direction | Payload |
 |---|---|---|---|
 | `r2.dash.capture.start` | computed at compile time | dash → sensor | `{}` (empty CBOR map) |
-| `r2.dash.capture.mark`  | computed at compile time | dash → sensor | `{0: i64 ts_ms, 1: str name}` |
+| `r2.dash.capture.mark`  | computed at compile time | dash → sensor | `{0: i64 ts_ms, 1: str name, 2: str prefix?}` (key 2 optional) |
 | `r2.dash.capture.stop`  | computed at compile time | dash → sensor | `{}` |
 | `r2.sensor.capture.state` | computed at compile time | sensor → dash | `{0: u8 state, 1: str file_opt}` where `state ∈ {0=idle, 1=calibrating, 2=recording}` and `file` is the open filename when `state=2`, omitted otherwise |
 
@@ -137,6 +137,17 @@ The `ts_ms` field is supplied by the dashboard so every sensor in
 the fleet builds the **same** filename. Sensors **MUST NOT**
 substitute their local clock at file-open time.
 
+The optional `prefix` field carries a pre-formatted local-time stem
+(typically `YYYY-MM-DD_HH-MM-SS`) used as the date portion of the
+filename in place of the zero-padded `ts_ms`. The dashboard's
+webapp formats this from the operator's browser timezone so the
+file on disk is human-dated in local time instead of UTC epoch ms.
+The `prefix` charset is restricted to `[0-9_-]` (length 1..32);
+sensors **MUST** refuse a Mark whose prefix violates the charset
+(same handling as `CAPTURE_BAD_NAME`). When `prefix` is absent,
+sensors **MUST** fall back to the legacy `<ts16>` convention so
+older dashboards continue to work.
+
 ---
 
 ## 4. Filesystem layout
@@ -154,11 +165,18 @@ Capture files live under a sub-directory of the SD mount root:
    └─ …
 ```
 
-Filename convention: `<ts16>-<name>.csv` where `<ts16>` is the
-dashboard-supplied `ts_ms` rendered as a **16-digit zero-padded
-decimal** (i64 range fits in 19 digits but realistic epoch-millis
-values fit in 13; 16 chosen for forward-compatibility and stable
-lexical sort). `<name>` is the validated run name.
+Filename convention: `<prefix>-<name>.csv` where `<prefix>` is one of:
+
+* **local-time stem** (preferred) — `YYYY-MM-DD_HH-MM-SS` carried in
+  payload key 2 of `r2.dash.capture.mark` (§3). Example:
+  `2026-05-18_13-35-00-run-01-asphaltA.csv`. Human-readable in the
+  operator's timezone; lex-sortable for that timezone's wall clock.
+* **`<ts16>`** (fallback) — the dashboard-supplied `ts_ms` rendered
+  as a **16-digit zero-padded decimal**. Used when the dashboard
+  omits key 2 (older builds, or no browser to source the local-time
+  stem). Lex-sortable as UTC epoch ms.
+
+`<name>` is the validated run name in both cases.
 
 This filename is **longer than 8.3** and therefore requires FATFS
 Long-Filename support to be enabled in the firmware build. ESP-IDF
@@ -329,13 +347,13 @@ Per SPEC-R2-ROCKER-DASHBOARD §5.1 (this spec adds):
 | Route | Method | Body | Purpose |
 |---|---|---|---|
 | `/api/capture/start` | POST | `{}` | Fan out sync_pulse + `r2.dash.capture.start` |
-| `/api/capture/mark`  | POST | `{name: str}` | Fan out `r2.dash.capture.mark` with the dashboard's chosen `ts_ms` |
+| `/api/capture/mark`  | POST | `{name: str, prefix?: str}` | Fan out `r2.dash.capture.mark` with the dashboard's chosen `ts_ms` and (when supplied) the webapp's local-time filename `prefix` |
 | `/api/capture/stop`  | POST | `{}` | Fan out `r2.dash.capture.stop` |
 | `/api/data/{addr}/list` | GET | — | `data_tcp` `LIST` to one sensor; returns the JSON-mapped CBOR response. |
-| `/api/data/{addr}/file/{name}` | GET | — | `data_tcp` `GET`; streams the raw bytes back. |
+| `/api/data/{addr}/file/{name}` | GET | — | `data_tcp` `GET`; prepends a `seq,ts_ms,x,y,z\n` header line then streams the raw fixed-width rows. The on-disk file itself has no header — the dashboard splices it on for the browser download so a spreadsheet reader sees column titles. |
 | `/api/data/{addr}/file/{name}` | DELETE | — | `data_tcp` `DEL`. |
 | `/api/data/{addr}/all` | DELETE | — | `data_tcp` `DEL_ALL`. |
-| `/api/data/merged` | GET `?file=<basename>` | — | Heap-merges the named capture file from every connected sensor into a single long-format CSV (`ts_ms, sensor, x, y, z` ascending by `ts_ms`). |
+| `/api/data/merged` | GET `?file=<basename>` | — | Wide-format merge of the named capture from every connected sensor. The header is `ts_ms` followed by three columns per sensor (`<ip>_x, <ip>_y, <ip>_z`, IP dots → underscores, sensors in sorted-IP order). One row per unique `ts_ms` across the fleet, ascending. Cells are **blank** where that sensor has no sample at that `ts_ms` — coincident timestamps fill both sensors' columns; offsets-by-jitter (typically 1–3 ms apart in practice) produce single-sensor rows. |
 
 The per-sensor zip route mooted in earlier drafts is deferred —
 operators wanting all files from one sensor can iterate `LIST`

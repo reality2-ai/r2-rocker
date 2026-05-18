@@ -648,6 +648,36 @@ ADC calibration via esp-idf's two-point calibration scheme is REQUIRED
 to remove the ADC's manufacturing offset (`esp_adc_cal_characterize` or
 `adc_cali_create_scheme_*`).
 
+#### 8.1.1 Plausibility / variance fallback
+
+The 16-sample reading SHALL be subjected to two gates before being
+trusted:
+
+* **Plausibility window** — scaled cell voltage MUST fall within
+  `[2500, 4500] mV`. A single-cell LiPo cannot operate outside this
+  band; a value outside the window means either no divider is fitted
+  for this build (floating ADC pin) or the divider has a broken
+  connection.
+* **Variance threshold** — the spread (`max − min`) across the 16
+  samples within one reading MUST be ≤ `100 mV` in calibrated mV.
+  Wider spreads indicate the ADC sample-and-hold did not acquire the
+  source within its sample window — typically a high-impedance
+  divider with the bypass cap missing (see
+  `HARDWARE-WIRING-DEVKITC.md` §4.2).
+
+When either gate fails on the FIRST reading of a boot, the
+implementation MUST emit a warn-level log line explaining the failure
+mode and FALL BACK to the configured `BatterySim` (§8.3 curve still
+applies) for that boot. Once a real reading has passed both gates, the
+implementation MAY trust subsequent reads without re-gating (single
+sample-noise spikes shouldn't flap LED state between sim drift and
+live cell voltage). The decision latches per-boot.
+
+The fallback exists so that a single firmware binary can run
+correctly across the mix of boards an operator typically has on the
+bench: some fitted with a working divider, some without, some in
+intermediate states of bring-up.
+
 ### 8.2 Voltage reconstruction
 
 Cell voltage in millivolts:

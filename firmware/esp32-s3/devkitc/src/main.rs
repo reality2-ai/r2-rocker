@@ -9,6 +9,7 @@
 //!   4. On a valid offer: persist creds to NVS and reboot to apply.
 
 mod adxl355;
+mod battery;
 mod capture;
 mod clock;
 mod identity;
@@ -81,6 +82,10 @@ fn main() -> Result<()> {
     // HARDWARE-WIRING-DEVKITC.md §3.2. The SD breakout sits on the
     // same MISO/MOSI/SCK lines as the ADXL355; only the CS differs.
     let cs_sd   = peripherals.pins.gpio9.downgrade();
+    // Battery-sense divider mid-point on ADC1_CH3 (GPIO 4). Per
+    // HARDWARE-WIRING-DEVKITC.md §4.2 / SPEC-R2-ROCKER-SENSOR §8.
+    let adc1    = peripherals.adc1;
+    let bat_pin = peripherals.pins.gpio4;
 
     // Top-level error trap — anything below sets the LED red long
     // enough for the operator to see, then resets the chip. The
@@ -88,7 +93,7 @@ fn main() -> Result<()> {
     // point: a buggy new image whose sender never reaches its first
     // successful frame round-trip never marks itself valid, and the
     // next reset rolls back to the previous slot.
-    if let Err(e) = run(led_handle.clone(), modem, sysloop, nvs, spi2, sclk, mosi, miso, cs_adxl, cs_sd) {
+    if let Err(e) = run(led_handle.clone(), modem, sysloop, nvs, spi2, sclk, mosi, miso, cs_adxl, cs_sd, adc1, bat_pin) {
         error!("[FATAL] init/runtime error: {e:?}");
         led_handle.set(led::LedState::Error);
         FreeRtos::delay_ms(10_000);
@@ -112,6 +117,8 @@ fn run(
     miso: esp_idf_svc::hal::gpio::AnyIOPin,
     cs_adxl: esp_idf_svc::hal::gpio::AnyIOPin,
     cs_sd:   esp_idf_svc::hal::gpio::AnyIOPin,
+    adc1:    esp_idf_svc::hal::adc::ADC1,
+    bat_pin: esp_idf_svc::hal::gpio::Gpio4,
 ) -> Result<()> {
     // ── Identity (§3.1) — Ed25519 keypair, persisted to NVS. ──────────
     let identity = std::sync::Arc::new(
@@ -339,13 +346,18 @@ fn run(
                     sd::MOUNT_POINT,
                     current_recording_for_sender,
                 ));
+                // Real battery reader on ADC1_CH3 (GPIO 4). Falls back
+                // internally to BatterySim if the ADC init fails, so
+                // boards without the voltage divider fitted still emit
+                // sensible telemetry while we retrofit them.
+                let battery = battery::Battery::new(adc1, bat_pin);
                 led_for_sender.set(if adxl.is_some() {
                     led::LedState::StreamingLive
                 } else {
                     led::LedState::StreamingDegradedSim
                 });
                 let mut s = sender::Sender::new(
-                    gateway, hostname, id_for_sender, led_for_sender, adxl, clock_for_sender, ring, capture,
+                    gateway, hostname, id_for_sender, led_for_sender, adxl, clock_for_sender, ring, capture, battery,
                 );
                 s.run();
             })

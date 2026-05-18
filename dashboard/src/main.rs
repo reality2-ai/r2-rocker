@@ -2510,13 +2510,23 @@ async fn data_get_handler(Path((addr, name)): Path<(String, String)>) -> impl In
     if s.read_exact(&mut body).await.is_err() {
         return (axum::http::StatusCode::BAD_GATEWAY, "read body".to_string()).into_response();
     }
+    // Prepend a CSV header — the on-SD file is raw fixed-width rows
+    // (SPEC-R2-ROCKER-SENSOR §6.2) so the firmware doesn't have to do
+    // any extra work per capture, but a spreadsheet reader expects
+    // column titles. We splice the header here so the user-facing
+    // download is self-describing without changing the on-disk shape.
+    const HEADER: &[u8] = b"seq,ts_ms,x,y,z\n";
+    let mut out = Vec::with_capacity(HEADER.len() + body.len());
+    out.extend_from_slice(HEADER);
+    out.extend_from_slice(&body);
+
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(axum::http::header::CONTENT_TYPE, "text/csv".parse().unwrap());
     headers.insert(
         axum::http::header::CONTENT_DISPOSITION,
         format!("attachment; filename=\"{}\"", name).parse().unwrap(),
     );
-    (axum::http::StatusCode::OK, headers, body).into_response()
+    (axum::http::StatusCode::OK, headers, out).into_response()
 }
 
 /// `DELETE /api/data/{addr}/file/{name}` — proxy a DEL opcode.
@@ -2567,9 +2577,12 @@ async fn data_delete_all_handler(Path(addr): Path<String>) -> impl IntoResponse 
     (axum::http::StatusCode::OK, Json(serde_json::json!({"ok": true, "deleted": count}))).into_response()
 }
 
-/// `GET /api/data/merged?file=<basename>` — fetch the named file
-/// from every connected peer and emit a long-format CSV
-/// (`ts_ms, sensor, x, y, z`) sorted ascending by `ts_ms`.
+/// `GET /api/data/merged?file=<basename>` — fetch the named file from
+/// every connected peer and emit a wide-format CSV: one row per unique
+/// `ts_ms` across the fleet, with three columns per sensor
+/// (`<ip>_x, <ip>_y, <ip>_z`). Cells are blank when that sensor has
+/// no sample at that ts_ms — handy when sample timestamps don't line
+/// up exactly across the fleet (clock-sync jitter, dropped samples).
 async fn data_merged_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
@@ -2581,10 +2594,15 @@ async fn data_merged_handler(
         ).into_response();
     };
 
-    let peer_addrs: Vec<String> = {
+    // Sort peer IPs so column order is stable across runs (the natural
+    // peer-map order is hash-based and would shuffle headers between
+    // downloads, breaking any downstream tooling pinned to column
+    // positions).
+    let mut peer_addrs: Vec<String> = {
         let peers = state.peers.read().await;
         peers.keys().map(|a| a.ip().to_string()).collect()
     };
+    peer_addrs.sort();
 
     let mut fetched: Vec<(String, Vec<u8>)> = Vec::with_capacity(peer_addrs.len());
     for addr in &peer_addrs {
@@ -2600,65 +2618,70 @@ async fn data_merged_handler(
         ).into_response();
     }
 
-    // Heap-merge by ts_ms. The capture row is fixed-width
-    // (SPEC-R2-ROCKER-CAPTURE §4 + SPEC-R2-ROCKER-SENSOR §6.2):
+    // Fixed-width capture row (SPEC-R2-ROCKER-CAPTURE §4 +
+    // SPEC-R2-ROCKER-SENSOR §6.2):
     //   bytes  0..10  : seq (right-aligned)
     //   bytes 11..25  : ts_ms (right-aligned)
-    //   …
-    // Use std::collections::BinaryHeap with a reverse-ordered key
-    // so the smallest ts_ms always pops first.
+    //   bytes 26..37  : x   (right-aligned)
+    //   bytes 38..49  : y
+    //   bytes 50..61  : z
+    //   byte  61      : '\n' (counted into ROW_BYTES below — last byte)
     const ROW_BYTES: usize = 62;
-    let mut iters: Vec<(String, std::vec::IntoIter<&[u8]>)> = fetched.iter().map(|(name, bytes)| {
-        let rows: Vec<&[u8]> = bytes.chunks_exact(ROW_BYTES).collect();
-        (name.clone(), rows.into_iter())
-    }).collect();
-    // Drop the original `fetched` references — rebuild owning rows.
-    drop(iters);
-    let mut owned_rows: Vec<(String, Vec<Vec<u8>>)> = fetched.into_iter().map(|(name, bytes)| {
-        let rows: Vec<Vec<u8>> = bytes.chunks_exact(ROW_BYTES).map(|r| r.to_vec()).collect();
-        (name, rows)
-    }).collect();
+
+    // Build a sorted ts_ms → [per-sensor (x,y,z) Option] map. BTreeMap
+    // gives us ascending iteration for free. Each sensor contributes
+    // its samples; if two sensors share a ts_ms, both fill the same
+    // row; if their timestamps diverge by even 1 ms, separate rows.
+    //
+    // The expected scale here is small: 10 Hz × minutes × ~2 sensors
+    // = a few thousand rows. BTreeMap is fine.
+    type Triplet = (String, String, String);
+    let n_peers = fetched.len();
+    let mut by_ts: std::collections::BTreeMap<i64, Vec<Option<Triplet>>> =
+        std::collections::BTreeMap::new();
+
+    for (peer_idx, (_, bytes)) in fetched.iter().enumerate() {
+        for row in bytes.chunks_exact(ROW_BYTES) {
+            let Some(ts) = parse_row_ts_ms(row) else { continue; };
+            // Column layout offsets — adjacent fields are separated by
+            // single commas, captured by the +1 shifts below.
+            let x_str = trim_str(&row[26..37]);
+            let y_str = trim_str(&row[38..49]);
+            let z_str = trim_str(&row[50..61]);
+            by_ts.entry(ts)
+                .or_insert_with(|| vec![None; n_peers])
+                [peer_idx] = Some((x_str, y_str, z_str));
+        }
+    }
 
     let mut output = String::with_capacity(64 * 1024);
-    output.push_str("ts_ms,sensor,x,y,z\n");
+    // Header: ts_ms then three columns per sensor in sorted-IP order.
+    output.push_str("ts_ms");
+    for (sensor_name, _) in &fetched {
+        // Sanitize IPs for spreadsheet-friendly column names — dots
+        // upset some downstream consumers.
+        let safe = sensor_name.replace('.', "_");
+        output.push(','); output.push_str(&safe); output.push_str("_x");
+        output.push(','); output.push_str(&safe); output.push_str("_y");
+        output.push(','); output.push_str(&safe); output.push_str("_z");
+    }
+    output.push('\n');
 
-    // Iterator state: per-source row index.
-    let mut indices: Vec<usize> = vec![0; owned_rows.len()];
-    loop {
-        // Find the source with the smallest ts_ms at its current index.
-        let mut min_src: Option<usize> = None;
-        let mut min_ts: i64 = i64::MAX;
-        for (i, (_, rows)) in owned_rows.iter().enumerate() {
-            if indices[i] >= rows.len() { continue; }
-            let row = &rows[indices[i]];
-            let Some(ts) = parse_row_ts_ms(row) else { continue; };
-            if ts < min_ts { min_ts = ts; min_src = Some(i); }
+    for (ts, slots) in &by_ts {
+        output.push_str(&ts.to_string());
+        for slot in slots {
+            output.push(',');
+            if let Some((x, y, z)) = slot {
+                output.push_str(x); output.push(',');
+                output.push_str(y); output.push(',');
+                output.push_str(z);
+            } else {
+                // Three empty cells — blank means "no reading for this
+                // ts_ms from this sensor", per the wide-merge contract.
+                output.push(','); output.push(',');
+            }
         }
-        let Some(src) = min_src else { break; };
-        let (sensor_name, rows) = &owned_rows[src];
-        let row = &rows[indices[src]];
-        // Extract x, y, z from the fixed-width row.
-        let (seq_str, rest) = row.split_at(10);
-        let _ = seq_str; // unused in output
-        let _comma = rest[0]; // ','
-        let (ts_str, rest) = rest[1..].split_at(14);
-        let _comma = rest[0];
-        let (x_str, rest) = rest[1..].split_at(11);
-        let _comma = rest[0];
-        let (y_str, rest) = rest[1..].split_at(11);
-        let _comma = rest[0];
-        let (z_str, _rest) = rest[1..].split_at(11);
-        output.push_str(&trim_str(ts_str));
-        output.push(',');
-        output.push_str(sensor_name);
-        output.push(',');
-        output.push_str(&trim_str(x_str));
-        output.push(',');
-        output.push_str(&trim_str(y_str));
-        output.push(',');
-        output.push_str(&trim_str(z_str));
         output.push('\n');
-        indices[src] += 1;
     }
 
     let mut headers = axum::http::HeaderMap::new();

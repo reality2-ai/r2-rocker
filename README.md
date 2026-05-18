@@ -143,6 +143,12 @@ You need:
   also frees up the built-in WiFi for the hotspot.
 - **Female-to-female DuPont jumper wires** (about 6 per sensor, for
   the Pmod-to-DevKitC connection).
+- **Two 100 kΩ resistors** + **one 100 nF ceramic cap** per sensor —
+  for the battery-sense voltage divider (see
+  `specifications/HARDWARE-WIRING-DEVKITC.md` §4.2). The cap is the
+  important one: without it the ADC can't sample the high-impedance
+  divider correctly and the firmware falls back to a simulated
+  battery feed.
 
 The full wiring is in [`specifications/HARDWARE-WIRING.md`](specifications/HARDWARE-WIRING.md).
 
@@ -362,12 +368,13 @@ r2-rocker/
 
 ## Project status
 
-End-to-end works wirelessly today: real ESP32-S3 hardware, the
-dashboard's bootstrap loop discovers it over Bluetooth, pushes
-WiFi credentials, the sensor reboots into WiFi, streams simulated
-accelerometer data (real ADXL355 chip will be soldered in shortly),
-and accepts firmware updates over the air. LED state, battery
-state, and on-screen indicators are all in lockstep.
+End-to-end works wirelessly today: real ESP32-S3 hardware with
+real ADXL355 chips, the dashboard's bootstrap loop discovers them
+over Bluetooth, pushes WiFi credentials, sensors reboot into WiFi,
+stream live acceleration to the dashboard, accept firmware updates
+over the air, and write named captures to SD with calibrated values
++ a wide-format fleet merge for analysis. LED state, battery state,
+and on-screen indicators are all in lockstep.
 
 What's left before the rig is "production-ready":
 
@@ -377,8 +384,9 @@ What's left before the rig is "production-ready":
 - Onsite long-term data archive.
 - Remote-viewing rollout — the spec is written, implementation is
   staged across several incremental milestones.
-- Real ADXL355 chip soldered in (replacing the simulator).
-- Per-sensor calibration.
+- Real battery telemetry on every sensor (firmware ready; needs the
+  100 nF bypass cap fitted across the voltage divider, see
+  `specifications/HARDWARE-WIRING-DEVKITC.md` §4.2).
 
 `plan/PLAN.md` has the full roadmap with current status against each
 milestone.

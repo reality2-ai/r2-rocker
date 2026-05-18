@@ -255,8 +255,25 @@ Sample VBATT (3.0–4.2 V at the cell) into the ADC range (0–3.3 V):
            │                  │
            │                 GND
            │
-          [decoupling: 100 nF from ADC node to GND, optional]
+          [decoupling: 100 nF from ADC node to GND, REQUIRED]
 ```
+
+> **The 100 nF bypass cap is not optional with this divider.** The ESP32-S3 ADC
+> sample-and-hold needs a source impedance below ~10 kΩ to acquire the input
+> voltage within its sample window. The Thévenin output of a 100 kΩ / 100 kΩ
+> divider is 50 kΩ, so each ADC sample under-charges its internal cap by a
+> random amount and readings scatter wildly (observed: 40–70 % of true value,
+> 70 % spread between consecutive samples). The 100 nF cap bridges the ADC
+> pin so the divider's current keeps it fully charged between samples; every
+> ADC acquisition then starts from the true voltage. Without the cap the
+> firmware's plausibility / variance filter (SPEC-R2-ROCKER-SENSOR §8.1)
+> rejects every reading and falls back to BatterySim — the operator sees
+> simulated battery telemetry, not real cell voltage.
+>
+> If lower-value resistors are used (e.g. 10 kΩ / 10 kΩ, Thévenin = 5 kΩ),
+> the cap becomes optional — the divider is then low-impedance enough on
+> its own. The trade-off is ~210 µA quiescent vs ~21 µA, still trivial
+> against a 2000 mAh cell.
 
 Divider ratio = R2 / (R1 + R2) = 0.5. Cell voltage maps:
 
