@@ -2003,8 +2003,20 @@ function setView(name) {
   const showLogBtn     = document.getElementById('btn-show-log');
   if (bootstrapPanel) bootstrapPanel.style.display = showLogs ? '' : 'none';
   if (eventLogRow)    eventLogRow.style.display    = showLogs ? '' : 'none';
-  if (showLogBtn)     showLogBtn.style.display     = showLogs ? '' : 'none';
-  if (!showLogs && connectBtn) connectBtn.style.display = 'none';
+  // For the header buttons, use `visibility: hidden` rather than
+  // `display: none` so the slot keeps its width — otherwise the
+  // tabs visibly shift when switching to Data/Link and back, and
+  // the operator loses their place. Clear any inline display
+  // leftover from earlier setView calls; role-gating (the [hidden]
+  // attribute) owns display for viewers.
+  if (showLogBtn) {
+    showLogBtn.style.display    = '';
+    showLogBtn.style.visibility = showLogs ? '' : 'hidden';
+  }
+  if (connectBtn) {
+    connectBtn.style.display    = '';
+    connectBtn.style.visibility = showLogs ? '' : 'hidden';
+  }
   if (showLogs) applyRoleVisibility();
 }
 
