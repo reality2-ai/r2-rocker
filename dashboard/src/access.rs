@@ -132,11 +132,38 @@ pub struct MemberRow {
 /// Held behind an `Arc<Mutex>` on `AppState`. The mutex is short-lived
 /// per HTTP request — every `/api/access/*` handler acquires, mutates,
 /// releases. There's no long-running borrow on this state.
+/// Request-and-approve flow (v0.1.1): the phone joins the hotspot,
+/// hits the dashboard URL, and POSTs `/api/access/request` saying
+/// "device_pk X wants in, my name is Y". The operator's dashboard
+/// shows a pending-requests row with Approve/Deny. On approve, the
+/// dashboard mints a one-shot internal JoinCode + runs the join
+/// handshake against the requester's `device_pk`, then caches the
+/// encrypted response for the requester to pick up via
+/// `/api/access/check`. No token exchange between operator and
+/// viewer — the operator's *approval* IS the auth.
+#[derive(Clone)]
+struct PendingRequest {
+    device_pk: [u8; 32],
+    name: String,
+    /// Free-form hint shown to the operator (IP, user-agent, etc.).
+    hint: String,
+    requested_at_ms: i64,
+    /// Set when the operator clicks Approve; holds the encrypted
+    /// credential bundle the requester picks up via `/check`.
+    approved: Option<serde_json::Value>,
+    /// Set when the operator clicks Deny. Requester's `/check`
+    /// returns 410 after this.
+    denied: bool,
+}
+
 pub struct Access {
     /// The KeyHolder's TG instance. Tracks members + revocations.
     tg: TrustGroup,
     /// Outstanding tokens keyed by their entropy.
     tokens: HashMap<[u8; 16], TokenRecord>,
+    /// Pending pair-requests keyed by device_pk. v0.1.1 in-memory
+    /// only — process restart drops them (clients re-request).
+    pending: HashMap<[u8; 32], PendingRequest>,
     /// Cached `tg_hash` (first 8 hex chars of SHA-256(TG_PK)).
     tg_hash: String,
     /// Operator-supplied; embedded in QR + `url_relay`. `None` → no
@@ -220,6 +247,7 @@ impl Access {
         Ok(Self {
             tg,
             tokens: HashMap::new(),
+            pending: HashMap::new(),
             tg_hash,
             relay_url,
             local_origin,
@@ -492,6 +520,134 @@ impl Access {
         rows
     }
 
+    /// Phone calls this when it lands on the dashboard without a
+    /// cert and without a `?join=` token in the URL. We record a
+    /// pending request the operator can approve.
+    ///
+    /// Returns the device_pk back for the requester to remember (it
+    /// also uses it to poll `/check`).
+    pub fn submit_request(
+        &mut self,
+        device_pk_hex: &str,
+        name: &str,
+        hint: &str,
+    ) -> RequestOutcome {
+        let Some(device_pk) = hex_to_arr32(device_pk_hex) else {
+            return RequestOutcome::BadRequest("device_pk must be 64 hex chars");
+        };
+        if !is_valid_device_name(name) {
+            return RequestOutcome::BadRequest(
+                "name must be 1..=64 chars in [A-Za-z0-9 ._-]",
+            );
+        }
+        let now_ms = now_ms() as i64;
+        let entry = self.pending.entry(device_pk).or_insert(PendingRequest {
+            device_pk,
+            name: name.to_string(),
+            hint: hint.to_string(),
+            requested_at_ms: now_ms,
+            approved: None,
+            denied: false,
+        });
+        // If the requester re-submits (e.g. dropped + retried), update
+        // the cosmetic fields but don't reset approval state.
+        entry.name = name.to_string();
+        entry.hint = hint.to_string();
+        RequestOutcome::Submitted(device_pk)
+    }
+
+    /// JSON shape of pending requests for the operator's UI.
+    pub fn pending_requests(&self) -> Vec<serde_json::Value> {
+        self.pending
+            .values()
+            .filter(|r| r.approved.is_none() && !r.denied)
+            .map(|r| serde_json::json!({
+                "device_pk":      hex::encode(r.device_pk),
+                "name":           r.name,
+                "hint":           r.hint,
+                "requested_at_ms": r.requested_at_ms,
+            }))
+            .collect()
+    }
+
+    /// Operator clicks Approve. We mint a one-shot internal JoinCode,
+    /// run `process_join_request` against the requester's device_pk,
+    /// cache the encrypted response in the PendingRequest. The
+    /// requester picks it up via `/check`.
+    pub fn approve_request(&mut self, device_pk_hex: &str) -> ApproveOutcome {
+        let Some(device_pk) = hex_to_arr32(device_pk_hex) else {
+            return ApproveOutcome::BadRequest;
+        };
+        let Some(rec) = self.pending.get(&device_pk).cloned() else {
+            return ApproveOutcome::NotFound;
+        };
+        if rec.approved.is_some() {
+            return ApproveOutcome::AlreadyApproved;
+        }
+        if rec.denied {
+            return ApproveOutcome::Denied;
+        }
+        let now_secs = now_secs();
+        let now_ms = now_ms() as i64;
+
+        // Mint a transient JoinCode just for this approval. The
+        // operator never sees it; it lives a few microseconds inside
+        // process_join_request before being consumed.
+        let join_code = self.tg.generate_join_code(&mut OsRng, now_secs, 60);
+        let code: [u8; 16] = *join_code.value();
+
+        let device_vk = match VerifyingKey::from_bytes(&device_pk) {
+            Ok(v) => v,
+            Err(_) => return ApproveOutcome::BadRequest,
+        };
+        let encrypted = match self.tg.process_join_request(
+            &mut OsRng, now_secs, &code, &device_vk, rec.name.clone(), CERT_TTL_SECS,
+        ) {
+            Ok(e) => e,
+            Err(e) => return ApproveOutcome::Failed(format!("{e}")),
+        };
+        self.names.insert(device_pk, rec.name.clone());
+        self.paired_at_ms.insert(device_pk, now_ms);
+
+        let response = encode_claim_response(&self.tg, &encrypted, now_ms);
+        if let Some(p) = self.pending.get_mut(&device_pk) {
+            p.approved = Some(response);
+        }
+        ApproveOutcome::Approved(device_pk)
+    }
+
+    /// Operator clicks Deny. The requester's next `/check` returns
+    /// 410 and the landing page can render "request denied".
+    pub fn deny_request(&mut self, device_pk_hex: &str) -> DenyOutcome {
+        let Some(device_pk) = hex_to_arr32(device_pk_hex) else {
+            return DenyOutcome::BadRequest;
+        };
+        match self.pending.get_mut(&device_pk) {
+            Some(r) => { r.denied = true; DenyOutcome::Denied(device_pk) }
+            None    => DenyOutcome::NotFound,
+        }
+    }
+
+    /// Requester polls this to see if the operator has decided yet.
+    pub fn check_request(&mut self, device_pk_hex: &str) -> CheckOutcome {
+        let Some(device_pk) = hex_to_arr32(device_pk_hex) else {
+            return CheckOutcome::BadRequest;
+        };
+        let Some(rec) = self.pending.get(&device_pk) else {
+            return CheckOutcome::NotFound;
+        };
+        if rec.denied { return CheckOutcome::Denied; }
+        if let Some(resp) = &rec.approved {
+            // Single-use: drop the record on first successful pick-up
+            // so a refresh on the requester doesn't keep returning the
+            // same bundle.
+            let body = resp.clone();
+            self.pending.remove(&device_pk);
+            return CheckOutcome::Approved(body);
+        }
+        CheckOutcome::Pending
+    }
+
     /// SPEC §4.4 — revoke a member by `device_pk`. Returns whether the
     /// device was found (so the handler can return 200 vs 404).
     /// Succeeds regardless of online state per §7.6.
@@ -524,6 +680,34 @@ pub enum RevokeOutcome {
     NotFound,
     BadRequest,
     Other(String),
+}
+
+pub enum RequestOutcome {
+    Submitted([u8; 32]),
+    BadRequest(&'static str),
+}
+
+pub enum ApproveOutcome {
+    Approved([u8; 32]),
+    NotFound,
+    AlreadyApproved,
+    Denied,
+    BadRequest,
+    Failed(String),
+}
+
+pub enum DenyOutcome {
+    Denied([u8; 32]),
+    NotFound,
+    BadRequest,
+}
+
+pub enum CheckOutcome {
+    Approved(serde_json::Value),
+    Pending,
+    Denied,
+    NotFound,
+    BadRequest,
 }
 
 /// Convert `BadRequest(&'static)` builder into a String-flavoured

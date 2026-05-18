@@ -781,8 +781,14 @@
      R2 jargon. Internal URL paths remain `/api/access/*`. -->
 <div class="devices-main" id="linkMain" hidden>
   <div class="devices-bulk-actions">
-    <button class="btn-bulk-update" id="linkInviteBtn" onclick="openInviteModal()">🔗 Link a new device</button>
+    <button class="btn-bulk-update" id="linkInviteBtn" onclick="openInviteModal()">🔗 Link a new viewer</button>
     <button class="btn-bulk-reset"  id="linkRefreshBtn" onclick="loadLinkMembers()">↻ Refresh</button>
+  </div>
+  <div class="devices-area" id="linkPendingArea" hidden>
+    <div class="card" style="background:#1e1b2c; border-color:#7c3aed;">
+      <h3 style="margin:0 0 8px 0; color:#ddd6fe; font-size:14px;">🔔 Pending pair requests</h3>
+      <div id="linkPendingRows"></div>
+    </div>
   </div>
   <div class="devices-area" id="linkArea">
     <div class="card" id="linkPlaceholder" style="color:#475569; text-align:center; padding:40px;">
@@ -795,7 +801,7 @@
 <div class="invite-overlay" id="inviteOverlay" hidden onclick="if(event.target.id==='inviteOverlay') closeInviteModal()">
   <div class="invite-modal">
     <div class="invite-header">
-      <h2>Link a new device</h2>
+      <h2>Link a new viewer</h2>
       <button class="bootstrap-close" onclick="closeInviteModal()">&times;</button>
     </div>
     <p class="invite-help">
@@ -847,7 +853,7 @@
 <div class="devices-main" id="dataMain" hidden>
   <div class="devices-bulk-actions">
     <button class="btn-bulk-update" id="dataMergedBtn" onclick="downloadMergedLatest()">💾 Download merged CSV (last marked)</button>
-    <button class="btn-bulk-reset"  id="dataDeleteAllBtn" onclick="requestDeleteAllFleet()">🗑 Delete all data across fleet</button>
+    <button class="btn-bulk-reset"  id="dataDeleteAllBtn" onclick="requestDeleteAllFleet()">🗑 Delete all data across devices</button>
   </div>
   <div class="devices-area" id="dataArea">
     <div class="card" id="dataPlaceholder" style="color:#475569; text-align:center; padding:40px;">
@@ -1898,22 +1904,94 @@ async function loadLinkMembers() {
     if (res.status === 403) {
       _isKeyHolder = false;
       renderLinkMembersList([], { forbidden: true });
+      // No pending-requests visibility for non-KeyHolder views.
+      document.getElementById('linkPendingArea').hidden = true;
       return;
     }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     _isKeyHolder = true;
     const body = await res.json();
     renderLinkMembersList(body.members ?? [], { forbidden: false });
+    // KeyHolder also sees pending requests.
+    await loadPendingRequests();
   } catch (err) {
     area.innerHTML = `<div class="card" style="color:#ef4444; padding:20px;">
       Couldn't load paired devices: ${escapeText(String(err))}
     </div>`;
   }
-  // The "Link a new device" button is the operator's invite trigger;
+  // The "Link a new viewer" button is the operator's invite trigger;
   // visible only when we're the KeyHolder. /api/access/invite would
   // 403 otherwise, so hiding it just makes the read-only UX clean.
   const inviteBtn = document.getElementById('linkInviteBtn');
   if (inviteBtn) inviteBtn.hidden = !_isKeyHolder;
+}
+
+async function loadPendingRequests() {
+  const area = document.getElementById('linkPendingArea');
+  const rows = document.getElementById('linkPendingRows');
+  if (!area || !rows) return;
+  try {
+    const res = await fetch('/api/access/pending');
+    if (!res.ok) { area.hidden = true; return; }
+    const body = await res.json();
+    const list = body.pending ?? [];
+    if (list.length === 0) { area.hidden = true; return; }
+    rows.innerHTML = list
+      .sort((a, b) => (b.requested_at_ms || 0) - (a.requested_at_ms || 0))
+      .map(renderPendingRequestRow)
+      .join('');
+    area.hidden = false;
+  } catch (err) {
+    area.hidden = true;
+  }
+}
+
+function renderPendingRequestRow(r) {
+  const age = Date.now() - (r.requested_at_ms || 0);
+  const pk_attr = escapeAttr(r.device_pk);
+  const pk_short = r.device_pk
+    ? `${r.device_pk.slice(0, 8)}…${r.device_pk.slice(-4)}`
+    : '—';
+  return `<div class="link-member-card" style="border-color:#7c3aed; margin-bottom:6px;">
+    <div>
+      <div class="name">${escapeText(r.name || 'Unnamed device')}</div>
+      <div class="meta">
+        <span class="pill viewer">pending viewer</span>
+        from ${escapeText(r.hint || '?')} · ${fmtAge(age)} · <code>${pk_short}</code>
+      </div>
+    </div>
+    <div style="display:flex; gap:6px;">
+      <button class="revoke" style="background:#14532d; border-color:#22c55e; color:#bbf7d0;" onclick="approvePending('${pk_attr}','${escapeAttr(r.name||'')}')">Approve</button>
+      <button class="revoke" onclick="denyPending('${pk_attr}')">Deny</button>
+    </div>
+  </div>`;
+}
+
+async function approvePending(device_pk, name) {
+  try {
+    const res = await fetch(`/api/access/approve/${encodeURIComponent(device_pk)}`, { method: 'POST' });
+    if (!res.ok) {
+      alert(`Approve failed: ${await res.text()}`);
+      return;
+    }
+    // The list will refresh via /ws/status; reload to be safe.
+    loadLinkMembers();
+  } catch (err) {
+    alert(`Approve failed: ${err}`);
+  }
+}
+
+async function denyPending(device_pk) {
+  try {
+    const res = await fetch(`/api/access/deny/${encodeURIComponent(device_pk)}`, { method: 'POST' });
+    if (!res.ok) {
+      alert(`Deny failed: ${await res.text()}`);
+      return;
+    }
+    loadLinkMembers();
+  } catch (err) {
+    alert(`Deny failed: ${err}`);
+  }
 }
 
 function renderLinkMembersList(members, opts) {
@@ -2143,7 +2221,9 @@ function handleAccessWsEvent(msg) {
     }
   }
   if (currentView !== 'link') return;
-  if (msg.event === 'member_added' || msg.event === 'revoked') {
+  if (msg.event === 'member_added' || msg.event === 'revoked'
+      || msg.event === 'request_pending' || msg.event === 'request_approved'
+      || msg.event === 'request_denied') {
     loadLinkMembers();
   }
 }
@@ -2354,20 +2434,47 @@ function renderNotEnrolledLanding(banner) {
     landing.innerHTML = `
       <div class="invite-modal" style="max-width: 520px;">
         <div class="invite-header">
-          <h2>This device isn't paired yet</h2>
+          <h2 id="landingTitle">Pair this device</h2>
         </div>
         <p class="invite-help" id="landingBanner"></p>
-        <p class="invite-help">
-          Ask the operator to press <strong>"Link a new device"</strong> on the controller's dashboard.
-          They'll either scan a QR code with this device, or send you a link.
-        </p>
-        <div class="invite-url-group">
-          <label>Paste a link or 3-word code:</label>
-          <div class="invite-url-row">
-            <input id="landingPasteInput" placeholder="https://… or three words" />
-            <button onclick="landingTryPaste()">Open</button>
+
+        <div id="landingRequestForm">
+          <p class="invite-help">
+            Type a name the operator will recognise — it'll appear on the controller's screen — then ask them to approve.
+          </p>
+          <div class="invite-url-group">
+            <label>Name this device:</label>
+            <div class="invite-url-row">
+              <input id="landingNameInput" placeholder="e.g. Dave's phone" maxlength="64" />
+              <button onclick="requestAccess()" id="landingRequestBtn">Ask to pair</button>
+            </div>
           </div>
         </div>
+
+        <div id="landingWaiting" hidden>
+          <p class="invite-help">⏳ Waiting for the operator to approve <strong id="landingWaitingName"></strong>…</p>
+          <p class="invite-help" style="font-size:12px; color:#64748b;">
+            They'll see your request on their dashboard's <strong>Link</strong> tab. This page checks back every couple of seconds.
+          </p>
+          <div class="invite-url-row">
+            <button onclick="cancelRequest()" style="background:#64748b;">Cancel</button>
+          </div>
+        </div>
+
+        <div id="landingDenied" hidden>
+          <p class="invite-help" style="color:#f87171;">The operator declined this request.</p>
+          <div class="invite-url-row">
+            <button onclick="resetLandingForm()">Try again</button>
+          </div>
+        </div>
+
+        <details style="margin-top: 18px; color:#64748b; font-size:12px;">
+          <summary>Got a pairing link instead?</summary>
+          <div class="invite-url-row" style="margin-top:8px;">
+            <input id="landingPasteInput" placeholder="https://… or token" />
+            <button onclick="landingTryPaste()">Open</button>
+          </div>
+        </details>
       </div>`;
     document.body.appendChild(landing);
   }
@@ -2375,6 +2482,99 @@ function renderNotEnrolledLanding(banner) {
     banner || 'Pairing this device unlocks the dashboard for this browser.';
   landing.hidden = false;
   landing.style.display = 'flex';
+}
+
+function resetLandingForm() {
+  document.getElementById('landingRequestForm').hidden = false;
+  document.getElementById('landingWaiting').hidden = true;
+  document.getElementById('landingDenied').hidden = true;
+}
+
+let _pendingRequestPoller = null;
+let _pendingRequestPk = null;
+let _pendingDeviceSk = null;
+let _pendingDevicePk = null;
+
+async function requestAccess() {
+  const name = (document.getElementById('landingNameInput').value || '').trim();
+  if (!name) {
+    alert("Please type a name the operator will recognise.");
+    return;
+  }
+  document.getElementById('landingRequestBtn').disabled = true;
+  // Generate ephemeral keypair. If the operator approves, the
+  // dashboard issues a cert against this key.
+  try {
+    const kp = wasmGenerateDeviceKeypair();
+    _pendingDeviceSk = new Uint8Array(kp.secret_key);
+    _pendingDevicePk = new Uint8Array(kp.public_key);
+    const pk_hex = bytesToHex(_pendingDevicePk);
+    _pendingRequestPk = pk_hex;
+    const res = await fetch('/api/access/request', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ device_pk: pk_hex, name }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+    document.getElementById('landingRequestForm').hidden = true;
+    document.getElementById('landingWaiting').hidden = false;
+    document.getElementById('landingWaitingName').textContent = name;
+    startPendingRequestPoll(pk_hex);
+  } catch (err) {
+    document.getElementById('landingRequestBtn').disabled = false;
+    alert(`Couldn't send the request: ${err.message || err}`);
+  }
+}
+
+function cancelRequest() {
+  stopPendingRequestPoll();
+  resetLandingForm();
+  document.getElementById('landingRequestBtn').disabled = false;
+  _pendingRequestPk = null;
+  _pendingDeviceSk = null;
+  _pendingDevicePk = null;
+}
+
+function startPendingRequestPoll(pk_hex) {
+  stopPendingRequestPoll();
+  const tick = async () => {
+    try {
+      const res = await fetch(`/api/access/check/${encodeURIComponent(pk_hex)}`);
+      if (res.status === 202) return; // still pending
+      if (res.status === 410) {
+        stopPendingRequestPoll();
+        document.getElementById('landingWaiting').hidden = true;
+        document.getElementById('landingDenied').hidden = false;
+        return;
+      }
+      if (!res.ok) return; // transient — keep polling
+      // Approved — finish enrolment client-side.
+      const body = await res.json();
+      stopPendingRequestPoll();
+      const tg_pk = hexToBytes(body.tg_pk_hex);
+      const encrypted = b64ToBytes(body.encrypted_b64);
+      const nowSecs = BigInt(Math.floor(Date.now() / 1000));
+      const member = wasmCompleteJoin(_pendingDeviceSk, tg_pk, encrypted, nowSecs);
+      const blob = member.to_bytes();
+      await idbPut(IDB_KEY, new Uint8Array(blob));
+      viewerIdentity = member;
+      viewerIdentityPkHex = pk_hex;
+      // Reload — the regular path will see the IndexedDB cert and
+      // come up enrolled.
+      location.reload();
+    } catch (err) {
+      console.warn('[access] poll error:', err);
+    }
+  };
+  _pendingRequestPoller = setInterval(tick, 2000);
+  tick();
+}
+
+function stopPendingRequestPoll() {
+  if (_pendingRequestPoller) {
+    clearInterval(_pendingRequestPoller);
+    _pendingRequestPoller = null;
+  }
 }
 
 function landingTryPaste() {
@@ -3398,6 +3598,12 @@ Object.assign(window, {
   revokeMember,
   landingTryPaste,
   toggleWifiPskReveal,
+  // Request-and-approve flow.
+  requestAccess,
+  cancelRequest,
+  resetLandingForm,
+  approvePending,
+  denyPending,
 });
 </script>
 </body>

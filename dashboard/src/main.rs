@@ -690,6 +690,16 @@ async fn main() {
         .route("/api/access/claim", post(access_claim_handler))
         .route("/api/access/members", get(access_members_handler))
         .route("/api/access/revoke/{device_pk}", post(access_revoke_handler))
+        // Request → approve flow (v0.1.1, the "calm-tech" enrolment
+        // path): phone POSTs /request when it lands on the dashboard
+        // without a cert. Operator's Link tab shows pending rows
+        // with Approve/Deny. Phone polls /check until it gets the
+        // signed cert bundle back.
+        .route("/api/access/request",     post(access_request_handler))
+        .route("/api/access/check/{device_pk}", get(access_check_handler))
+        .route("/api/access/pending",     get(access_pending_handler))
+        .route("/api/access/approve/{device_pk}", post(access_approve_handler))
+        .route("/api/access/deny/{device_pk}",    post(access_deny_handler))
         // Legacy stubs from before the ACCESS spec landed — still
         // marked DEPRECATED in SPEC-R2-ROCKER-DASHBOARD §5.1.
         .route("/api/enrol-init", post(enrol_init_handler))
@@ -3032,6 +3042,188 @@ async fn access_revoke_handler(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e})),
         ).into_response(),
+    }
+}
+
+// ── Request → approve enrolment handlers ──────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct RequestBody { device_pk: String, name: String }
+
+async fn access_request_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
+    Json(body): Json<RequestBody>,
+) -> impl IntoResponse {
+    let handle = match require_access(&state).await {
+        Ok(h) => h,
+        Err(r) => return r,
+    };
+    let hint = format!("{}", addr.ip());
+    let outcome = {
+        let mut access = handle.lock().await;
+        access.submit_request(&body.device_pk, &body.name, &hint)
+    };
+    use access::RequestOutcome::*;
+    match outcome {
+        Submitted(pk) => {
+            // Operator-side notification — picked up by the Link tab's
+            // /ws/status hook to show the pending row.
+            let _ = state.ws_broadcast_tx.send(serde_json::json!({
+                "type": "access",
+                "event": "request_pending",
+                "device_pk": hex::encode(&pk[..]),
+                "name": body.name,
+                "hint": hint,
+            }).to_string());
+            (axum::http::StatusCode::OK, Json(serde_json::json!({
+                "ok": true,
+                "device_pk": hex::encode(&pk[..]),
+            }))).into_response()
+        }
+        BadRequest(msg) => (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": msg})),
+        ).into_response(),
+    }
+}
+
+async fn access_check_handler(
+    State(state): State<Arc<AppState>>,
+    Path(device_pk): Path<String>,
+) -> impl IntoResponse {
+    let handle = match require_access(&state).await {
+        Ok(h) => h,
+        Err(r) => return r,
+    };
+    let outcome = {
+        let mut access = handle.lock().await;
+        access.check_request(&device_pk)
+    };
+    use access::CheckOutcome::*;
+    match outcome {
+        Approved(body) => (axum::http::StatusCode::OK, Json(body)).into_response(),
+        Pending => (
+            axum::http::StatusCode::ACCEPTED,  // 202 — keep polling
+            Json(serde_json::json!({"status": "pending"})),
+        ).into_response(),
+        Denied => (
+            axum::http::StatusCode::GONE,
+            Json(serde_json::json!({"status": "denied"})),
+        ).into_response(),
+        NotFound => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "no such request"})),
+        ).into_response(),
+        BadRequest => (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "device_pk must be 64 hex chars"})),
+        ).into_response(),
+    }
+}
+
+async fn access_pending_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
+) -> impl IntoResponse {
+    let handle = match require_access(&state).await {
+        Ok(h) => h,
+        Err(r) => return r,
+    };
+    if !is_keyholder(addr) {
+        return (axum::http::StatusCode::FORBIDDEN, Json(serde_json::json!({
+            "error": "only the KeyHolder (localhost) may list pending requests in v0.1",
+        }))).into_response();
+    }
+    let access = handle.lock().await;
+    (axum::http::StatusCode::OK, Json(serde_json::json!({
+        "pending": access.pending_requests(),
+    }))).into_response()
+}
+
+async fn access_approve_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
+    Path(device_pk): Path<String>,
+) -> impl IntoResponse {
+    let handle = match require_access(&state).await {
+        Ok(h) => h,
+        Err(r) => return r,
+    };
+    if !is_keyholder(addr) {
+        return (axum::http::StatusCode::FORBIDDEN, Json(serde_json::json!({
+            "error": "only the KeyHolder (localhost) may approve requests in v0.1",
+        }))).into_response();
+    }
+    let outcome = {
+        let mut access = handle.lock().await;
+        access.approve_request(&device_pk)
+    };
+    use access::ApproveOutcome::*;
+    match outcome {
+        Approved(pk) => {
+            let pk_hex = hex::encode(&pk[..]);
+            // Operator-side: the row disappears from "pending". The
+            // device polling /check will pick up the bundle next.
+            let _ = state.ws_broadcast_tx.send(serde_json::json!({
+                "type": "access",
+                "event": "request_approved",
+                "device_pk": pk_hex.clone(),
+            }).to_string());
+            (axum::http::StatusCode::OK, Json(serde_json::json!({
+                "ok": true,
+                "device_pk": pk_hex,
+            }))).into_response()
+        }
+        NotFound => (axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "no such pending request"}))).into_response(),
+        AlreadyApproved => (axum::http::StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "already approved"}))).into_response(),
+        Denied => (axum::http::StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "request was already denied"}))).into_response(),
+        BadRequest => (axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "device_pk must be 64 hex chars"}))).into_response(),
+        Failed(e) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+async fn access_deny_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
+    Path(device_pk): Path<String>,
+) -> impl IntoResponse {
+    let handle = match require_access(&state).await {
+        Ok(h) => h,
+        Err(r) => return r,
+    };
+    if !is_keyholder(addr) {
+        return (axum::http::StatusCode::FORBIDDEN, Json(serde_json::json!({
+            "error": "only the KeyHolder (localhost) may deny requests in v0.1",
+        }))).into_response();
+    }
+    let outcome = {
+        let mut access = handle.lock().await;
+        access.deny_request(&device_pk)
+    };
+    use access::DenyOutcome::*;
+    match outcome {
+        Denied(pk) => {
+            let pk_hex = hex::encode(&pk[..]);
+            let _ = state.ws_broadcast_tx.send(serde_json::json!({
+                "type": "access",
+                "event": "request_denied",
+                "device_pk": pk_hex.clone(),
+            }).to_string());
+            (axum::http::StatusCode::OK, Json(serde_json::json!({
+                "ok": true,
+                "device_pk": pk_hex,
+            }))).into_response()
+        }
+        NotFound => (axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "no such pending request"}))).into_response(),
+        BadRequest => (axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "device_pk must be 64 hex chars"}))).into_response(),
     }
 }
 
