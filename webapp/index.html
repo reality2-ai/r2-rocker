@@ -224,21 +224,48 @@
      the [hidden] attribute used by setView() to switch tabs — restore it. */
   [hidden] { display: none !important; }
   .main {
-    display: grid;
-    grid-template-columns: 1fr 280px;
-    /* Without `align-items: start`, the grid stretches both columns
-       to match the taller one. When the sidebar (Run Control +
-       Connection Log) is tall, that forced the first row of sensor
-       cards to grow to match — making 2 sensors appear oddly
-       elongated compared to a 3rd that wraps to a new row below.
-       Letting each column take its natural height keeps every
-       chart card the same size regardless of how many sensors
-       are present. */
-    align-items: start;
+    /* Single-column stack: Run Control bar at top, full-width sensor
+       grid below. The previous 1fr / 280px sidebar held Run Control
+       + Connected Sensors; both have been promoted to the sensor
+       cards themselves (per-card LED) or to a horizontal toolbar at
+       the top of the view. */
+    display: flex;
+    flex-direction: column;
     gap: 16px;
     padding: 16px;
     max-width: 1600px;
     margin: 0 auto;
+  }
+
+  /* Run-control toolbar (Live tab) — mirrors `.devices-bulk-actions`
+     visually so the operator's eye lands in the same place across
+     tabs. Single horizontal row on wide screens; wraps on narrow. */
+  .run-control-bar {
+    background: #0c1017;
+    border: 1px solid #1e293b;
+    border-radius: 12px;
+    padding: 10px 14px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: wrap;
+  }
+  .run-control-bar .state-indicator {
+    margin: 0;            /* override the default 14px bottom margin */
+    padding: 6px 14px;
+    font-size: 13px;
+  }
+  .run-control-bar .run-name-row {
+    margin: 0;
+    flex: 1 1 200px;
+  }
+  .run-control-bar .btn-group {
+    flex-direction: row;
+    gap: 8px;
+  }
+  .run-control-bar .btn {
+    padding: 8px 14px;
+    font-size: 13px;
   }
 
   /* Sensor charts area — always 2-col; lone sensor spans both */
@@ -279,13 +306,23 @@
     font-weight: 700;
     color: #fff;
     margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
   }
   .sensor-label .sensor-addr {
     font-size: 11px;
     font-weight: 400;
     color: #4a9eff;
     font-family: 'SF Mono', monospace;
-    margin-left: 8px;
+    margin-left: 0;
+  }
+  /* Per-card status LED — bigger than the sidebar's 10px dot so the
+     operator can read it from across the room. Animation classes
+     come from .virt-led.tg-* further down. */
+  .virt-led.virt-led-lg {
+    width: 18px; height: 18px;
+    border-width: 2px;
   }
   .sensor-stats {
     display: flex;
@@ -923,34 +960,25 @@
 </div>
 
 <div class="main" id="liveMain">
+  <!-- Run Control bar — horizontal toolbar style, matching
+       Devices / Data tabs' bulk-actions row. -->
+  <div class="run-control-bar">
+    <div class="state-indicator state-idle" id="captureStateLabel">IDLE</div>
+    <div class="run-name-row">
+      <label for="runName">Run name:</label>
+      <input type="text" id="runName" placeholder="run-01" maxlength="32" />
+    </div>
+    <div class="btn-group">
+      <button class="btn btn-start" id="captureStartBtn" onclick="captureStart()">&#x25B6; Start</button>
+      <button class="btn btn-mark"  id="captureMarkBtn"  onclick="captureMark()" disabled>&#x2691; Mark</button>
+      <button class="btn btn-stop"  id="captureStopBtn"  onclick="captureStop()" disabled>&#x25A0; Stop</button>
+    </div>
+  </div>
+
   <!-- Sensor charts (populated dynamically) -->
   <div class="sensors-area" id="sensorsArea">
     <div class="card" id="sensorPlaceholder" style="color:#475569; text-align:center; padding:60px;">
       Waiting for sensors…
-    </div>
-  </div>
-
-  <!-- Sidebar: controls -->
-  <div class="sidebar">
-    <div class="card">
-      <h2>Run Control</h2>
-      <div class="state-indicator state-idle" id="captureStateLabel">IDLE</div>
-      <div class="run-name-row">
-        <label for="runName">Run name:</label>
-        <input type="text" id="runName" placeholder="run-01" maxlength="32" />
-      </div>
-      <div class="btn-group">
-        <button class="btn btn-start" id="captureStartBtn" onclick="captureStart()">&#x25B6; Start</button>
-        <button class="btn btn-mark"  id="captureMarkBtn"  onclick="captureMark()" disabled>&#x2691; Mark</button>
-        <button class="btn btn-stop"  id="captureStopBtn"  onclick="captureStop()" disabled>&#x25A0; Stop</button>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>Connected Sensors</h2>
-      <div id="sensorList" style="font-family:'SF Mono',monospace; font-size:12px; color:#64748b;">
-        None
-      </div>
     </div>
   </div>
 </div>
@@ -1023,7 +1051,11 @@ function getOrCreateSensor(addr) {
   card.id = 'sensor-' + safeKey;
 
   card.innerHTML = `
-    <div class="sensor-label" id="slabel-${safeKey}">${key}<span class="sensor-addr">${key}</span></div>
+    <div class="sensor-label" id="slabel-${safeKey}">
+      <span class="virt-led virt-led-lg" id="sled-${safeKey}"></span>
+      <span class="slabel-name">${key}</span>
+      <span class="sensor-addr">${key}</span>
+    </div>
     <div class="chart-container">
       <canvas id="chart-${safeKey}"></canvas>
     </div>
@@ -1108,27 +1140,27 @@ function setDeviceName(sensor, name) {
   if (sensor.deviceName === name) return;
   sensor.deviceName = name;
   const sk = sensor.key.replace(/\./g, '-');
-  const labelEl = document.getElementById('slabel-' + sk);
-  if (labelEl) labelEl.innerHTML = name + '<span class="sensor-addr">' + sensor.key + '</span>';
+  // Update only the inner name span — leave the LED dot + sensor-addr
+  // structure intact so the LED class survives renames.
+  const nameEl = document.querySelector('#slabel-' + sk + ' .slabel-name');
+  if (nameEl) nameEl.textContent = name;
   updateSensorList();
 }
 
+// Per-card LED refresh. The header's "Sensors:" count is bumped here
+// too; the previous sidebar "Connected Sensors" box is gone — its
+// information has been promoted onto each card via the .virt-led
+// next to the sensor name.
 function updateSensorList() {
-  const el = document.getElementById('sensorList');
-  document.getElementById('sensorCount').textContent = sensors.size;
-  if (sensors.size === 0) { el.textContent = 'None'; return; }
-  // Sidebar status dot reuses the same tg-* colour/animation map as the
-  // Devices-view virtual LED, so the dot here mirrors the physical RGB
-  // LED on the sensor as a quick visual reference. Until Phase 5L lands
-  // a real fsmState (`r2.sensor.status`), ledClassFor() returns "" and
-  // the dot stays the inert grey placeholder.
-  el.innerHTML = [...sensors.values()].map(s => {
-    const label = s.deviceName ? `${s.deviceName} <span style="color:#475569;">(${s.key})</span>` : s.key;
-    const led = ledClassFor(s);
-    return `<div style="display:flex; align-items:center; gap:8px; padding:4px 0; border-bottom:1px solid #1e293b; color:#94a3b8;">`
-         + `<span class="virt-led ${led}" style="width:10px; height:10px;"></span>`
-         + `<span>${label}</span></div>`;
-  }).join('');
+  const countEl = document.getElementById('sensorCount');
+  if (countEl) countEl.textContent = sensors.size;
+  for (const s of sensors.values()) {
+    const sk = s.key.replace(/\./g, '-');
+    const ledEl = document.getElementById('sled-' + sk);
+    if (!ledEl) continue;
+    const cls = ledClassFor(s);
+    ledEl.className = 'virt-led virt-led-lg ' + cls;
+  }
 }
 
 function addSensorLog(sensor, text) {
