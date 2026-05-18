@@ -1741,6 +1741,10 @@ function updateCaptureUiFromFleet() {
     if (s.captureState === 'calibrating')      aggregate = 'calibrating';
     else if (s.captureState === 'recording' && aggregate !== 'calibrating') aggregate = 'recording';
   }
+  // Mirror the active run name into the read-only runName input
+  // on viewer browsers (no-op on the controller — they keep what
+  // they typed).
+  updateRunNameDisplay();
   const label = document.getElementById('captureStateLabel');
   if (label) {
     label.textContent = aggregate.toUpperCase();
@@ -2659,6 +2663,58 @@ function applyRoleVisibility() {
   // window.isControllerRole and skips them for viewers. The
   // capture state indicator stays visible for both roles —
   // viewers see CALIBRATING / RECORDING just like the controller.
+
+  // The Run-name input is the only Live-tab control that has a
+  // viewer-side reason to exist (showing the name of the run
+  // currently being recorded) but no viewer-side reason to be
+  // editable. Switch it to readonly + neutral styling for viewers;
+  // its `value` is then driven by the most recent capture.state
+  // event the dashboard saw (see updateRunNameDisplay).
+  const runName = document.getElementById('runName');
+  if (runName) {
+    runName.readOnly = !isControllerRole;
+    runName.placeholder = isControllerRole ? 'run-01' : '(no run in progress)';
+    runName.style.cursor = isControllerRole ? '' : 'default';
+    runName.style.opacity = isControllerRole ? '' : '0.85';
+  }
+}
+
+/// Extract the operator-supplied run name from a capture filename
+/// like `2026-05-18_18-05-06-test.csv` or `0001779000000000-test.csv`.
+/// Returns null when the filename doesn't match either prefix shape.
+function parseRunNameFromFilename(filename) {
+  if (!filename) return null;
+  // Strip `.csv` (or `cap-...csv` fallback prefix).
+  const stripped = filename.replace(/^cap-/, '').replace(/\.csv$/, '');
+  // Date-prefix form: `YYYY-MM-DD_HH-MM-SS-<name>`
+  let m = stripped.match(/^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-(.+)$/);
+  if (m) return m[1];
+  // ts16-prefix form (legacy fallback): `0001779000000000-<name>`
+  m = stripped.match(/^\d{16}-(.+)$/);
+  if (m) return m[1];
+  return null;
+}
+
+/// Reflect the current recording's run name into the read-only
+/// runName input on viewers. The controller keeps whatever the
+/// operator typed (might be empty before Mark). Called whenever
+/// capture.state arrives via /ws/raw and from
+/// updateCaptureUiFromFleet for general consistency.
+function updateRunNameDisplay() {
+  if (isControllerRole) return;
+  const input = document.getElementById('runName');
+  if (!input) return;
+  // Find any sensor currently in 'recording' state and read its
+  // file. They should all share the same filename (operator marked
+  // once for the fleet) so first match wins.
+  let runName = null;
+  for (const s of sensors.values()) {
+    if (s.captureState === 'recording' && s.captureFile) {
+      runName = parseRunNameFromFilename(s.captureFile);
+      if (runName) break;
+    }
+  }
+  input.value = runName || '';
 }
 
 async function accessGate() {
