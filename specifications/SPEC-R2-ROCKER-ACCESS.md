@@ -581,16 +581,22 @@ state.
 
 ---
 
-## 8. The "Access" tab (operator UX)
+## 8. The "Link" tab (operator UX)
 
-The webapp **MUST** present an "Access" tab in the top-level
-navigation alongside Live / Devices / Data. The tab label is
-literally "Access" (calm-tech: no R2 jargon — no "Trust Group",
-no "KeyHolder", no "Enrolment", per `feedback_ui_no_protocol_jargon`).
+The webapp **MUST** present a top-level navigation tab whose
+operator-visible label is literally **"Link"** (calm-tech: no R2
+jargon — no "Trust Group", no "KeyHolder", no "Enrolment", per
+`feedback_ui_no_protocol_jargon`). It sits alongside the existing
+Live / Devices / Data tabs.
+
+The internal name used in code, URL paths, this spec's title, and
+the HTTP route table (`/api/access/*`) is still **"access"** —
+the operator-facing rename is cosmetic only. Implementations
+**MUST NOT** rename the URL routes or the spec module.
 
 Below the tab heading, in order:
 
-1. **A button labelled "Grant access to a new device"**. Visible
+1. **A button labelled "Link a new device"**. Visible
    only when the local device is the KeyHolder (the controller's
    own browser). When clicked, the webapp POSTs to
    `/api/access/invite` and opens a modal containing:

@@ -97,6 +97,74 @@
     border-radius: 4px;
   }
   .bootstrap-close:hover { color: #e0e0e0; background: #1e293b; }
+
+  /* ── Link tab + invite modal (SPEC-R2-ROCKER-ACCESS) ─────────────── */
+  .invite-overlay {
+    position: fixed; inset: 0; z-index: 1000;
+    background: rgba(0,0,0,0.7);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .invite-overlay[hidden] { display: none; }
+  .invite-modal {
+    background: #0c1017; border: 1px solid #1e293b; border-radius: 12px;
+    padding: 24px; min-width: 380px; max-width: 480px;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+  }
+  .invite-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .invite-header h2 { margin: 0; font-size: 18px; color: #e0e0e0; }
+  .invite-help { color: #94a3b8; font-size: 13px; margin: 0 0 16px 0; }
+  .invite-qr-wrap {
+    background: #fff; padding: 12px; border-radius: 8px;
+    display: flex; justify-content: center; margin-bottom: 16px;
+  }
+  .invite-qr-wrap img { width: 256px; height: 256px; image-rendering: pixelated; }
+  .invite-url-group { margin-bottom: 12px; }
+  .invite-url-group label {
+    display: block; font-size: 11px; text-transform: uppercase;
+    letter-spacing: 1px; color: #64748b; margin-bottom: 6px;
+  }
+  .invite-url-row { display: flex; gap: 8px; }
+  .invite-url-row input {
+    flex: 1; background: #1e293b; border: 1px solid #334155;
+    color: #cbd5e1; padding: 6px 10px; border-radius: 6px;
+    font-family: 'SF Mono', Consolas, monospace; font-size: 11px;
+  }
+  .invite-url-row button {
+    background: #4a9eff; border: none; color: white;
+    padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 12px;
+  }
+  .invite-url-row button:hover { background: #2563eb; }
+  .invite-countdown {
+    text-align: center; color: #94a3b8; font-size: 13px; margin-top: 16px;
+  }
+  .invite-countdown.expired { color: #ef4444; }
+
+  .link-member-card {
+    background: #0c1017; border: 1px solid #1e293b; border-radius: 12px;
+    padding: 14px 18px; margin-bottom: 8px;
+    display: grid; grid-template-columns: 1fr auto; gap: 8px 16px;
+    align-items: center;
+  }
+  .link-member-card.revoked { opacity: 0.5; }
+  .link-member-card .name { font-weight: 600; color: #e0e0e0; }
+  .link-member-card .meta { color: #64748b; font-size: 12px; margin-top: 2px; }
+  .link-member-card .meta .pill {
+    display: inline-block; padding: 2px 8px; border-radius: 10px;
+    background: #1e293b; color: #94a3b8; font-size: 11px; margin-right: 6px;
+  }
+  .link-member-card .meta .pill.controller { background: #1e3a8a; color: #bfdbfe; }
+  .link-member-card .meta .pill.sensor     { background: #14532d; color: #bbf7d0; }
+  .link-member-card .meta .pill.viewer     { background: #4c1d95; color: #ddd6fe; }
+  .link-member-card button.revoke {
+    background: #7f1d1d; border: 1px solid #b91c1c; color: #fecaca;
+    padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px;
+  }
+  .link-member-card button.revoke:hover { background: #b91c1c; color: white; }
+  .link-member-card button.revoke:disabled { opacity: 0.5; cursor: not-allowed; }
+  .link-member-card .self-label { color: #64748b; font-size: 12px; font-style: italic; }
   .bootstrap-log-entries {
     max-height: 200px;
     overflow-y: auto;
@@ -667,6 +735,7 @@
       <button id="viewLive"    class="active" onclick="setView('live')">Live</button>
       <button id="viewDevices"               onclick="setView('devices')">Devices</button>
       <button id="viewData"                  onclick="setView('data')">Data</button>
+      <button id="viewLink"                  onclick="setView('link')">Link</button>
     </div>
     <button class="btn-connect" id="btn-connect" onclick="startBootstrap()">&#x1F50D; Connect Sensors</button>
     <div class="connection-status">
@@ -699,6 +768,52 @@
     <div class="card" id="devicesPlaceholder" style="color:#475569; text-align:center; padding:40px;">
       No sensors known yet — wait for an announce or click <em>Connect Sensors</em>.
     </div>
+  </div>
+</div>
+
+<!-- ── Link view (SPEC-R2-ROCKER-ACCESS) ───────────────────────────── -->
+<!-- Operator-facing rename of the "Access" spec tab — calm-tech, no
+     R2 jargon. Internal URL paths remain `/api/access/*`. -->
+<div class="devices-main" id="linkMain" hidden>
+  <div class="devices-bulk-actions">
+    <button class="btn-bulk-update" id="linkInviteBtn" onclick="openInviteModal()">🔗 Link a new device</button>
+    <button class="btn-bulk-reset"  id="linkRefreshBtn" onclick="loadLinkMembers()">↻ Refresh</button>
+  </div>
+  <div class="devices-area" id="linkArea">
+    <div class="card" id="linkPlaceholder" style="color:#475569; text-align:center; padding:40px;">
+      Loading paired devices…
+    </div>
+  </div>
+</div>
+
+<!-- Invite modal — opened by "Link a new device" -->
+<div class="invite-overlay" id="inviteOverlay" hidden onclick="if(event.target.id==='inviteOverlay') closeInviteModal()">
+  <div class="invite-modal">
+    <div class="invite-header">
+      <h2>Link a new device</h2>
+      <button class="bootstrap-close" onclick="closeInviteModal()">&times;</button>
+    </div>
+    <p class="invite-help">
+      Scan the QR code on the new device's camera, or copy the link below and open it on the device's browser.
+    </p>
+    <div class="invite-qr-wrap">
+      <img id="inviteQrImg" alt="QR code" />
+    </div>
+    <div class="invite-url-group">
+      <label>On the same WiFi as this dashboard:</label>
+      <div class="invite-url-row">
+        <input id="inviteUrlLocal" readonly />
+        <button onclick="copyInputToClipboard('inviteUrlLocal', this)">Copy</button>
+      </div>
+    </div>
+    <div class="invite-url-group" id="inviteRelayGroup" hidden>
+      <label>From anywhere on the internet (via relay):</label>
+      <div class="invite-url-row">
+        <input id="inviteUrlRelay" readonly />
+        <button onclick="copyInputToClipboard('inviteUrlRelay', this)">Copy</button>
+      </div>
+    </div>
+    <div class="invite-countdown" id="inviteCountdown">Expires in 5:00</div>
   </div>
 </div>
 
@@ -1144,6 +1259,9 @@ function connectStatus() {
       }
     } else if (msg.type === 'ota') {
       handleOtaEvent(msg);
+    } else if (msg.type === 'access') {
+      // SPEC-R2-ROCKER-ACCESS §4.2 / §7.2 — member_added / revoked.
+      handleAccessWsEvent(msg);
     }
     // Future: hotspot, server_error, etc. (SPEC-R2-ROCKER-DASHBOARD §5.3)
   };
@@ -1487,18 +1605,24 @@ function setView(name) {
   const live    = document.getElementById('liveMain');
   const devices = document.getElementById('devicesMain');
   const data    = document.getElementById('dataMain');
+  const link    = document.getElementById('linkMain');
   live.hidden    = (name !== 'live');
   devices.hidden = (name !== 'devices');
   if (data) data.hidden = (name !== 'data');
+  if (link) link.hidden = (name !== 'link');
   live.style.display    = (name === 'live')    ? 'grid'  : 'none';
   devices.style.display = (name === 'devices') ? 'block' : 'none';
   if (data) data.style.display = (name === 'data') ? 'block' : 'none';
+  if (link) link.style.display = (name === 'link') ? 'block' : 'none';
   document.getElementById('viewLive').classList.toggle('active',    name === 'live');
   document.getElementById('viewDevices').classList.toggle('active', name === 'devices');
   const dataBtn = document.getElementById('viewData');
   if (dataBtn) dataBtn.classList.toggle('active', name === 'data');
+  const linkBtn = document.getElementById('viewLink');
+  if (linkBtn) linkBtn.classList.toggle('active', name === 'link');
   if (name === 'devices') renderDevices();
   if (name === 'data')    renderDataView();
+  if (name === 'link')    loadLinkMembers();
 }
 
 // ── Data tab plumbing ────────────────────────────────────────────
@@ -1708,6 +1832,232 @@ async function requestDeleteAllFleet() {
   if (cards.length === 0) return;
   if (!confirm(`Delete ALL capture files on ALL ${cards.length} sensor(s)?`)) return;
   await Promise.allSettled(cards.map((c) => c.deleteAll()));
+}
+
+// ── Link tab plumbing (SPEC-R2-ROCKER-ACCESS) ─────────────────────────
+//
+// Internal URL paths are still `/api/access/*` (the spec is the source
+// of truth there); only the user-visible tab + button strings are
+// "Link". A future cert-handshake variant of /ws/raw will gate this
+// surface on cert role; for v0.1 the dashboard enforces KeyHolder via
+// a localhost-only ConnectInfo check (see SPEC-R2-ROCKER-ACCESS §11.1).
+
+let _inviteCountdownTimer = null;
+let _isKeyHolder = false; // updated optimistically on each /api/access/* hit
+
+async function loadLinkMembers() {
+  const area = document.getElementById('linkArea');
+  if (!area) return;
+  try {
+    const res = await fetch('/api/access/members');
+    if (res.status === 403) {
+      _isKeyHolder = false;
+      renderLinkMembersList([], { forbidden: true });
+      return;
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    _isKeyHolder = true;
+    const body = await res.json();
+    renderLinkMembersList(body.members ?? [], { forbidden: false });
+  } catch (err) {
+    area.innerHTML = `<div class="card" style="color:#ef4444; padding:20px;">
+      Couldn't load paired devices: ${escapeText(String(err))}
+    </div>`;
+  }
+  // The "Link a new device" button is the operator's invite trigger;
+  // visible only when we're the KeyHolder. /api/access/invite would
+  // 403 otherwise, so hiding it just makes the read-only UX clean.
+  const inviteBtn = document.getElementById('linkInviteBtn');
+  if (inviteBtn) inviteBtn.hidden = !_isKeyHolder;
+}
+
+function renderLinkMembersList(members, opts) {
+  const area = document.getElementById('linkArea');
+  if (!area) return;
+
+  // §8 (2) — the operator's own browser is "this device" and cannot
+  // be revoked. We don't know our device_pk on the wire yet (slice 3
+  // adds IndexedDB identity), so for v0.1 the controller-side
+  // browser is identified as "the one talking to localhost" and the
+  // top card shows "Controller (this device)" outside the member list.
+  const hostIsLocal = ['localhost', '127.0.0.1', '::1'].includes(location.hostname);
+  let html = '';
+
+  if (hostIsLocal && _isKeyHolder) {
+    html += `<div class="link-member-card">
+      <div>
+        <div class="name">Controller (this device)</div>
+        <div class="meta">
+          <span class="pill controller">controller</span>
+          Holds the trust-group signing key. Cannot be revoked.
+        </div>
+      </div>
+      <div class="self-label">this device</div>
+    </div>`;
+  }
+
+  if (opts.forbidden) {
+    html += `<div class="card" style="color:#94a3b8; padding:20px;">
+      <p>This view is read-only on remote devices in v0.1.</p>
+      <p style="margin-top:8px; font-size:13px;">
+        Only the controller's own browser (running on the same machine as the
+        dashboard) can manage paired devices in this release. A future build
+        will use cryptographic identity instead of a localhost check.
+      </p>
+    </div>`;
+  } else if (members.length === 0) {
+    html += `<div class="card" id="linkEmpty" style="color:#64748b; padding:30px; text-align:center;">
+      No devices linked yet.<br>
+      ${_isKeyHolder ? 'Click <strong>Link a new device</strong> above to invite one.' : ''}
+    </div>`;
+  } else {
+    html += members
+      .slice()
+      .sort((a, b) => (b.paired_at_ms || 0) - (a.paired_at_ms || 0))
+      .map(renderMemberCard)
+      .join('');
+  }
+
+  area.innerHTML = html;
+}
+
+function renderMemberCard(m) {
+  const cls = m.revoked ? 'link-member-card revoked' : 'link-member-card';
+  const pairedAge = Date.now() - (m.paired_at_ms || 0);
+  const pairedAbs = m.paired_at_ms
+    ? new Date(m.paired_at_ms).toLocaleString('en-NZ', { hour12: false })
+    : '—';
+  const pkShort = m.device_pk
+    ? `${m.device_pk.slice(0, 8)}…${m.device_pk.slice(-4)}`
+    : '—';
+  const rolePill = `<span class="pill ${m.role}">${m.role}</span>`;
+  const revokedTag = m.revoked
+    ? `<span style="color:#ef4444; margin-left:6px;">revoked</span>`
+    : '';
+  const revokeBtn = (_isKeyHolder && !m.revoked)
+    ? `<button class="revoke" onclick="revokeMember('${escapeAttr(m.device_pk)}','${escapeAttr(m.name)}')">Revoke</button>`
+    : `<span class="self-label">—</span>`;
+  return `<div class="${cls}">
+    <div>
+      <div class="name">${escapeText(m.name)} ${revokedTag}</div>
+      <div class="meta">
+        ${rolePill}
+        Paired ${fmtAge(pairedAge)} · ${pairedAbs} · <code>${pkShort}</code>
+      </div>
+    </div>
+    ${revokeBtn}
+  </div>`;
+}
+
+async function revokeMember(device_pk, name) {
+  if (!confirm(`Revoke "${name}"? Once revoked, the device will be locked out the next time it tries to connect.`)) return;
+  try {
+    const res = await fetch(`/api/access/revoke/${encodeURIComponent(device_pk)}`, { method: 'POST' });
+    if (!res.ok) {
+      const body = await res.text();
+      alert(`Revoke failed: ${body}`);
+      return;
+    }
+    // Optimistic refresh — the /ws/status broadcast will also trigger
+    // a reload via handleAccessWsEvent below.
+    loadLinkMembers();
+  } catch (err) {
+    alert(`Revoke failed: ${err}`);
+  }
+}
+
+// ── Invite modal (Link a new device) ──────────────────────────────────
+
+async function openInviteModal() {
+  try {
+    const res = await fetch('/api/access/invite', { method: 'POST' });
+    if (res.status === 403) {
+      alert('Only the controller (this device) can invite new viewers in this release.');
+      return;
+    }
+    if (!res.ok) {
+      const body = await res.text();
+      alert(`Couldn't generate an invite: ${body}`);
+      return;
+    }
+    const inv = await res.json();
+    // The dashboard binds to whatever `--bind` says (default 0.0.0.0),
+    // but a viewer device scanning the QR needs an actually-reachable
+    // host. The operator's browser IS reachable at `location.host` by
+    // definition (it just loaded the page from there), so use that as
+    // the authoritative URL for the same-WiFi path. The QR encodes
+    // its own `r2://` deeplink + a `?relay=` query (when relay is
+    // configured), independent of this.
+    const fixedLocal = inv.url_local.replace(
+      /^http:\/\/[^/]+/,
+      `${location.protocol}//${location.host}`
+    );
+    document.getElementById('inviteQrImg').src = inv.qr_png_data_url;
+    document.getElementById('inviteUrlLocal').value = fixedLocal;
+    const relayGroup = document.getElementById('inviteRelayGroup');
+    if (inv.url_relay) {
+      document.getElementById('inviteUrlRelay').value = inv.url_relay;
+      relayGroup.hidden = false;
+    } else {
+      relayGroup.hidden = true;
+    }
+    startInviteCountdown(inv.expires_at_ms);
+    document.getElementById('inviteOverlay').hidden = false;
+  } catch (err) {
+    alert(`Couldn't generate an invite: ${err}`);
+  }
+}
+
+function closeInviteModal() {
+  document.getElementById('inviteOverlay').hidden = true;
+  if (_inviteCountdownTimer) {
+    clearInterval(_inviteCountdownTimer);
+    _inviteCountdownTimer = null;
+  }
+}
+
+function startInviteCountdown(expiresAtMs) {
+  if (_inviteCountdownTimer) clearInterval(_inviteCountdownTimer);
+  const el = document.getElementById('inviteCountdown');
+  const tick = () => {
+    const remaining = Math.max(0, expiresAtMs - Date.now());
+    if (remaining <= 0) {
+      el.textContent = 'Expired — close and try again';
+      el.classList.add('expired');
+      clearInterval(_inviteCountdownTimer);
+      _inviteCountdownTimer = null;
+      return;
+    }
+    const m = Math.floor(remaining / 60_000);
+    const s = Math.floor((remaining % 60_000) / 1000);
+    el.textContent = `Expires in ${m}:${String(s).padStart(2, '0')}`;
+    el.classList.remove('expired');
+  };
+  tick();
+  _inviteCountdownTimer = setInterval(tick, 250);
+}
+
+async function copyInputToClipboard(inputId, btn) {
+  const el = document.getElementById(inputId);
+  if (!el) return;
+  try {
+    await navigator.clipboard.writeText(el.value);
+    const orig = btn.textContent;
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = orig; }, 1500);
+  } catch (err) {
+    // Fallback: select the field so the user can hit Ctrl+C.
+    el.select();
+  }
+}
+
+/// Called from the /ws/status message dispatcher — keeps the Link tab
+/// in sync when a member is added (claim) or revoked, without polling.
+function handleAccessWsEvent(msg) {
+  if (currentView !== 'link') return;
+  if (msg.event === 'member_added' || msg.event === 'revoked') {
+    loadLinkMembers();
+  }
 }
 
 function renderDevicesIfVisible() {
@@ -2593,6 +2943,12 @@ Object.assign(window, {
   deleteCaptureFile,
   downloadMergedLatest,
   requestDeleteAllFleet,
+  // Link tab (SPEC-R2-ROCKER-ACCESS).
+  loadLinkMembers,
+  openInviteModal,
+  closeInviteModal,
+  copyInputToClipboard,
+  revokeMember,
 });
 </script>
 </body>
