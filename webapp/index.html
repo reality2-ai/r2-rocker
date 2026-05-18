@@ -258,7 +258,12 @@
   }
   .sensor-stats {
     display: flex;
-    gap: 16px;
+    /* Allow the row to wrap on narrow screens (phones in portrait
+       can't fit 5 chips + labels). The wrap is deterministic once
+       each chip has a stable width — which is now enforced for
+       both value chips and the rate chip below. */
+    flex-wrap: wrap;
+    gap: 8px 16px;  /* row gap + column gap */
     margin-top: 8px;
     font-family: 'SF Mono', monospace;
     font-size: 12px;
@@ -269,14 +274,18 @@
   }
   .sensor-stats span { opacity: 0.7; }
   /* Each chip occupies a stable width regardless of value sign / digit
-     count. Width chosen so a 6-char value + 2-char unit (" g" or " Hz")
-     fits without truncation: e.g., "-1.234 g". */
+     count. 8ch covers the worst-case content + unit:
+       "-1.234 g"  → 8 chars
+       "100.0 Hz"  → 8 chars
+     The previous 7ch left the rate chip free to widen when Hz hit
+     three digits, which on phones tripped the flex-row wrap point
+     so Hz hopped to a second line. */
   .sensor-stats .vx,
   .sensor-stats .vy,
   .sensor-stats .vz,
   .sensor-stats .vmag {
     display: inline-block;
-    min-width: 7ch;
+    min-width: 8ch;
     text-align: right;
   }
   .sensor-stats .vx { color: #ff6384; }
@@ -988,7 +997,7 @@ function getOrCreateSensor(addr) {
       <span>y: <span class="vy" id="vy-${safeKey}">&mdash;</span></span>
       <span>z: <span class="vz" id="vz-${safeKey}">&mdash;</span></span>
       <span>|A|: <span class="vmag" id="vmag-${safeKey}">&mdash;</span></span>
-      <span style="margin-left:auto; color:#475569; display: inline-block; min-width: 7ch; text-align: right; font-variant-numeric: tabular-nums;" id="rate-${safeKey}">&mdash; Hz</span>
+      <span style="margin-left:auto; color:#475569; display: inline-block; width: 8ch; text-align: right; font-variant-numeric: tabular-nums;" id="rate-${safeKey}">&mdash; Hz</span>
     </div>
     <div class="sensor-event-log" id="slog-${safeKey}"></div>
   `;
