@@ -81,8 +81,13 @@ pub struct InviteEnvelope {
     pub entropy_hex: String,
     /// `data:image/png;base64,...` source for the invite QR `<img>`.
     /// Encodes `url_local` so a phone scanning it opens the webapp's
-    /// `?join=` flow directly.
+    /// `?join=` flow directly. Always present.
     pub qr_png_data_url: String,
+    /// `data:image/png;base64,...` source for the relay-path QR.
+    /// Encodes `url_relay`. Present only when `--relay-url` was set
+    /// — the modal's mode toggle swaps the displayed QR to this when
+    /// the operator picks the "Anywhere" option.
+    pub qr_relay_png_data_url: Option<String>,
     /// `http://<controller_lan_ip>:8080/?join=<tg_hash>.<entropy_hex>` —
     /// always present.
     pub url_local: String,
@@ -356,6 +361,14 @@ impl Access {
         // scheme and switch, but every phone camera handles http
         // URLs out of the box.
         let qr_png_data_url = render_qr_png(&url_local)?;
+        // Second QR for the "Anywhere" toggle in the invite modal —
+        // encodes the static-host + relay URL so a phone with only
+        // cellular internet can scan once and pair via the relay
+        // path (SPEC-R2-ROCKER-ACCESS §5.2). Only present when the
+        // dashboard was started with `--relay-url`.
+        let qr_relay_png_data_url = url_relay
+            .as_deref()
+            .and_then(|u| render_qr_png(u).ok());
 
         // Optional WiFi-join QR. Standard format:
         //   WIFI:T:<auth>;S:<ssid>;P:<psk>;H:<hidden>;;
@@ -383,6 +396,7 @@ impl Access {
             tg_hash: self.tg_hash.clone(),
             entropy_hex,
             qr_png_data_url,
+            qr_relay_png_data_url,
             url_local,
             url_relay,
             qr_wifi_data_url,

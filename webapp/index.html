@@ -141,6 +141,37 @@
     text-align: center; color: #94a3b8; font-size: 13px; margin-top: 16px;
   }
   .invite-countdown.expired { color: #ef4444; }
+  .invite-mode-toggle {
+    display: flex;
+    margin: 12px auto 4px;
+    width: fit-content;
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 3px;
+    gap: 2px;
+  }
+  .invite-mode-toggle button {
+    background: transparent;
+    color: #94a3b8;
+    border: none;
+    padding: 7px 16px;
+    font-size: 13px;
+    cursor: pointer;
+    border-radius: 5px;
+    font-family: inherit;
+  }
+  .invite-mode-toggle button.active {
+    background: #3b82f6;
+    color: #fff;
+    font-weight: 600;
+  }
+  .invite-mode-hint {
+    color: #64748b;
+    font-size: 12px;
+    text-align: center;
+    margin: 0 0 10px;
+  }
   .invite-step-label {
     color: #cbd5e1; font-size: 13px; margin: 12px 0 6px 0;
     text-transform: uppercase; letter-spacing: 1px;
@@ -828,7 +859,7 @@
       <h2>Link a new viewer</h2>
       <button class="bootstrap-close" onclick="closeInviteModal()">&times;</button>
     </div>
-    <p class="invite-help">
+    <p class="invite-help" id="inviteHelp">
       On the new device's camera, scan <strong>step 1</strong> to join the hotspot, then <strong>step 2</strong> to open the dashboard. If the phone already knows the WiFi, you can skip straight to step 2 or use the link.
     </p>
 
@@ -855,18 +886,16 @@
     <div class="invite-qr-wrap">
       <img id="inviteQrImg" alt="Dashboard-link QR" />
     </div>
-    <div class="invite-url-group">
-      <label>Or copy the link manually:</label>
-      <div class="invite-url-row">
-        <input id="inviteUrlLocal" readonly />
-        <button onclick="copyInputToClipboard('inviteUrlLocal', this)">Copy</button>
-      </div>
+    <div class="invite-mode-toggle" id="inviteModeToggle" hidden>
+      <button id="inviteModeLocalBtn" class="active" onclick="setInviteMode('local')">In-room</button>
+      <button id="inviteModeRemoteBtn" onclick="setInviteMode('remote')">Anywhere</button>
     </div>
-    <div class="invite-url-group" id="inviteRelayGroup" hidden>
-      <label>From anywhere on the internet (via relay):</label>
+    <p class="invite-mode-hint" id="inviteModeHint" hidden></p>
+    <div class="invite-url-group">
+      <label id="inviteUrlLabel">Or copy the link manually:</label>
       <div class="invite-url-row">
-        <input id="inviteUrlRelay" readonly />
-        <button onclick="copyInputToClipboard('inviteUrlRelay', this)">Copy</button>
+        <input id="inviteUrlActive" readonly />
+        <button onclick="copyInputToClipboard('inviteUrlActive', this)">Copy</button>
       </div>
     </div>
     <div class="invite-countdown" id="inviteCountdown">Expires in 5:00</div>
@@ -2124,6 +2153,60 @@ async function requestDeleteAllFleet() {
 // a localhost-only ConnectInfo check (see SPEC-R2-ROCKER-ACCESS §11.1).
 
 let _inviteCountdownTimer = null;
+let _currentInvite = null;
+let _inviteMode = 'local';
+
+function setInviteMode(mode) {
+  if (!_currentInvite) return;
+  // If the operator picks Anywhere on an invite that doesn't have a
+  // relay URL (e.g. dashboard launched without --relay-url), silently
+  // fall back to local — the toggle would already be hidden in that
+  // case, but be defensive.
+  if (mode === 'remote' && !_currentInvite.qr_relay) mode = 'local';
+  _inviteMode = mode;
+
+  const localBtn  = document.getElementById('inviteModeLocalBtn');
+  const remoteBtn = document.getElementById('inviteModeRemoteBtn');
+  localBtn.classList.toggle('active',  mode === 'local');
+  remoteBtn.classList.toggle('active', mode === 'remote');
+
+  const qrImg     = document.getElementById('inviteQrImg');
+  const urlInput  = document.getElementById('inviteUrlActive');
+  const urlLabel  = document.getElementById('inviteUrlLabel');
+  const wifiBlock = document.getElementById('inviteWifiBlock');
+  const step2Lbl  = document.getElementById('inviteStep2Label');
+  const help      = document.getElementById('inviteHelp');
+  const hint      = document.getElementById('inviteModeHint');
+
+  if (mode === 'remote') {
+    // Anywhere mode: single QR + cellular-friendly URL. No WiFi
+    // step, since the phone doesn't need to be on the hotspot at all.
+    qrImg.src    = _currentInvite.qr_relay;
+    urlInput.value = _currentInvite.url_relay;
+    urlLabel.textContent = 'Or copy this link (works from anywhere):';
+    wifiBlock.hidden = true;
+    step2Lbl.textContent = 'Scan to open the dashboard';
+    help.innerHTML = "The phone can scan this from anywhere on the internet — no WiFi join needed. Live data flows through the cloud relay.";
+    hint.textContent = 'Works on any internet connection. Slightly higher latency.';
+    hint.hidden = false;
+  } else {
+    // In-room mode: existing two-step flow, restored.
+    qrImg.src    = _currentInvite.qr_local;
+    urlInput.value = _currentInvite.url_local;
+    urlLabel.textContent = 'Or copy the link manually:';
+    if (_currentInvite.has_wifi) {
+      wifiBlock.hidden = false;
+      step2Lbl.textContent = 'Step 2: Open the dashboard';
+      help.innerHTML = "On the new device's camera, scan <strong>step 1</strong> to join the hotspot, then <strong>step 2</strong> to open the dashboard. If the phone already knows the WiFi, you can skip straight to step 2 or use the link.";
+    } else {
+      wifiBlock.hidden = true;
+      step2Lbl.textContent = 'Open the dashboard';
+      help.innerHTML = "Scan with the new device's camera while it's on the same WiFi as the dashboard.";
+    }
+    hint.textContent = 'Phone must be on the dashboard’s WiFi. Fastest path; no internet needed.';
+    hint.hidden = !_currentInvite.qr_relay;   // hide the hint line entirely when the toggle isn't shown
+  }
+}
 let _isKeyHolder = false; // updated optimistically on each /api/access/* hit
 
 async function loadLinkMembers() {
@@ -2345,39 +2428,42 @@ async function openInviteModal() {
       /^http:\/\/[^/]+/,
       `${location.protocol}//${location.host}`
     );
-    document.getElementById('inviteQrImg').src = inv.qr_png_data_url;
-    document.getElementById('inviteUrlLocal').value = fixedLocal;
+
+    // Stash both QR + URL pairs on a global so the In-room ↔ Anywhere
+    // toggle (setInviteMode) can swap them without re-fetching the
+    // invite. WiFi creds are folded in so In-room re-shows step 1
+    // and Anywhere hides it.
+    _currentInvite = {
+      qr_local:  inv.qr_png_data_url,
+      qr_relay:  inv.qr_relay_png_data_url || null,
+      url_local: fixedLocal,
+      url_relay: inv.url_relay || null,
+      has_wifi:  !!inv.qr_wifi_data_url,
+    };
 
     // Step-1 WiFi-join QR (present iff the dashboard knows the
     // hotspot creds — i.e. --wifi-config pointed at a readable
-    // wifi_config.toml). Hidden otherwise, and the Step-2 label is
-    // simplified.
-    const wifiBlock = document.getElementById('inviteWifiBlock');
+    // wifi_config.toml). Populated once here; visibility toggles
+    // with mode in setInviteMode.
     if (inv.qr_wifi_data_url) {
       document.getElementById('inviteWifiQrImg').src = inv.qr_wifi_data_url;
       const ssidLabel = document.getElementById('inviteWifiSsidLabel');
       ssidLabel.textContent = inv.wifi_ssid ? `(${inv.wifi_ssid})` : '';
-      // Manual SSID + PSK fields so the operator can read them out
-      // or copy them when the QR scan flakes out.
       if (inv.wifi_ssid) document.getElementById('inviteWifiSsid').value = inv.wifi_ssid;
       if (inv.wifi_psk)  {
         document.getElementById('inviteWifiPsk').value = inv.wifi_psk;
         document.getElementById('inviteWifiPsk').type = 'password';
         document.getElementById('inviteWifiPskReveal').textContent = 'Show';
       }
-      wifiBlock.hidden = false;
-      document.getElementById('inviteStep2Label').textContent = 'Step 2: Open the dashboard';
-    } else {
-      wifiBlock.hidden = true;
-      document.getElementById('inviteStep2Label').textContent = 'Open the dashboard';
     }
-    const relayGroup = document.getElementById('inviteRelayGroup');
-    if (inv.url_relay) {
-      document.getElementById('inviteUrlRelay').value = inv.url_relay;
-      relayGroup.hidden = false;
-    } else {
-      relayGroup.hidden = true;
-    }
+
+    // Show the In-room ↔ Anywhere switch only when the dashboard
+    // actually has a relay configured. Without it, "Anywhere" has
+    // nothing to point at, so the existing single-QR layout stands.
+    const toggle = document.getElementById('inviteModeToggle');
+    toggle.hidden = !(_currentInvite.qr_relay && _currentInvite.url_relay);
+
+    setInviteMode('local');
     startInviteCountdown(inv.expires_at_ms);
     document.getElementById('inviteOverlay').hidden = false;
   } catch (err) {
