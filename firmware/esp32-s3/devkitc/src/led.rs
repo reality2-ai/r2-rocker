@@ -147,12 +147,14 @@ const FRAME_MS: u64 = 33; // ~30 Hz tick — smooth pulses at low CPU cost
 // `StreamingLive` outside an active capture.
 const HEARTBEAT_BPM: f32 = 40.0;
 /// Global brightness cap applied after `render()`. The DevKitC's onboard
-/// WS2812 has no diffuser — at full RGB it's painfully bright. 0.70 is
-/// the operator-visible level for an exposed board in normal room light
-/// (bench setting); drop lower (e.g. 0.15-0.20) for stacked / enclosed
-/// deployments where the LED is close to the eye or seen through a
-/// translucent housing.
-const BRIGHTNESS: f32 = 0.70;
+/// WS2812 has no diffuser — at full RGB it's painfully bright on a bare
+/// board (0.70 was the bench setting). With the sensor PCB stacked on
+/// top of the ESP32, most of the light is now attenuated through the
+/// carrier board, so full power gives the operator the right amount of
+/// glow at room light. Drop back lower (e.g. 0.15-0.30) for any future
+/// deployment where the LED is exposed or sits behind a translucent
+/// housing close to the eye.
+const BRIGHTNESS: f32 = 1.00;
 
 fn run_led_loop(
     led: &mut Ws2812Esp32Rmt<'_>,
