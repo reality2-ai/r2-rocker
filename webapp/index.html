@@ -593,8 +593,13 @@
      "needs attention" or "in transition". The physical RGB LED still
      heartbeats so the rig itself remains glanceable; the dashboard's
      virtual LED conveys the same colour without the visual chatter. */
-  .virt-led.tg-streaming  { background: #22c55e; box-shadow: 0 0 8px #22c55e; }
-  .virt-led.tg-catchup    { background: #facc15; box-shadow: 0 0 8px #facc15; }
+  /* Slow 25 BPM heartbeat (2.4 s per cycle) matches the firmware's
+     `LedState::StreamingLive` / `StreamingCatchup`. JS uses negative
+     `animation-delay` against `Date.now()` to align every card's
+     virtual LED to the same wall-clock phase the sensors animate
+     from — virtual + physical LEDs pulse in lockstep across the rig. */
+  .virt-led.tg-streaming  { background: #22c55e; box-shadow: 0 0 8px #22c55e; animation: led-heartbeat 2.4s ease-in-out infinite; }
+  .virt-led.tg-catchup    { background: #facc15; box-shadow: 0 0 8px #facc15; animation: led-heartbeat 2.4s ease-in-out infinite; }
   .virt-led.tg-cal        { background: #a855f7; box-shadow: 0 0 8px #a855f7; }
   .virt-led.tg-low        { background: #f97316; box-shadow: 0 0 8px #f97316; animation: led-pulse 1.5s ease-in-out infinite; }
   .virt-led.tg-ota        { background: #ec4899; box-shadow: 0 0 8px #ec4899; animation: led-strobe 0.18s steps(2) infinite; }
@@ -1167,6 +1172,42 @@ function setDeviceName(sensor, name) {
   updateSensorList();
 }
 
+// Map .tg-* state class → animation period (ms). Used by
+// `syncVirtLedPhase` to align every card's virtual LED to a single
+// wall-clock phase so all dots — and all sensors' physical RGB LEDs
+// running off the synced firmware clock — pulse in lockstep.
+const TG_LED_PERIODS_MS = {
+  'tg-advertising':    1000,
+  'tg-ble':             400,
+  'tg-streaming':      2400,   // 25 BPM heartbeat, matches firmware
+  'tg-catchup':        2400,
+  'tg-low':            1500,
+  'tg-ota':             180,
+  'tg-error':           250,
+  'tg-streaming-sim':  2000,
+  'tg-recording':       500,
+  'tg-resetting':       500,
+};
+
+// Align this LED's CSS animation to the wall clock so it stays in
+// phase with every other LED on the page (and with the physical
+// sensor LEDs, which use SPEC-R2-ROCKER-TIMESYNC's synced epoch ms
+// via the same modulo). Negative `animation-delay` rewinds the
+// animation timeline to a known offset within its cycle.
+function syncVirtLedPhase(el) {
+  if (!el) return;
+  for (const cls of el.classList) {
+    const period = TG_LED_PERIODS_MS[cls];
+    if (period) {
+      el.style.animationDelay = `-${Date.now() % period}ms`;
+      return;
+    }
+  }
+  // No animated state — clear any stale delay so the inert dot
+  // doesn't carry over offsets from a prior state.
+  el.style.animationDelay = '';
+}
+
 // Per-card LED refresh. The header's "Sensors:" count is bumped here
 // too; the previous sidebar "Connected Sensors" box is gone — its
 // information has been promoted onto each card via the .virt-led
@@ -1180,6 +1221,7 @@ function updateSensorList() {
     if (!ledEl) continue;
     const cls = ledClassFor(s);
     ledEl.className = 'virt-led virt-led-lg ' + cls;
+    syncVirtLedPhase(ledEl);
   }
 }
 
@@ -3650,6 +3692,7 @@ class R2DeviceCard extends HTMLElement {
     if (last.ledClass !== ledClass) {
       r.led.className = ledClass;
       last.ledClass = ledClass;
+      syncVirtLedPhase(r.led);
     }
 
     // Firmware row + needs-update dot.
@@ -3800,6 +3843,7 @@ class R2DataCard extends HTMLElement {
     r.name.textContent = s.deviceName ?? s.key;
     r.card.className = `device-card ${classifyOnline(s)}`;
     r.led.className = `virt-led ${ledClassFor(s)}`;
+    syncVirtLedPhase(r.led);
     // SD presence is inferred from `captureSdAvailable` set by file
     // list responses. If list returned a 5xx with a "no SD" message
     // we mark it false. Until then assume present.
