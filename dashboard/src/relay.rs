@@ -217,9 +217,12 @@ async fn run_one_session(
             res = stream.next() => {
                 match res {
                     Some(Ok(WsMessage::Ping(p))) => {
+                        eprintln!("[relay] ping in ({} bytes)", p.len());
                         let _ = sink.send(WsMessage::Pong(p)).await;
                     }
-                    Some(Ok(WsMessage::Pong(_))) => { /* ours, expected */ }
+                    Some(Ok(WsMessage::Pong(_))) => {
+                        eprintln!("[relay] pong in");
+                    }
                     Some(Ok(WsMessage::Text(t))) => {
                         // r2-relay only inspects text for `ping` /
                         // `catchup`; everything else from peers is
