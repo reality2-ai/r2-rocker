@@ -586,39 +586,25 @@
     background: #334155;
     flex-shrink: 0;
   }
-  .virt-led.tg-boot       { background: #f8fafc; box-shadow: 0 0 8px #f8fafc; animation: led-flash 1s 1; }
-  .virt-led.tg-advertising { background: #3b82f6; box-shadow: 0 0 8px #3b82f6; animation: led-pulse 1.0s ease-in-out infinite; }
-  .virt-led.tg-ble        { background: #06b6d4; box-shadow: 0 0 8px #06b6d4; animation: led-pulse 0.4s ease-in-out infinite; }
-  /* Steady (no animation) for resting states — animation is reserved for
-     "needs attention" or "in transition". The physical RGB LED still
-     heartbeats so the rig itself remains glanceable; the dashboard's
-     virtual LED conveys the same colour without the visual chatter. */
-  /* Slow 25 BPM heartbeat (2.4 s per cycle) matches the firmware's
-     `LedState::StreamingLive` / `StreamingCatchup`. JS uses negative
-     `animation-delay` against `Date.now()` to align every card's
-     virtual LED to the same wall-clock phase the sensors animate
-     from — virtual + physical LEDs pulse in lockstep across the rig. */
-  .virt-led.tg-streaming  { background: #22c55e; box-shadow: 0 0 8px #22c55e; animation: led-heartbeat 2.4s ease-in-out infinite; }
-  .virt-led.tg-catchup    { background: #facc15; box-shadow: 0 0 8px #facc15; animation: led-heartbeat 2.4s ease-in-out infinite; }
+  /* Per-state colour + glow. Opacity is driven by `tickVirtualLeds()`
+     (rAF loop) from `Date.now()` so every virtual LED on the page is
+     phase-locked to the same wall clock the sensors sync to via
+     SPEC-R2-ROCKER-TIMESYNC. CSS animations were dropped because
+     setting `animation-delay` on a running animation didn't restart
+     the timeline cleanly — the dots looked like they were "trying to
+     catch up" between cycles. */
+  .virt-led.tg-boot       { background: #f8fafc; box-shadow: 0 0 8px #f8fafc; }
+  .virt-led.tg-advertising { background: #3b82f6; box-shadow: 0 0 8px #3b82f6; }
+  .virt-led.tg-ble        { background: #06b6d4; box-shadow: 0 0 8px #06b6d4; }
+  .virt-led.tg-streaming  { background: #22c55e; box-shadow: 0 0 8px #22c55e; }
+  .virt-led.tg-catchup    { background: #facc15; box-shadow: 0 0 8px #facc15; }
   .virt-led.tg-cal        { background: #a855f7; box-shadow: 0 0 8px #a855f7; }
-  .virt-led.tg-low        { background: #f97316; box-shadow: 0 0 8px #f97316; animation: led-pulse 1.5s ease-in-out infinite; }
-  .virt-led.tg-ota        { background: #ec4899; box-shadow: 0 0 8px #ec4899; animation: led-strobe 0.18s steps(2) infinite; }
-  .virt-led.tg-error      { background: #ef4444; box-shadow: 0 0 8px #ef4444; animation: led-pulse 0.25s ease-in-out infinite; }
-  /* Streaming with synthetic data — purple slow pulse, distinct from solid-purple Calibrating */
-  .virt-led.tg-streaming-sim { background: #a855f7; box-shadow: 0 0 8px #a855f7; animation: led-pulse 2.0s ease-in-out infinite; }
-  /* Recording (post-Mark): single crisp green tick every 0.5s, matching
-     the firmware's `LedState::Recording` so virtual + physical LEDs are
-     in sync. "Something is happening" beat — clearly different from the
-     calmer streaming heartbeat. */
-  .virt-led.tg-recording { background: #22c55e; box-shadow: 0 0 8px #22c55e; animation: led-tick 0.5s ease-out infinite; }
-  @keyframes led-tick {
-    0%   { opacity: 1; }
-    12%  { opacity: 1; }
-    18%  { opacity: 0; }
-    100% { opacity: 0; }
-  }
-  /* Transient client-side state: optimistic indicator while a remote reset is in flight. Cleared when the sensor reconnects. */
-  .virt-led.tg-resetting  { background: #94a3b8; box-shadow: 0 0 6px #94a3b8; animation: led-pulse 0.5s ease-in-out infinite; }
+  .virt-led.tg-low        { background: #f97316; box-shadow: 0 0 8px #f97316; }
+  .virt-led.tg-ota        { background: #ec4899; box-shadow: 0 0 8px #ec4899; }
+  .virt-led.tg-error      { background: #ef4444; box-shadow: 0 0 8px #ef4444; }
+  .virt-led.tg-streaming-sim { background: #a855f7; box-shadow: 0 0 8px #a855f7; }
+  .virt-led.tg-recording { background: #22c55e; box-shadow: 0 0 8px #22c55e; }
+  .virt-led.tg-resetting  { background: #94a3b8; box-shadow: 0 0 6px #94a3b8; }
 
   /* Health-source dot — second indicator next to the FSM-state dot. */
   .health-dot {
@@ -1172,40 +1158,79 @@ function setDeviceName(sensor, name) {
   updateSensorList();
 }
 
-// Map .tg-* state class → animation period (ms). Used by
-// `syncVirtLedPhase` to align every card's virtual LED to a single
-// wall-clock phase so all dots — and all sensors' physical RGB LEDs
-// running off the synced firmware clock — pulse in lockstep.
-const TG_LED_PERIODS_MS = {
-  'tg-advertising':    1000,
-  'tg-ble':             400,
-  'tg-streaming':      2400,   // 25 BPM heartbeat, matches firmware
-  'tg-catchup':        2400,
-  'tg-low':            1500,
-  'tg-ota':             180,
-  'tg-error':           250,
-  'tg-streaming-sim':  2000,
-  'tg-recording':       500,
-  'tg-resetting':       500,
+// Map .tg-* state class → (period_ms, opacityFn(phase∈[0,1)) → [0,1]).
+// Each shape function mirrors the firmware's `render()` helper in
+// `firmware/.../src/led.rs` so the virtual LED pulses identically to
+// the physical RGB LED beside it. Phase comes from
+// `Date.now() % period_ms` — the same wall clock the firmware syncs
+// to via SPEC-R2-ROCKER-TIMESYNC, so every dot on the page AND every
+// physical LED in the rig agrees on the current phase.
+//
+// `pulse`     — smooth sin oscillation (firmware led.rs `pulse()`)
+// `heartbeat` — gaussian lub-dub        (firmware led.rs `heartbeat()`)
+// `tick`      — single gaussian bump    (firmware led.rs `single_tick()`)
+// `strobe`    — 50% square wave         (firmware led.rs `strobe()`)
+// `flash`     — one-shot ramp up/down   (matches `led-flash` keyframes)
+const VIRT_LED_SHAPES = {
+  // p (phase 0..1) returns opacity 0..1
+  pulse:     (p) => 0.5 + 0.5 * Math.sin(p * 2 * Math.PI),
+  heartbeat: (p) => {
+    const b1 = Math.exp(-Math.pow((p - 0.00) * 14, 2));
+    const b2 = Math.exp(-Math.pow((p - 0.18) * 14, 2)) * 0.7;
+    return Math.max(0, Math.min(1, b1 + b2));
+  },
+  tick:      (p) => Math.exp(-Math.pow((p - 0.05) * 14, 2)),
+  strobe:    (p) => (p < 0.5 ? 1 : 0),
+  flash:     (p) => (p < 0.3 ? p / 0.3 : p < 0.7 ? 1 : (1 - p) / 0.3),
+};
+const VIRT_LED_STATES = {
+  'tg-boot':           { periodMs: 1000, shape: 'flash' },
+  'tg-advertising':    { periodMs: 1000, shape: 'pulse' },
+  'tg-ble':            { periodMs:  400, shape: 'pulse' },
+  'tg-streaming':      { periodMs: 2400, shape: 'heartbeat' },
+  'tg-catchup':        { periodMs: 2400, shape: 'heartbeat' },
+  'tg-low':            { periodMs: 1500, shape: 'pulse' },
+  'tg-ota':            { periodMs:  180, shape: 'strobe' },
+  'tg-error':          { periodMs:  250, shape: 'pulse' },
+  'tg-streaming-sim':  { periodMs: 2000, shape: 'pulse' },
+  'tg-recording':      { periodMs:  500, shape: 'tick' },
+  'tg-resetting':      { periodMs:  500, shape: 'pulse' },
+  // tg-cal is a solid state — no entry → tickVirtualLeds leaves it alone.
 };
 
-// Align this LED's CSS animation to the wall clock so it stays in
-// phase with every other LED on the page (and with the physical
-// sensor LEDs, which use SPEC-R2-ROCKER-TIMESYNC's synced epoch ms
-// via the same modulo). Negative `animation-delay` rewinds the
-// animation timeline to a known offset within its cycle.
-function syncVirtLedPhase(el) {
-  if (!el) return;
-  for (const cls of el.classList) {
-    const period = TG_LED_PERIODS_MS[cls];
-    if (period) {
-      el.style.animationDelay = `-${Date.now() % period}ms`;
-      return;
+let _virtLedRafScheduled = false;
+function tickVirtualLeds() {
+  _virtLedRafScheduled = false;
+  const nowMs = Date.now();
+  const els = document.getElementsByClassName('virt-led');
+  for (const el of els) {
+    let state = null;
+    for (const cls of el.classList) {
+      if (VIRT_LED_STATES[cls]) { state = VIRT_LED_STATES[cls]; break; }
     }
+    if (!state) {
+      // Solid or no recognised state — full brightness.
+      el.style.opacity = '';
+      continue;
+    }
+    const phase = (nowMs % state.periodMs) / state.periodMs;
+    const op = VIRT_LED_SHAPES[state.shape](phase);
+    // Floor at 0.06 so the dim half of the cycle still shows the
+    // colour rather than disappearing into the dark page background.
+    el.style.opacity = (0.06 + 0.94 * Math.max(0, Math.min(1, op))).toFixed(3);
   }
-  // No animated state — clear any stale delay so the inert dot
-  // doesn't carry over offsets from a prior state.
-  el.style.animationDelay = '';
+  if (els.length > 0) {
+    _virtLedRafScheduled = true;
+    requestAnimationFrame(tickVirtualLeds);
+  }
+}
+function syncVirtLedPhase(_el) {
+  // No-op now — opacity is driven globally by tickVirtualLeds(). The
+  // function name is kept so existing call sites don't break.
+  if (!_virtLedRafScheduled) {
+    _virtLedRafScheduled = true;
+    requestAnimationFrame(tickVirtualLeds);
+  }
 }
 
 // Per-card LED refresh. The header's "Sensors:" count is bumped here
