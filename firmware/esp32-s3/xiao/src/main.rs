@@ -146,6 +146,12 @@ fn run(
     // ── Synchronised clock (SPEC-R2-ROCKER-TIMESYNC) ──────────────────
     // NVS-backed offset applied to every emitted/persisted ts_ms.
     let clock = clock::Clock::load(nvs.clone()).context("clock init")?;
+    // Plumb the synced clock into the LED so every sensor in the rig
+    // animates in phase once their time-sync offsets have converged.
+    // Until this call, the LED uses its local Instant for animation —
+    // boot flash + early advertising aren't synchronised across
+    // sensors, but the heartbeat / Recording tick / pulses are.
+    led_handle.attach_clock(clock.clone());
 
     // ── Boot priority WiFi-cred resolution (§2.1.1). ──────────────────
     wifi_prov::init_nvs(nvs.clone());

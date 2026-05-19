@@ -14,7 +14,7 @@ use esp_idf_svc::hal::peripheral::Peripheral;
 use esp_idf_svc::hal::rmt::RmtChannel;
 use smart_leds::{SmartLedsWrite, RGB8};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use ws2812_esp32_rmt_driver::Ws2812Esp32Rmt;
 
@@ -73,6 +73,14 @@ pub struct LedHandle {
     state: Arc<AtomicU8>,
     low_battery: Arc<AtomicBool>,
     ota: Arc<AtomicBool>,
+    /// Optional synchronised wall-clock source. When set (post
+    /// `Clock::load()`), the LED loop computes pulse phases from
+    /// `clock.ts_ms_i64()` instead of local Instant::elapsed() — so
+    /// every sensor in the rig that has converged on the dashboard's
+    /// time-sync offset pulses, heartbeats, and ticks in lockstep. If
+    /// unset (early-boot / pre-sync), falls back to local elapsed
+    /// time so the LED still animates.
+    sync_clock: Arc<Mutex<Option<Arc<crate::clock::Clock>>>>,
 }
 
 impl LedHandle {
@@ -97,6 +105,14 @@ impl LedHandle {
     pub fn set_ota(&self, on: bool) {
         self.ota.store(on, Ordering::Relaxed);
     }
+    /// Plumb the synchronised clock in once it's loaded. From this
+    /// point on all sensors that have converged on the dashboard's
+    /// time-sync offset will animate in phase.
+    pub fn attach_clock(&self, clock: Arc<crate::clock::Clock>) {
+        if let Ok(mut slot) = self.sync_clock.lock() {
+            *slot = Some(clock);
+        }
+    }
 }
 
 /// Spawn the LED animator thread. Returns a handle the rest of the
@@ -114,10 +130,12 @@ where
     let state = Arc::new(AtomicU8::new(LedState::Boot as u8));
     let low_battery = Arc::new(AtomicBool::new(false));
     let ota = Arc::new(AtomicBool::new(false));
+    let sync_clock: Arc<Mutex<Option<Arc<crate::clock::Clock>>>> = Arc::new(Mutex::new(None));
 
     let state_for_thread = state.clone();
     let low_for_thread = low_battery.clone();
     let ota_for_thread = ota.clone();
+    let clock_for_thread = sync_clock.clone();
 
     std::thread::Builder::new()
         .stack_size(4096)
@@ -132,11 +150,11 @@ where
                     return;
                 }
             };
-            run_led_loop(&mut led, state_for_thread, low_for_thread, ota_for_thread);
+            run_led_loop(&mut led, state_for_thread, low_for_thread, ota_for_thread, clock_for_thread);
         })
         .context("spawn LED thread")?;
 
-    Ok(LedHandle { state, low_battery, ota })
+    Ok(LedHandle { state, low_battery, ota, sync_clock })
 }
 
 const FRAME_MS: u64 = 33; // ~30 Hz tick — smooth pulses at low CPU cost
@@ -160,6 +178,7 @@ fn run_led_loop(
     state: Arc<AtomicU8>,
     low_battery: Arc<AtomicBool>,
     ota: Arc<AtomicBool>,
+    sync_clock: Arc<Mutex<Option<Arc<crate::clock::Clock>>>>,
 ) {
     let start = Instant::now();
     loop {
@@ -169,7 +188,24 @@ fn run_led_loop(
             LedState::from_u8(state.load(Ordering::Relaxed))
         };
         let lb = low_battery.load(Ordering::Relaxed);
-        let elapsed = start.elapsed();
+        // Phase source: prefer the synchronised wall clock once Clock
+        // has been plumbed in (post-`Clock::load()` in main.rs). All
+        // sensors converged on the dashboard's time-sync offset will
+        // see the same `epoch_ms`, so their pulse / heartbeat / tick
+        // animations stay in lockstep across the rig. Before sync, or
+        // if the lock fails, fall back to local Instant::elapsed so
+        // the LED still animates.
+        let elapsed = match sync_clock.lock().ok().and_then(|g| g.clone()) {
+            Some(clock) => {
+                let ms = clock.ts_ms_i64();
+                if ms > 0 {
+                    Duration::from_millis(ms as u64)
+                } else {
+                    start.elapsed()
+                }
+            }
+            None => start.elapsed(),
+        };
         let colour = scale(render(s, lb, elapsed), BRIGHTNESS);
         if let Err(e) = led.write(std::iter::once(colour)) {
             log::warn!("[LED] write failed: {e}");
