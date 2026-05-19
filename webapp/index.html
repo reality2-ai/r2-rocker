@@ -755,6 +755,16 @@
     border-bottom: 1px solid #131a26;
   }
   .data-file-row:last-child { border-bottom: 0; }
+  /* The "last marked" capture across all sensors — same filename per
+     sensor — is what the `💾 Download merged CSV (last marked)`
+     button bundles. Highlight those rows so the operator can see at
+     a glance which files belong to the merged export. */
+  .data-file-row.marked-export {
+    background: rgba(34, 197, 94, 0.06);
+    border-left: 2px solid #22c55e;
+    padding-left: 8px;
+  }
+  .data-file-row.marked-export .name { color: #e2e8f0; font-weight: 500; }
   .data-file-row .name { flex: 1; color: #cbd5e1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .data-file-row .meta { color: #475569; font-size: 11px; }
   .data-file-row button {
@@ -2274,6 +2284,9 @@ async function captureMark() {
     // the response, but we already know what we sent.
     lastMarkedFilename = `${prefix}-${name}.csv`;
     updateCaptureUiFromFleet();
+    // Re-render each data card so the new "marked-export" highlight
+    // lights up on whichever file matches the new bundle target.
+    renderDataViewIfVisible();
   } catch (err) {
     console.warn('[capture] mark', err);
   }
@@ -3912,7 +3925,10 @@ class R2DataCard extends HTMLElement {
       if (am !== bm) return bm - am;
       return (b.name || '').localeCompare(a.name || '');
     });
-    const sig = JSON.stringify(files);
+    // Re-render when lastMarkedFilename changes too — that toggles
+    // the `.marked-export` highlight on whichever row matches the
+    // current bundle target.
+    const sig = JSON.stringify({ files, marked: lastMarkedFilename });
     if (sig !== this._lastFilesSig) {
       if (files.length === 0) {
         r.files.innerHTML = '<div class="data-empty">No captures yet on this sensor.</div>';
@@ -3936,8 +3952,10 @@ class R2DataCard extends HTMLElement {
           const delBtn = isControllerRole
             ? `<button class="danger" onclick="deleteCaptureFile('${addrAttr}','${nameAttr}')">🗑</button>`
             : '';
+          const markedCls = (lastMarkedFilename && f.name === lastMarkedFilename)
+            ? ' marked-export' : '';
           return `
-            <div class="data-file-row">
+            <div class="data-file-row${markedCls}">
               <span class="name" title="${nameEsc}">${nameEsc}</span>
               <span class="meta">${sizeKb} KB · ${mt}</span>
               <button onclick="downloadCaptureFile('${addrAttr}','${nameAttr}')">📥</button>
