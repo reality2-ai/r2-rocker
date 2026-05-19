@@ -601,6 +601,17 @@
   .virt-led.tg-error      { background: #ef4444; box-shadow: 0 0 8px #ef4444; animation: led-pulse 0.25s ease-in-out infinite; }
   /* Streaming with synthetic data — purple slow pulse, distinct from solid-purple Calibrating */
   .virt-led.tg-streaming-sim { background: #a855f7; box-shadow: 0 0 8px #a855f7; animation: led-pulse 2.0s ease-in-out infinite; }
+  /* Recording (post-Mark): single crisp green tick every 0.5s, matching
+     the firmware's `LedState::Recording` so virtual + physical LEDs are
+     in sync. "Something is happening" beat — clearly different from the
+     calmer streaming heartbeat. */
+  .virt-led.tg-recording { background: #22c55e; box-shadow: 0 0 8px #22c55e; animation: led-tick 0.5s ease-out infinite; }
+  @keyframes led-tick {
+    0%   { opacity: 1; }
+    12%  { opacity: 1; }
+    18%  { opacity: 0; }
+    100% { opacity: 0; }
+  }
   /* Transient client-side state: optimistic indicator while a remote reset is in flight. Cleared when the sensor reconnects. */
   .virt-led.tg-resetting  { background: #94a3b8; box-shadow: 0 0 6px #94a3b8; animation: led-pulse 0.5s ease-in-out infinite; }
 
@@ -3340,6 +3351,7 @@ function ledClassFor(s) {
     case 8:  return 'tg-ota';          // OTA
     case 9:  return 'tg-error';        // ERROR
     case 10: return 'tg-streaming-sim'; // STREAMING_DEGRADED_SIM (SPEC-R2-ROCKER-SENSOR-HEALTH)
+    case 11: return 'tg-recording';     // RECORDING (post-Mark, SPEC-R2-ROCKER-CAPTURE)
     default: return '';
   }
 }

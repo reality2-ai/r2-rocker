@@ -38,6 +38,12 @@ pub enum LedState {
     /// from `Calibrating` (also purple) by pulse vs solid. See
     /// `SPEC-R2-ROCKER-SENSOR-HEALTH` §4.
     StreamingDegradedSim = 10, // purple, slow pulse 0.5 Hz
+    /// Actively recording samples into a named capture file (post-Mark
+    /// in SPEC-R2-ROCKER-CAPTURE state machine). Visually distinct from
+    /// `StreamingLive` (background heartbeat) — a crisp green tick
+    /// every 0.5s so the operator can tell at a glance that the file
+    /// is growing, not just that the link is alive.
+    Recording = 11,
 }
 
 impl LedState {
@@ -54,6 +60,7 @@ impl LedState {
             8 => Self::Ota,
             9 => Self::Error,
             10 => Self::StreamingDegradedSim,
+            11 => Self::Recording,
             _ => Self::Boot,
         }
     }
@@ -195,6 +202,11 @@ fn render(state: LedState, low_battery: bool, elapsed: Duration) -> RGB8 {
         LedState::Ota         => strobe(rgb(0x40, 0x40, 0x40), elapsed, 0.18),
         LedState::Error       => scale(rgb(0xFF, 0x00, 0x00), pulse(elapsed, 0.25)),
         LedState::StreamingDegradedSim => scale(rgb(0x80, 0x00, 0xC0), pulse(elapsed, 2.0)),
+        // Single crisp green tick every 0.5s — a short gaussian bump
+        // at the start of each half-second window, then dark for the
+        // rest. Distinguishable at a glance from `StreamingLive`'s
+        // gentle heartbeat: "actively recording" vs "link alive".
+        LedState::Recording => scale(rgb(0x00, 0xE0, 0x30), single_tick(elapsed, 0.5)),
     }
 }
 
@@ -232,4 +244,13 @@ fn heartbeat(t: Duration, bpm: f32) -> f32 {
 fn strobe(c: RGB8, t: Duration, period_secs: f32) -> RGB8 {
     let phase = (t.as_secs_f32() / period_secs).fract();
     if phase < 0.5 { c } else { rgb(0, 0, 0) }
+}
+
+/// Single narrow tick per `period_secs`: a gaussian bump at the start
+/// of the period (~5 % in) that decays to ~0 within ~15 % of the
+/// period, leaving the rest dark. Used by `LedState::Recording` for an
+/// unmistakable "something is happening" beat without being noisy.
+fn single_tick(t: Duration, period_secs: f32) -> f32 {
+    let phase = (t.as_secs_f32() / period_secs).fract();
+    (-((phase - 0.05) * 14.0).powi(2)).exp()
 }

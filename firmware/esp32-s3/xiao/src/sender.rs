@@ -579,15 +579,21 @@ impl Sender {
         let state = cap.state_byte();
         let file = cap.open_file_name();
 
-        // LED follows the capture state machine: purple while
-        // Calibrating; restore to the session's normal streaming
-        // colour otherwise. Same priority everywhere else in the
-        // firmware — pendingOta / Reset would override these via the
-        // LED's own priority logic, but capture-vs-streaming is a
-        // simple flip.
+        // LED follows the capture state machine:
+        //   Calibrating → purple solid.
+        //   Recording   → green single-tick at 2 Hz — distinct from
+        //                 the heartbeat of plain StreamingLive so the
+        //                 operator can see at a glance that the file
+        //                 is actually growing post-Mark.
+        //   Idle (or anything else) → the session's normal streaming
+        //                 colour (green heartbeat, or purple slow
+        //                 pulse if running on the simulator).
+        // Same priority as everywhere else in the firmware —
+        // pendingOta / Reset override via the LED's own priority logic.
         use crate::led::LedState;
         self.led.set(match state {
             crate::capture::STATE_CALIBRATING => LedState::Calibrating,
+            crate::capture::STATE_RECORDING   => LedState::Recording,
             _ => if self.adxl.is_some() {
                 LedState::StreamingLive
             } else {
