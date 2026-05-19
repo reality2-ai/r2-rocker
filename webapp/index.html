@@ -3903,8 +3903,15 @@ class R2DataCard extends HTMLElement {
     r.sd.style.color = sdOk ? '#cbd5e1' : '#f87171';
 
     // File list — rebuild only when the signature changed (same idea
-    // as R2DeviceCard's `_last` cache).
-    const files = s.dataFiles ?? [];
+    // as R2DeviceCard's `_last` cache). Operators look for the most
+    // recent capture first (you just hit Stop → expect that file at
+    // the top), so sort by mtime descending; fall back to filename
+    // descending when mtime is missing (older firmware / no clock).
+    const files = (s.dataFiles ?? []).slice().sort((a, b) => {
+      const am = a.mtime_ms ?? 0, bm = b.mtime_ms ?? 0;
+      if (am !== bm) return bm - am;
+      return (b.name || '').localeCompare(a.name || '');
+    });
     const sig = JSON.stringify(files);
     if (sig !== this._lastFilesSig) {
       if (files.length === 0) {
