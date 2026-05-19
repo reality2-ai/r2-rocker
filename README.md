@@ -287,21 +287,29 @@ cargo run --release -p r2-dashboard
 # 6. Click "Connect Sensors" and watch the LEDs.
 ```
 
-The sensor's small RGB LED tells you what it's doing at a glance:
+The sensor's small RGB LED tells you what it's doing at a glance.
+All sensors run their animations off the synchronised wall clock,
+so heartbeats and ticks across the rig pulse in lockstep — useful
+visual confirmation that the fleet is one system:
 
 | LED | Meaning |
 |---|---|
 | Quick white flash | Just powered on. |
-| Pulsing blue | Looking for a controller (no WiFi credentials yet). |
-| Pulsing cyan | Joining the WiFi network. |
-| Steady-heartbeat green | Connected, streaming data. |
+| Pulsing blue (~1 Hz) | Advertising over Bluetooth — looking for a controller, no WiFi credentials yet, or WiFi has been gone long enough that we've dropped back to pairing mode. |
+| Pulsing cyan (fast, ~2.5 Hz) | Joining WiFi, or briefly reaching for the dashboard after a TCP hiccup. |
+| Slow green heartbeat (~25 BPM, 2.4 s/cycle) | Connected, streaming, idle — link alive, no capture in progress. |
+| Crisp green tick (~2 Hz) | Recording — a capture file is open on the SD card and rows are landing. Distinct rhythm from the idle heartbeat so you can see at a glance that data is actually being written. |
+| Solid purple | Calibrating — accumulating per-axis offset samples while the rig is at rest, before Mark. |
+| Slow purple pulse (~0.5 Hz) | Streaming with synthetic data — ADXL355 didn't come up; samples are simulator output, not real motion. Look at the sensor's logs. |
+| Yellow heartbeat | Streaming + replaying catchup samples from the SD ring after a reconnect. |
 | Strobing white | Receiving a firmware update. |
 | Pulsing orange | Battery low. |
 | Pulsing red | Something went wrong; reset and try again. |
 
 The dashboard's web app shows a virtual copy of each sensor's LED
-next to the device's name, so you can see the same status from across
-the room.
+next to the device's name, in the same colour and rhythm, so you
+can see the same status from across the room without looking at
+the rig.
 
 ## Updating firmware wirelessly
 
