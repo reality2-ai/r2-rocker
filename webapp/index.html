@@ -2365,7 +2365,9 @@ async function requestDeleteAllFleet() {
   const cards = [...dataCardEls.values()];
   if (cards.length === 0) return;
   if (!confirm(`Delete ALL capture files on ALL ${cards.length} sensor(s)?`)) return;
-  await Promise.allSettled(cards.map((c) => c.deleteAll()));
+  // skipConfirm: per-card deleteAll() would otherwise reprompt for
+  // each sensor — fine at 2 devices, tedious at 20.
+  await Promise.allSettled(cards.map((c) => c.deleteAll({ skipConfirm: true })));
 }
 
 // ── Link tab plumbing (SPEC-R2-ROCKER-ACCESS) ─────────────────────────
@@ -3993,10 +3995,16 @@ class R2DataCard extends HTMLElement {
     this._update();
   }
 
-  async deleteAll() {
+  /// Delete every capture file on this sensor.
+  /// `opts.skipConfirm` is set by the fleet-wide bulk button so the
+  /// operator isn't prompted once per device (annoying past ~3 peers,
+  /// genuinely painful at 20+). The per-card 🗑 keeps its own confirm.
+  async deleteAll(opts = {}) {
     const s = this._sensor;
     if (!s) return;
-    if (!confirm(`Delete ALL capture files on ${s.deviceName ?? s.key}?`)) return;
+    if (!opts.skipConfirm) {
+      if (!confirm(`Delete ALL capture files on ${s.deviceName ?? s.key}?`)) return;
+    }
     try {
       const res = await fetch(`/api/data/${encodeURIComponent(s.key)}/all`, { method: 'DELETE' });
       if (!res.ok) console.warn('[data] del_all', s.key, await res.text());
