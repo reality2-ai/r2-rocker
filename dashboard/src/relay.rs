@@ -131,6 +131,26 @@ async fn run_one_session(
         None => return Err(format!("relay closed before WELCOME")),
     }
 
+    // Catchup: ask the relay to replay every binary frame from the
+    // last ~60 seconds. After a brief disconnect (e.g. relay-side
+    // backpressure / ConnReset from sensor-frame flood), the phone's
+    // JOIN_REQUEST may already be sitting in the per-bucket buffer.
+    // Without a catchup request, those frames stay buffered and never
+    // reach our binary-recv arm. r2-relay's catchup handler is at
+    // r2-relay/src/ws.rs:76-91; the wire form is plain text JSON.
+    let catchup_since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().saturating_sub(60))
+        .unwrap_or(0);
+    let catchup_msg = serde_json::json!({
+        "type": "catchup",
+        "since": catchup_since,
+    }).to_string();
+    sink.send(WsMessage::Text(catchup_msg.into()))
+        .await
+        .map_err(|e| format!("send catchup: {e}"))?;
+    eprintln!("[relay] sent catchup since={catchup_since}");
+
     // Outbound: subscribe to the dashboard's raw-frame broadcast.
     // Every R2-WIRE frame the dashboard forwards to /ws/raw also
     // gets pushed up to the relay. Viewers in the same TG bucket
@@ -138,20 +158,42 @@ async fn run_one_session(
     let mut raw_rx    = raw_frame_tx.subscribe();
     let mut binary_rx = binary_tx.subscribe();
 
-    // Inbound: viewer-to-controller frames could arrive here in a
-    // later slice. For v0.1 we drain and discard — the bridge
-    // policy (SPEC-R2-ROCKER-BRIDGE §3-§4) for inbound viewer ops
-    // hasn't been wired yet.
+    // Per-sensor outbound rate limit. The dashboard fan-outs every
+    // sensor frame (~100 Hz × N sensors = 200+ Hz) to the relay,
+    // which is enough to trigger backpressure / ConnReset on the
+    // public r2-relay (we saw OS error 104 mid-session before this
+    // throttle landed). Viewers over the relay don't need full-rate
+    // acceleration — they're paired devices monitoring the rig from
+    // outside the hotspot, where ~10 Hz is plenty and the SD ring
+    // is the source of truth for high-fidelity history.
+    //
+    // Rule: drop a frame for a given src_addr if its last forwarded
+    // frame was less than RELAY_FRAME_MIN_INTERVAL_MS ago. Per
+    // sensor (not global) so independent senders aren't blocked by
+    // each other. Cheap HashMap, no allocator hotspot — keys are
+    // SocketAddr-as-String (the existing `rf.src` field).
+    const RELAY_FRAME_MIN_INTERVAL_MS: u128 = 100; // 10 Hz per sensor
+    let mut last_forward_at: std::collections::HashMap<String, std::time::Instant> =
+        std::collections::HashMap::new();
+
     let mut ping_tick = tokio::time::interval(Duration::from_millis(PING_INTERVAL_MS));
     ping_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ping_tick.tick().await; // skip the immediate fire
 
     loop {
         tokio::select! {
-            // Outbound: frame arrived from a sensor → forward to relay.
+            // Outbound: frame arrived from a sensor → forward to relay
+            // (rate-limited per src_addr, see RELAY_FRAME_MIN_INTERVAL_MS).
             res = raw_rx.recv() => {
                 match res {
                     Ok(rf) => {
+                        let now = std::time::Instant::now();
+                        let skip = match last_forward_at.get(&rf.src) {
+                            Some(prev) => now.duration_since(*prev).as_millis() < RELAY_FRAME_MIN_INTERVAL_MS,
+                            None => false,
+                        };
+                        if skip { continue; }
+                        last_forward_at.insert(rf.src.clone(), now);
                         // Wrap the same envelope shape /ws/raw uses
                         // so viewers can decode it with the existing
                         // path. See encode_raw_frame_envelope in
