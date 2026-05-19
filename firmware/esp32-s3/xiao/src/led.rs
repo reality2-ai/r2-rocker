@@ -195,11 +195,24 @@ fn run_led_loop(
         // animations stay in lockstep across the rig. Before sync, or
         // if the lock fails, fall back to local Instant::elapsed so
         // the LED still animates.
+        //
+        // Reduce the epoch ms into a 60-second window before handing
+        // it to render(). Absolute epoch ms in 2026 is ~1.78e12 — well
+        // beyond f32's ~7-decimal precision, so `as_secs_f32()` /
+        // `.fract()` / `sin()` lose all sub-second precision and the
+        // pulse collapses to a constant value. All pulse periods we
+        // use (0.4 / 0.5 / 1.0 / 1.5 / 2.0 / 2.4 s) divide 60 s
+        // evenly, so the modulo is invisible at the period boundary;
+        // the only state that doesn't divide cleanly is the 0.18 s
+        // OTA strobe, which is transient and tolerable to a once-a-
+        // minute hiccup. Sync survives because every sensor applies
+        // the same modulo to the same `epoch_ms`.
+        const PHASE_WINDOW_MS: i64 = 60_000;
         let elapsed = match sync_clock.lock().ok().and_then(|g| g.clone()) {
             Some(clock) => {
                 let ms = clock.ts_ms_i64();
                 if ms > 0 {
-                    Duration::from_millis(ms as u64)
+                    Duration::from_millis(ms.rem_euclid(PHASE_WINDOW_MS) as u64)
                 } else {
                     start.elapsed()
                 }
