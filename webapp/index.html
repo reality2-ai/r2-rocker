@@ -2200,7 +2200,12 @@ function updateCaptureUiFromFleet() {
   const btnStart = document.getElementById('captureStartBtn');
   const btnMark  = document.getElementById('captureMarkBtn');
   const btnStop  = document.getElementById('captureStopBtn');
-  if (btnStart) btnStart.disabled = (peers.length === 0);
+  // Start is only meaningful from Idle — a second Start press during
+  // Calibrating / Recording would either be a no-op or start a fresh
+  // session on top of the existing one, both of which are operator
+  // mistakes. Only Stop should be available once a session is in
+  // flight.
+  if (btnStart) btnStart.disabled = (peers.length === 0) || (aggregate !== 'idle');
   if (btnMark)  btnMark .disabled = (aggregate !== 'calibrating');
   if (btnStop)  btnStop .disabled = (aggregate === 'idle');
 
