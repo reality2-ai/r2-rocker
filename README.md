@@ -119,43 +119,71 @@ cloud-app:
 ## What it looks like
 
 The operator-facing surface is a single web page served by the
-controller. Three tabs cover everything routine:
+controller. Four tabs cover everything routine:
 
-**Live** — real-time accelerometer charts, one card per sensor,
-plus the run-control buttons (Start → Mark → Stop). The "test"
-run name field at the top right is what each capture file is
-named after; the date prefix is added automatically:
+**Live** — real-time accelerometer charts, one card per sensor.
+The run-control toolbar sits at the top: a state chip
+(`IDLE` / `CALIBRATING` / `RECORDING`), a free-form **Run name**
+field, and the **Start → Mark → Stop** buttons. The run name is
+what each capture file is named after; the date prefix is added
+automatically. Each sensor card shows a small status LED beside its
+name that mirrors the physical RGB LED on the board in colour and
+rhythm — every dot on the page and every LED on the rig pulse from
+the same wall clock, so the rig reads as one synchronised system at
+a glance:
 
 ![Live tab during a rocking-motion run](docs/screenshots/dashboard-live.png)
 
 **Run control flow.** Pressing **Start** sends a sync-pulse round
 to every sensor and puts the fleet into calibration. Sensors
 sample for ~2 seconds at rest to learn their per-axis offset; the
-state indicator turns amber:
+state chip turns amber and each sensor's LED goes solid purple:
 
 ![Calibrating state](docs/screenshots/dashboard-calibrating.png)
 
 Then **Mark** locks the offset, opens the named CSV file on every
 sensor's SD card, and starts writing calibrated rows. The Live
 chart now shows the offset-subtracted signal — exactly what's
-landing on disk:
+landing on disk — and the sensor LEDs switch to a crisp green
+tick at 2 Hz so the operator can see at a glance that the file
+is actually growing, not just that the link is alive. Start is
+disabled until the session ends:
 
 ![Recording state](docs/screenshots/dashboard-recording.png)
 
 **Devices** — fleet status. Real-vs-simulated ADXL355, firmware
 version, last-seen, battery cell voltage. Per-card *Update Firmware*
-and *Reset Sensor* buttons; their fleet-wide equivalents sit above
-the cards:
+and *Reset Sensor* buttons; their fleet-wide equivalents sit in the
+toolbar above (one confirm, not one per sensor). If the controller
+sees a newer build on GitHub Releases than what's running, an
+`✨ Pull <ver> → N sensor(s)` button appears that pulls the binary
+once and pushes it to every outdated peer:
 
 ![Devices tab — fleet status](docs/screenshots/dashboard-devices.png)
 
-**Data** — every capture file from every sensor, with per-file
-download (📥), per-file delete (🗑), per-sensor delete-all, plus the
-fleet-wide "Download merged CSV" that produces a single
-wide-format file with one column-triple per sensor (see
-`SPEC-R2-ROCKER-CAPTURE` §7.3):
+**Data** — every capture file from every sensor, sorted newest
+first. Per-file download (📥), per-file delete (🗑), per-sensor
+delete-all, plus the fleet-wide **Download merged CSV** that
+produces a single wide-format file with one column-triple per
+sensor (see `SPEC-R2-ROCKER-CAPTURE` §7.3). The file that the
+merged-CSV button bundles — the most-recently-marked capture across
+every sensor — is highlighted in green so the operator can see at a
+glance which rows go together:
 
 ![Data tab — captures across the fleet](docs/screenshots/dashboard-data.png)
+
+**Link** — pairing for extra viewer browsers. The controller's own
+browser counts as a viewer automatically (the dashboard trusts
+localhost as the KeyHolder); to add a phone, tablet, or another
+laptop, click **Link a new viewer** for an invite modal with two QR
+codes — step 1 joins the device to the controller's WiFi hotspot,
+step 2 opens the dashboard. An **In-room ↔ Anywhere** toggle below
+the dashboard QR swaps it for a relay-routed URL when the viewer
+needs to connect from outside the lab (cellular, home WiFi, …).
+Invites are time-limited and KeyHolder-only; viewers see a
+read-only subset of the controller's surface:
+
+![Link tab — invite modal with WiFi + dashboard QR codes](docs/screenshots/dashboard-link.png)
 
 ---
 
