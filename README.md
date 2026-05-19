@@ -7,7 +7,7 @@ failure before it becomes obvious.
 
 ![r2-rocker dashboard — Live tab during a two-sensor run](docs/screenshots/dashboard-live.png)
 
-## Summary
+## What it does
 
 Small battery-powered sensors clip onto the points you want to
 watch on a machine — a joint, an actuator bolt, a bearing housing
