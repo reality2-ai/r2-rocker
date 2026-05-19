@@ -140,12 +140,11 @@ where
 }
 
 const FRAME_MS: u64 = 33; // ~30 Hz tick — smooth pulses at low CPU cost
-// Slower than a literal 60 BPM resting heart — operators read 60
-// as "active / something happening", which fights with the new
-// `Recording` tick. 40 BPM (1.5 s per lub-dub) reads as "just
-// waiting, link alive" which is the actual semantic of
-// `StreamingLive` outside an active capture.
-const HEARTBEAT_BPM: f32 = 40.0;
+// Slow, calm "idle/waiting" beat — 25 BPM gives a 2.4 s lub-dub
+// cycle. Outside an active capture, the sensor really is just
+// holding the link open; the LED should match that. Distinct
+// from the 0.5 s `Recording` tick at a glance.
+const HEARTBEAT_BPM: f32 = 25.0;
 /// Global brightness cap applied after `render()`. The DevKitC's onboard
 /// WS2812 has no diffuser — at full RGB it's painfully bright on a bare
 /// board (0.70 was the bench setting). With the sensor PCB stacked on
