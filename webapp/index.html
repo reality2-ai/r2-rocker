@@ -1501,7 +1501,17 @@ function connectStatus() {
         s.lastSeen = 0;            // forces classifyOnline → 'offline'
         s.fsmState = null;         // unknown until next r2.sensor.status
         s.dataSource = null;       // re-resolves on next status frame
+        // Clear the capture-state machine for this peer too —
+        // otherwise a sensor that dropped while in Calibrating /
+        // Recording leaves the Run Control bar with Start disabled,
+        // because `updateCaptureUiFromFleet`'s aggregate computation
+        // still sees that peer in a non-idle state. We don't know
+        // what state the sensor will come back in; assume idle and
+        // let the first fresh capture.state frame correct us.
+        s.captureState = 'idle';
+        s.captureFile  = null;
         updateSensorList();
+        updateCaptureUiFromFleet();
         renderDevicesIfVisible();
       }
     } else if (msg.type === 'ota') {
@@ -2285,6 +2295,17 @@ async function captureStop() {
   } catch (err) {
     console.warn('[capture] stop', err);
   }
+  // Optimistically flip every sensor's capture state back to idle
+  // and re-evaluate the Run Control bar so Start re-enables now,
+  // not three round-trips later. The next real capture.state event
+  // from each sensor confirms (or corrects, if a peer never got the
+  // stop). Without this the buttons stay locked in the prior state
+  // for ~1s while the events stream in.
+  for (const s of sensors.values()) {
+    s.captureState = 'idle';
+    s.captureFile  = null;
+  }
+  updateCaptureUiFromFleet();
   // Refresh every card after stop so the new file appears.
   for (const card of dataCardEls.values()) card.refresh();
 }
