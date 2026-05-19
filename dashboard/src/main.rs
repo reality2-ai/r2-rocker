@@ -591,7 +591,11 @@ struct AppState {
     /// relay.rs subscribes and forwards each string verbatim as a
     /// WS text frame. None when the dashboard isn't running with
     /// `--relay-url`.
-    relay_text_tx: Option<broadcast::Sender<String>>,
+    /// Broadcasts JOIN_RESPONSE frames (notekeeper wire format —
+    /// `[0xFF, 0x02, devicePk(32), tgPk(32), encrypted]`) for the
+    /// relay session to forward to the joining device. `Some` only
+    /// when `--relay-url` is configured.
+    relay_binary_tx: Option<broadcast::Sender<Vec<u8>>>,
 }
 
 const FIRMWARE_CACHE_TTL_SECS: u64 = 300;
@@ -629,10 +633,12 @@ async fn main() {
     let (event_tx, _) = broadcast::channel::<DashboardEvent>(256);
     let (raw_frame_tx, _) = broadcast::channel::<RawFrame>(1024);
     let (ws_broadcast_tx, _) = broadcast::channel::<String>(256);
-    // Relay outbound-text channel — only allocated when --relay-url is
-    // set so the access handlers can branch on `state.relay_text_tx`.
-    let relay_text_tx: Option<broadcast::Sender<String>> = if args.relay_url.is_some() {
-        let (tx, _) = broadcast::channel::<String>(256);
+    // Relay outbound-binary channel for JOIN_RESPONSE frames
+    // (notekeeper wire format `[0xFF, 0x02, ...]`). Only allocated
+    // when --relay-url is set so the access handlers can branch on
+    // `state.relay_binary_tx.is_some()`.
+    let relay_binary_tx: Option<broadcast::Sender<Vec<u8>>> = if args.relay_url.is_some() {
+        let (tx, _) = broadcast::channel::<Vec<u8>>(256);
         Some(tx)
     } else { None };
 
@@ -663,13 +669,13 @@ async fn main() {
         bootstrap_task: Mutex::new(None),
         firmware_cache: Mutex::new(None),
         access: access_handle.clone(),
-        relay_text_tx: relay_text_tx.clone(),
+        relay_binary_tx: relay_binary_tx.clone(),
     });
 
     // Phase 5 / SPEC-R2-ROCKER-ACCESS §5.2 — off-network viewer path
     // via the R2 relay. Only spawn when both --relay-url is set AND
     // the KeyHolder loaded; viewers need both to be useful.
-    if let (Some(url), Some(handle), Some(tx)) = (args.relay_url.clone(), access_handle, relay_text_tx) {
+    if let (Some(url), Some(handle), Some(tx)) = (args.relay_url.clone(), access_handle, relay_binary_tx) {
         let (sk, pk) = {
             let a = handle.lock().await;
             (a.tg_signing_key(), a.tg_pk_bytes())
@@ -3213,15 +3219,30 @@ async fn access_approve_handler(
                 "event": "request_approved",
                 "device_pk": pk_hex.clone(),
             }).to_string());
-            // Relay-side: push the bundle into the relay text channel
-            // so off-network viewers receive it without polling.
-            if let (Some(tx), Some(body)) = (state.relay_text_tx.as_ref(), response_body) {
-                let mut envelope = body;
-                if let Some(obj) = envelope.as_object_mut() {
-                    obj.insert("type".into(), serde_json::Value::String("access.response".into()));
-                    obj.insert("device_pk".into(), serde_json::Value::String(pk_hex.clone()));
+            // Relay-side: build a notekeeper-format JOIN_RESPONSE
+            // binary frame and push it onto the relay's outbound
+            // channel. Off-network viewers receive it as a raw
+            // binary frame over the relay (r2-relay only forwards
+            // binary peer-to-peer) — no polling needed.
+            //
+            // Frame: [0xFF, 0x02, devicePk(32), tgPk(32), encrypted]
+            if let (Some(tx), Some(body)) = (state.relay_binary_tx.as_ref(), response_body) {
+                use base64::Engine as _;
+                let tg_pk_hex = body.get("tg_pk_hex").and_then(|v| v.as_str());
+                let enc_b64   = body.get("encrypted_b64").and_then(|v| v.as_str());
+                if let (Some(tg_pk_hex), Some(enc_b64)) = (tg_pk_hex, enc_b64) {
+                    let tg_pk_vec = hex::decode(tg_pk_hex).unwrap_or_default();
+                    let encrypted = base64::engine::general_purpose::STANDARD
+                        .decode(enc_b64).unwrap_or_default();
+                    if tg_pk_vec.len() == 32 && !encrypted.is_empty() {
+                        let mut tg_pk = [0u8; 32];
+                        tg_pk.copy_from_slice(&tg_pk_vec);
+                        let frame = relay::build_join_response(&pk, &tg_pk, &encrypted);
+                        let _ = tx.send(frame);
+                    } else {
+                        eprintln!("[access] approve: malformed response body, can't build JOIN_RESPONSE");
+                    }
                 }
-                let _ = tx.send(envelope.to_string());
             }
             (axum::http::StatusCode::OK, Json(serde_json::json!({
                 "ok": true,

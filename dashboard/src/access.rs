@@ -74,7 +74,9 @@ struct TokenClaim {
 /// What `/api/access/invite` returns to the operator's browser.
 #[derive(Serialize)]
 pub struct InviteEnvelope {
-    /// 8-hex-char SHA-256 prefix of `TG_PK` — identifying, not authenticating.
+    /// 16-hex-char SHA-256(TG_PK)[..8] — identifying, not authenticating.
+    /// Same form that r2-relay accepts in HELLO and that the notekeeper
+    /// webapp uses for `compute_trust_group_hash`.
     pub tg_hash: String,
     /// 32-hex-char raw entropy. The webapp embeds this in URLs alongside
     /// `tg_hash` separated by '.'; the wire form is `{tg_hash}.{entropy_hex}`.
@@ -169,7 +171,7 @@ pub struct Access {
     /// Pending pair-requests keyed by device_pk. v0.1.1 in-memory
     /// only — process restart drops them (clients re-request).
     pending: HashMap<[u8; 32], PendingRequest>,
-    /// Cached `tg_hash` (first 8 hex chars of SHA-256(TG_PK)).
+    /// Cached `tg_hash` (16 hex chars = first 8 bytes of SHA-256(TG_PK)).
     tg_hash: String,
     /// Operator-supplied; embedded in QR + `url_relay`. `None` → no
     /// off-network path advertised in this deployment (spec §3.4).
@@ -242,12 +244,17 @@ impl Access {
         let tg = TrustGroup::from_signing_key(signing_key, now)
             .map_err(|e| format!("TrustGroup::from_signing_key: {e}"))?;
 
-        // tg_hash per SPEC §3.1: first 8 hex chars of SHA-256(TG_PK).
+        // tg_hash per SPEC §3.1, updated to match r2-relay HELLO + the
+        // notekeeper webapp's `compute_trust_group_hash`: 16 hex chars
+        // (8-byte SHA-256(TG_PK) prefix). r2-relay accepts this exact
+        // form in HELLO. The previous 8-hex (4-byte) form fell in
+        // r2-relay's "neither full nor valid prefix" gap, so off-network
+        // viewers couldn't dial the bucket directly.
         let tg_pk = tg.verifying_key().to_bytes();
         let mut h = Sha256::new();
         h.update(tg_pk);
         let digest = h.finalize();
-        let tg_hash = hex::encode(&digest[..4]); // 4 bytes = 8 hex chars
+        let tg_hash = hex::encode(&digest[..8]); // 8 bytes = 16 hex chars
 
         Ok(Self {
             tg,
@@ -262,7 +269,7 @@ impl Access {
         })
     }
 
-    /// `tg_hash` (8 hex chars). Returned in /api/keyholder/tg-info and
+    /// `tg_hash` (16 hex chars). Returned in /api/keyholder/tg-info and
     /// embedded in tokens.
     pub fn tg_hash(&self) -> &str {
         &self.tg_hash
@@ -718,6 +725,7 @@ pub enum RevokeOutcome {
     Other(String),
 }
 
+#[derive(Debug)]
 pub enum RequestOutcome {
     Submitted([u8; 32]),
     BadRequest(&'static str),

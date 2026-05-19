@@ -43,13 +43,13 @@ pub fn spawn_relay_session(
     signing_key: SigningKey,
     tg_pub: [u8; 32],
     raw_frame_tx: broadcast::Sender<crate::RawFrame>,
-    text_tx: broadcast::Sender<String>,
+    binary_tx: broadcast::Sender<Vec<u8>>,
     state: std::sync::Arc<crate::AppState>,
 ) {
     tokio::spawn(async move {
         let mut backoff_ms = RECONNECT_MIN_MS;
         loop {
-            match run_one_session(&relay_url, &signing_key, &tg_pub, &raw_frame_tx, &text_tx, &state).await {
+            match run_one_session(&relay_url, &signing_key, &tg_pub, &raw_frame_tx, &binary_tx, &state).await {
                 Ok(()) => {
                     eprintln!("[relay] session ended cleanly — reconnecting in {} ms", backoff_ms);
                 }
@@ -68,7 +68,7 @@ async fn run_one_session(
     signing_key: &SigningKey,
     tg_pub: &[u8; 32],
     raw_frame_tx: &broadcast::Sender<crate::RawFrame>,
-    text_tx: &broadcast::Sender<String>,
+    binary_tx: &broadcast::Sender<Vec<u8>>,
     state: &std::sync::Arc<crate::AppState>,
 ) -> Result<()> {
     let (ws_stream, _resp) = tokio_tungstenite::connect_async(relay_url)
@@ -135,8 +135,8 @@ async fn run_one_session(
     // Every R2-WIRE frame the dashboard forwards to /ws/raw also
     // gets pushed up to the relay. Viewers in the same TG bucket
     // see it in real time.
-    let mut raw_rx  = raw_frame_tx.subscribe();
-    let mut text_rx = text_tx.subscribe();
+    let mut raw_rx    = raw_frame_tx.subscribe();
+    let mut binary_rx = binary_tx.subscribe();
 
     // Inbound: viewer-to-controller frames could arrive here in a
     // later slice. For v0.1 we drain and discard — the bridge
@@ -191,26 +191,28 @@ async fn run_one_session(
                     }
                     Some(Ok(WsMessage::Binary(b))) => {
                         // Binary frames from other peers. Two shapes:
-                        //   1. Sensor envelope from another dashboard
-                        //      (cross-controller bridging — not used
-                        //      in v0.1, drop).
-                        //   2. Access-protocol control frame wrapped
-                        //      in our R2C\x01 magic — pairing flow per
-                        //      SPEC-R2-ROCKER-ACCESS §5.2. r2-relay
-                        //      only forwards binary, so we tunnel JSON
-                        //      access.request / access.response inside
-                        //      binary frames.
-                        if let Some(payload) = strip_control_magic(&b) {
-                            if let Ok(text) = std::str::from_utf8(payload) {
-                                eprintln!("[relay] bin ctrl in ({} bytes): {}", b.len(), text.trim());
-                                if text.contains("\"access.request\"") {
-                                    handle_relay_access_request(state, text_tx, text).await;
-                                }
-                            } else {
-                                eprintln!("[relay] bin ctrl in ({} bytes): non-utf8", b.len());
-                            }
+                        //   1. Sensor R2-WIRE envelope from another
+                        //      dashboard (cross-controller bridging —
+                        //      not used in v0.1, drop).
+                        //   2. Access-protocol JOIN_REQUEST frame in
+                        //      notekeeper's wire format:
+                        //        [0xFF, 0x01, devicePk(32),
+                        //         joinCode(16), name(rest)]
+                        //      Matches r2-notekeeper/index.html so
+                        //      r2-rocker speaks the same join protocol
+                        //      on the same relay path. Operator-side
+                        //      gate (submit_request → approve in Link
+                        //      tab) is the r2-rocker addition.
+                        if is_join_request(&b) {
+                            eprintln!("[relay] JOIN_REQUEST in ({} bytes)", b.len());
+                            handle_join_request(state, &b).await;
+                        } else if b.first() == Some(&0xFF) {
+                            eprintln!(
+                                "[relay] 0xFF frame opcode={:?} in ({} bytes)",
+                                b.get(1), b.len()
+                            );
                         } else {
-                            eprintln!("[relay] bin in ({} bytes, not ctrl)", b.len());
+                            eprintln!("[relay] bin in ({} bytes, not a join frame)", b.len());
                         }
                     }
                     Some(Ok(WsMessage::Close(frame))) => {
@@ -222,24 +224,24 @@ async fn run_one_session(
                 }
             }
 
-            // Outbound control: anything pushed to AppState.relay_text_tx
-            // (e.g. access::approve_request pushing an access.response
-            // JSON) goes out as a *binary* WS frame wrapped in our
-            // R2C\x01 magic — r2-relay only forwards binary, so we
-            // tunnel JSON access protocol frames inside binary.
-            res = text_rx.recv() => {
+            // Outbound JOIN_RESPONSE: anything pushed to
+            // AppState.relay_binary_tx (e.g. access_approve_handler
+            // building the [0xFF, 0x02, ...] frame) goes out as a
+            // straight binary WS frame. Matches notekeeper's wire
+            // format on the relay.
+            res = binary_rx.recv() => {
                 match res {
-                    Ok(s) => {
-                        let envelope = wrap_control_magic(s.as_bytes());
-                        if let Err(e) = sink.send(WsMessage::Binary(envelope.into())).await {
-                            return Err(format!("write ctrl: {e}"));
+                    Ok(frame) => {
+                        eprintln!("[relay] JOIN_RESPONSE out ({} bytes)", frame.len());
+                        if let Err(e) = sink.send(WsMessage::Binary(frame.into())).await {
+                            return Err(format!("write join_response: {e}"));
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        eprintln!("[relay] text_rx lagged by {n}");
+                        eprintln!("[relay] binary_rx lagged by {n}");
                     }
                     Err(broadcast::error::RecvError::Closed) => {
-                        return Err("text_rx closed".to_string());
+                        return Err("binary_rx closed".to_string());
                     }
                 }
             }
@@ -256,50 +258,75 @@ async fn run_one_session(
     }
 }
 
-/// 4-byte magic prefix marking a binary frame as an access-protocol
-/// control message (JSON payload) rather than a sensor data envelope.
-/// r2-relay forwards all binary frames between peers regardless of
-/// content; sensor envelopes start with `[u16 BE src_addr_len]` where
-/// src_addr_len ≤ 64, so the first byte is always 0x00 — this magic
-/// (`R2C\x01`) is unambiguous against any real sensor frame.
-const CONTROL_MAGIC: &[u8; 4] = b"R2C\x01";
+/// Join-protocol wire constants — match r2-notekeeper byte for byte
+/// (notekeeper/index.html:1336-1338). r2-relay forwards every binary
+/// frame between peers in the same TG bucket; we tag join frames with
+/// `0xFF` as the first byte so they're unambiguous against sensor
+/// R2-WIRE envelopes (which start with `[u16 BE src_addr_len]`, first
+/// byte always 0x00 because src_addr is ≤ 64 chars).
+///
+/// Frame layouts:
+///   JOIN_REQUEST  = [0xFF, 0x01, devicePk(32), joinCode(16), name(rest)]
+///   JOIN_RESPONSE = [0xFF, 0x02, devicePk(32), tgPk(32),     encrypted(rest)]
+const JOIN_MAGIC:    u8 = 0xFF;
+const JOIN_REQUEST:  u8 = 0x01;
+pub const JOIN_RESPONSE: u8 = 0x02;
 
-fn wrap_control_magic(payload: &[u8]) -> Vec<u8> {
-    let mut v = Vec::with_capacity(payload.len() + CONTROL_MAGIC.len());
-    v.extend_from_slice(CONTROL_MAGIC);
-    v.extend_from_slice(payload);
+fn is_join_request(frame: &[u8]) -> bool {
+    frame.len() >= 2 + 32 + 16
+        && frame[0] == JOIN_MAGIC
+        && frame[1] == JOIN_REQUEST
+}
+
+/// Build a JOIN_RESPONSE frame. `encrypted` is the
+/// XChaCha20-Poly1305-sealed cert+key bundle produced by
+/// `TrustGroup::process_join_request`.
+pub fn build_join_response(
+    device_pk: &[u8; 32],
+    tg_pk: &[u8; 32],
+    encrypted: &[u8],
+) -> Vec<u8> {
+    let mut v = Vec::with_capacity(2 + 32 + 32 + encrypted.len());
+    v.push(JOIN_MAGIC);
+    v.push(JOIN_RESPONSE);
+    v.extend_from_slice(device_pk);
+    v.extend_from_slice(tg_pk);
+    v.extend_from_slice(encrypted);
     v
 }
 
-fn strip_control_magic(frame: &[u8]) -> Option<&[u8]> {
-    frame.strip_prefix(CONTROL_MAGIC.as_slice())
-}
-
-/// Handle an inbound `access.request` text frame from a viewer that
+/// Handle an inbound JOIN_REQUEST binary frame from a viewer that
 /// arrived via the relay. Same effect as if the viewer had POSTed to
 /// `/api/access/request` over HTTP: we record a pending request the
 /// operator can approve in the Link tab.
-async fn handle_relay_access_request(
+///
+/// The joinCode (16 bytes / 32 hex chars) is included for protocol
+/// parity with notekeeper but isn't checked against the invite token
+/// table here — r2-rocker uses the request-and-approve gate as the
+/// authority, so the operator's explicit click is what admits the
+/// device, not the join-code match.
+async fn handle_join_request(
     state: &std::sync::Arc<crate::AppState>,
-    text_tx: &broadcast::Sender<String>,
-    text: &str,
+    frame: &[u8],
 ) {
-    #[derive(serde::Deserialize)]
-    struct ReqBody {
-        device_pk: String,
-        name: String,
-        // tg_hash + entropy_hex are present but unused here — relay
-        // forwards by tg_hash so it's already verified, and the
-        // request-and-approve flow doesn't consume an invite token.
-    }
-    let Ok(body) = serde_json::from_str::<ReqBody>(text) else {
-        eprintln!("[relay] malformed access.request: {}", text.chars().take(120).collect::<String>());
+    if !is_join_request(frame) {
         return;
-    };
+    }
+    let device_pk = &frame[2..34];
+    let _join_code = &frame[34..50]; // unused; see doc-comment above
+    let name = std::str::from_utf8(&frame[50..])
+        .unwrap_or("(relay)")
+        .trim()
+        .to_string();
+    let name = if name.is_empty() { "(relay)".to_string() } else { name };
+
+    let device_pk_hex = hex::encode(device_pk);
+    eprintln!("[relay] JOIN_REQUEST device_pk={} name=\"{}\"", &device_pk_hex[..16], name);
+
     let Some(handle) = state.access.as_ref() else { return; };
     let outcome = {
         let mut a = handle.lock().await;
-        a.submit_request(&body.device_pk, &body.name, "relay")
+        a.submit_request(&device_pk_hex, &name, "relay")
     };
     use crate::access::RequestOutcome;
     if let RequestOutcome::Submitted(pk) = outcome {
@@ -309,10 +336,10 @@ async fn handle_relay_access_request(
             "type": "access",
             "event": "request_pending",
             "device_pk": hex::encode(&pk[..]),
-            "name": body.name,
+            "name": name,
             "hint": "via relay",
         }).to_string());
+    } else {
+        eprintln!("[relay] JOIN_REQUEST submit_request outcome was not Submitted: {:?}", outcome);
     }
-    // Suppress unused-warning when text_tx is only used in select arm.
-    let _ = text_tx;
 }
