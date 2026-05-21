@@ -1,6 +1,6 @@
 [package]
 name = "r2-dashboard"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "R2 sensor dashboard — receives R2-WIRE events and serves a live web UI"
 
