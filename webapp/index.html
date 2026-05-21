@@ -317,6 +317,34 @@
     font-family: 'SF Mono', monospace;
     margin-left: 0;
   }
+  /* Small pencil button beside the sensor / device name — opens a
+     prompt() to set a friendly alias. Pointer-on-hover so it reads
+     as clickable, low-contrast otherwise so it doesn't compete with
+     the LED + name. */
+  .rename-btn {
+    background: transparent;
+    color: #64748b;
+    border: none;
+    padding: 0 4px;
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+    border-radius: 4px;
+  }
+  .rename-btn:hover { background: rgba(148, 163, 184, 0.12); color: #e2e8f0; }
+
+  /* Downsample picker next to the merged-CSV button — small, in-row. */
+  .data-bin-row {
+    display: inline-flex; align-items: center; gap: 6px;
+    color: #94a3b8; font-size: 12px;
+  }
+  .data-bin-row select {
+    background: #1e293b; color: #e2e8f0;
+    border: 1px solid #334155; border-radius: 4px;
+    padding: 4px 6px; font-size: 12px;
+    font-family: inherit;
+  }
+
   /* Per-card status LED — bigger than the sidebar's 10px dot so the
      operator can read it from across the room. Animation classes
      come from .virt-led.tg-* further down. */
@@ -971,6 +999,15 @@
 <div class="devices-main" id="dataMain" hidden>
   <div class="devices-bulk-actions">
     <button class="btn-bulk-update" id="dataMergedBtn" onclick="downloadMergedLatest()">💾 Download merged CSV (last marked)</button>
+    <label class="data-bin-row" title="Average samples into time buckets so timestamps line up across sensors. Raw = no averaging, every sample point of every sensor appears in its own row.">
+      Sample at:
+      <select id="dataMergedBin">
+        <option value="0">Raw</option>
+        <option value="10">10 ms</option>
+        <option value="100" selected>100 ms</option>
+        <option value="1000">1 s</option>
+      </select>
+    </label>
     <button class="btn-bulk-reset"  id="dataDeleteAllBtn" onclick="requestDeleteAllFleet()">🗑 Delete all data across devices</button>
   </div>
   <div class="devices-area" id="dataArea">
@@ -1075,6 +1112,7 @@ function getOrCreateSensor(addr) {
     <div class="sensor-label" id="slabel-${safeKey}">
       <span class="virt-led virt-led-lg" id="sled-${safeKey}"></span>
       <span class="slabel-name">${key}</span>
+      <button class="rename-btn" title="Rename this sensor" onclick="renameSensor('${key}')">✏️</button>
       <span class="sensor-addr">${key}</span>
     </div>
     <div class="chart-container">
@@ -1118,6 +1156,7 @@ function getOrCreateSensor(addr) {
   const sensor = {
     key,
     deviceName: null,
+    hostname: null,     // hardware-reported hostname (from announce)
     // Phase 8a (Devices view) state — populated by handlers in handleEvent.
     fwVer: null,
     devicePk: null,
@@ -1455,6 +1494,16 @@ async function bootstrapHive() {
     return;
   }
 
+  // Operator-assigned device aliases. Fire-and-forget — the WS
+  // `device_alias` events will keep us in sync after this; this
+  // initial fetch primes the map so cards render with the right
+  // names on first paint.
+  loadDeviceAliases();
+
+  // Restore the merged-CSV downsample picker's saved selection from
+  // localStorage. Per-browser preference; survives reload.
+  restoreMergedBinPref();
+
   console.log('[hive] hash table:');
   for (const name of KNOWN_EVENT_NAMES) {
     const hash = wasmFnv1a32(new TextEncoder().encode(name)) >>> 0;
@@ -1529,6 +1578,13 @@ function connectStatus() {
     } else if (msg.type === 'access') {
       // SPEC-R2-ROCKER-ACCESS §4.2 / §7.2 — member_added / revoked.
       handleAccessWsEvent(msg);
+    } else if (msg.type === 'device_alias') {
+      // Operator on another browser session renamed a sensor; sync.
+      if (msg.device_pk) {
+        if (msg.name) _deviceAliases[msg.device_pk] = msg.name;
+        else delete _deviceAliases[msg.device_pk];
+        applyAliasesToAllSensors();
+      }
     }
     // Future: hotspot, server_error, etc. (SPEC-R2-ROCKER-DASHBOARD §5.3)
   };
@@ -1915,7 +1971,15 @@ function handleEvent(msg) {
         // the legacy server-side `name` was a synthetic alias.
         const hn = msg.payload.hostname;
         if (hn) {
-          setDeviceName(sensor, hn);
+          sensor.hostname = hn;
+          // Alias (if set by the operator) wins over the hardware
+          // hostname for display. setDeviceName updates the rendered
+          // label; we resolve the precedence here so a sensor that
+          // already has an alias doesn't briefly show its hostname
+          // between announce and the next applyAliasesToAllSensors.
+          const alias = msg.payload.device_pk
+            ? _deviceAliases[msg.payload.device_pk] : null;
+          setDeviceName(sensor, alias || hn);
           addSensorLog(sensor, 'announced: ' + hn);
         }
         // Capture announce metadata for the Devices view (Phase 8a).
@@ -2363,6 +2427,26 @@ async function deleteCaptureFile(addr, name) {
   if (card) await card.refresh();
 }
 
+// Pick + persist the merged-CSV downsample binning. localStorage
+// per-browser, restored on load by `restoreMergedBinPref()`.
+const LS_DATA_MERGED_BIN = 'r2rocker.data.merged.bin_ms';
+
+function restoreMergedBinPref() {
+  const sel = document.getElementById('dataMergedBin');
+  if (!sel) return;
+  const saved = localStorage.getItem(LS_DATA_MERGED_BIN);
+  if (saved != null) {
+    // Only restore if it's a recognised option (the picker has a
+    // fixed set; an unknown value would silently no-op).
+    for (const opt of sel.options) {
+      if (opt.value === saved) { sel.value = saved; break; }
+    }
+  }
+  sel.addEventListener('change', () => {
+    localStorage.setItem(LS_DATA_MERGED_BIN, sel.value);
+  });
+}
+
 async function downloadMergedLatest() {
   if (!lastMarkedFilename) {
     alert('No marked capture in this session yet.');
@@ -2382,9 +2466,21 @@ async function downloadMergedLatest() {
       btn.textContent = orig;
     }, 4000);
   }
+  // Optional downsample bin from the picker. "0" / missing = raw merge.
+  const sel = document.getElementById('dataMergedBin');
+  const bin = sel ? parseInt(sel.value, 10) || 0 : 0;
+  let url = `/api/data/merged?file=${encodeURIComponent(lastMarkedFilename)}`;
+  let downloadName = `merged-${lastMarkedFilename}`;
+  if (bin > 0) {
+    url += `&bin_ms=${bin}`;
+    // Stash the bin in the saved filename so the operator can tell
+    // a 100 ms-averaged export apart from a raw merge in their
+    // downloads folder.
+    downloadName = `merged-${bin}ms-${lastMarkedFilename}`;
+  }
   const a = document.createElement('a');
-  a.href = `/api/data/merged?file=${encodeURIComponent(lastMarkedFilename)}`;
-  a.download = `merged-${lastMarkedFilename}`;
+  a.href = url;
+  a.download = downloadName;
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -2406,6 +2502,81 @@ async function requestDeleteAllFleet() {
 // "Link". A future cert-handshake variant of /ws/raw will gate this
 // surface on cert role; for v0.1 the dashboard enforces KeyHolder via
 // a localhost-only ConnectInfo check (see SPEC-R2-ROCKER-ACCESS §11.1).
+
+// Operator-assigned device aliases — keyed by device_pk hex (the
+// sensor's Ed25519 public key as announced in r2.sensor.announce).
+// Persisted on the controller; fetched on dashboard load + kept
+// up-to-date via /ws/status `device_alias` events. Wins over the
+// hostname the sensor self-reports.
+let _deviceAliases = {};
+
+async function loadDeviceAliases() {
+  try {
+    const res = await fetch('/api/devices/aliases');
+    if (!res.ok) return;
+    _deviceAliases = await res.json();
+    applyAliasesToAllSensors();
+  } catch (err) {
+    console.warn('[aliases] load failed:', err);
+  }
+}
+
+// Apply the current alias map to every known sensor's deviceName.
+// Called on initial load + after any alias change event arrives.
+function applyAliasesToAllSensors() {
+  for (const s of sensors.values()) {
+    const alias = s.devicePk ? _deviceAliases[s.devicePk] : null;
+    const newName = alias || s.hostname || s.key;
+    if (s.deviceName !== newName) {
+      s.deviceName = newName;
+      const sk = s.key.replace(/\./g, '-');
+      const nameEl = document.querySelector('#slabel-' + sk + ' .slabel-name');
+      if (nameEl) nameEl.textContent = newName;
+    }
+  }
+  updateSensorList();
+  renderDevicesIfVisible();
+  renderDataViewIfVisible();
+}
+
+// Operator-friendly rename. `addr` is the sensor IP (or IP:port);
+// device_pk is looked up via the sensor entry. Empty string clears
+// the alias and reverts to the hardware-reported hostname.
+async function renameSensor(addr) {
+  const s = sensors.get(getSensorKey(addr));
+  if (!s) return;
+  if (!s.devicePk) {
+    alert('This sensor hasn’t announced yet — wait a moment then try again.');
+    return;
+  }
+  const current = _deviceAliases[s.devicePk] || s.hostname || s.key;
+  const next = prompt(
+    'Rename this sensor (letters, numbers, dash, underscore, space; blank to reset):',
+    current,
+  );
+  if (next === null) return; // cancelled
+  try {
+    const res = await fetch('/api/devices/alias', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ device_pk: s.devicePk, name: next.trim() }),
+    });
+    if (!res.ok) {
+      const t = await res.text();
+      alert(`Couldn’t set alias: ${t}`);
+      return;
+    }
+    // Optimistic local update — the WS broadcast will re-confirm.
+    if (next.trim()) {
+      _deviceAliases[s.devicePk] = next.trim();
+    } else {
+      delete _deviceAliases[s.devicePk];
+    }
+    applyAliasesToAllSensors();
+  } catch (err) {
+    alert(`Network error: ${err}`);
+  }
+}
 
 let _inviteCountdownTimer = null;
 let _currentInvite = null;
@@ -3541,6 +3712,7 @@ class R2DeviceCard extends HTMLElement {
         <div class="device-header">
           <div class="virt-led" title="virtual LED — awaiting Phase 5L FSM state"></div>
           <div class="device-name" style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"></div>
+          <button class="rename-btn" title="Rename this sensor" onclick="renameSensor('${escapeAttr(key)}')">✏️</button>
         </div>
         <div class="health-row-host"></div>
         <div class="device-row"><span class="label">addr</span><span class="value device-addr"></span></div>
@@ -4355,6 +4527,7 @@ Object.assign(window, {
   captureMark,
   captureStop,
   downloadCaptureFile,
+  renameSensor,
   deleteCaptureFile,
   downloadMergedLatest,
   requestDeleteAllFleet,

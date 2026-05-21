@@ -596,6 +596,14 @@ struct AppState {
     /// relay session to forward to the joining device. `Some` only
     /// when `--relay-url` is configured.
     relay_binary_tx: Option<broadcast::Sender<Vec<u8>>>,
+    /// Operator-assigned device aliases (device_pk hex → friendly
+    /// name). Persisted to `~/.config/r2-rocker/device_aliases.json`
+    /// so renames survive dashboard restarts and propagate to every
+    /// dashboard browser session. v0.1 limitation: the sensor's own
+    /// hostname / SD-card filename still uses its hardware-derived
+    /// name — pushing aliases into firmware NVS is a follow-up task
+    /// (see project memory `heterogeneous-fleet-open-question.md`).
+    device_aliases: Arc<Mutex<HashMap<String, String>>>,
 }
 
 const FIRMWARE_CACHE_TTL_SECS: u64 = 300;
@@ -659,6 +667,9 @@ async fn main() {
         wifi_config_path,
     ).await;
 
+    // Load persisted device aliases (renames survive dashboard restarts).
+    let device_aliases = Arc::new(Mutex::new(load_device_aliases()));
+
     let state = Arc::new(AppState {
         event_tx: event_tx.clone(),
         raw_frame_tx: raw_frame_tx.clone(),
@@ -670,6 +681,7 @@ async fn main() {
         firmware_cache: Mutex::new(None),
         access: access_handle.clone(),
         relay_binary_tx: relay_binary_tx.clone(),
+        device_aliases,
     });
 
     // Phase 5 / SPEC-R2-ROCKER-ACCESS §5.2 — off-network viewer path
@@ -770,6 +782,12 @@ async fn main() {
         .route("/api/data/{addr}/file/{name}", get(data_get_handler).delete(data_delete_handler))
         .route("/api/data/{addr}/all",         axum::routing::delete(data_delete_all_handler))
         .route("/api/data/merged",             get(data_merged_handler))
+        // Operator-assigned device aliases. Persisted to
+        // ~/.config/r2-rocker/device_aliases.json. Read by every
+        // dashboard browser session on load + applied on top of the
+        // sensor's self-reported hostname.
+        .route("/api/devices/aliases",         get(device_aliases_get_handler))
+        .route("/api/devices/alias",           post(device_alias_set_handler))
         .route("/api/version", get(version_handler));
 
     // Serve the WASM viewer (webapp/) as the dashboard root if the
@@ -2692,12 +2710,21 @@ async fn data_delete_all_handler(Path(addr): Path<String>) -> impl IntoResponse 
     (axum::http::StatusCode::OK, Json(serde_json::json!({"ok": true, "deleted": count}))).into_response()
 }
 
-/// `GET /api/data/merged?file=<basename>` — fetch the named file from
-/// every connected peer and emit a wide-format CSV: one row per unique
-/// `ts_ms` across the fleet, with three columns per sensor
-/// (`<ip>_x, <ip>_y, <ip>_z`). Cells are blank when that sensor has
-/// no sample at that ts_ms — handy when sample timestamps don't line
-/// up exactly across the fleet (clock-sync jitter, dropped samples).
+/// `GET /api/data/merged?file=<basename>[&bin_ms=N]` — fetch the named
+/// file from every connected peer and emit a wide-format CSV.
+///
+/// Without `bin_ms`: one row per unique `ts_ms` across the fleet, three
+/// columns per sensor (`<ip>_x, <ip>_y, <ip>_z`). Cells are blank when
+/// that sensor has no sample at that ts_ms — handy when sample
+/// timestamps don't line up across the fleet (clock-sync jitter,
+/// dropped samples). This is the raw merge.
+///
+/// With `bin_ms=N` (10 / 100 / 1000 / …): per-sensor samples are
+/// bucketed into N-ms windows (`ts_ms = bucket_start_ms`), each
+/// bucket's x/y/z averaged, then merged across sensors. Result: one
+/// row per bucket per sensor — with N chosen above the sample period
+/// (samples land at ~10 ms), every bucket has an entry for every
+/// sensor and the timestamps line up across columns.
 async fn data_merged_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
@@ -2708,6 +2735,9 @@ async fn data_merged_handler(
             Json(serde_json::json!({"error": "missing ?file= parameter"})),
         ).into_response();
     };
+    let bin_ms: Option<i64> = q.get("bin_ms")
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|&n| n > 0 && n <= 60_000);
 
     // Sort peer IPs so column order is stable across runs (the natural
     // peer-map order is hash-based and would shuffle headers between
@@ -2755,6 +2785,12 @@ async fn data_merged_handler(
     let mut by_ts: std::collections::BTreeMap<i64, Vec<Option<Triplet>>> =
         std::collections::BTreeMap::new();
 
+    // Accumulators for the bin_ms aggregation path. One per (peer, bucket):
+    //   (sum_x, sum_y, sum_z, count)
+    // ; we render mean at emit time.
+    let mut buckets: std::collections::BTreeMap<i64, Vec<Option<(f64, f64, f64, u32)>>> =
+        std::collections::BTreeMap::new();
+
     for (peer_idx, (_, bytes)) in fetched.iter().enumerate() {
         for row in bytes.chunks_exact(ROW_BYTES) {
             let Some(ts) = parse_row_ts_ms(row) else { continue; };
@@ -2763,40 +2799,118 @@ async fn data_merged_handler(
             let x_str = trim_str(&row[26..37]);
             let y_str = trim_str(&row[38..49]);
             let z_str = trim_str(&row[50..61]);
-            by_ts.entry(ts)
-                .or_insert_with(|| vec![None; n_peers])
-                [peer_idx] = Some((x_str, y_str, z_str));
+
+            if let Some(bin) = bin_ms {
+                // Bucket start = floor(ts / bin) * bin. Per-sensor running
+                // sum + count so we emit mean(x/y/z) per bucket.
+                let bucket = (ts / bin) * bin;
+                let slot = buckets.entry(bucket)
+                    .or_insert_with(|| vec![None; n_peers]);
+                let x = x_str.parse::<f64>().unwrap_or(f64::NAN);
+                let y = y_str.parse::<f64>().unwrap_or(f64::NAN);
+                let z = z_str.parse::<f64>().unwrap_or(f64::NAN);
+                if x.is_nan() || y.is_nan() || z.is_nan() { continue; }
+                let entry = slot[peer_idx].get_or_insert((0.0, 0.0, 0.0, 0));
+                entry.0 += x; entry.1 += y; entry.2 += z; entry.3 += 1;
+            } else {
+                by_ts.entry(ts)
+                    .or_insert_with(|| vec![None; n_peers])
+                    [peer_idx] = Some((x_str, y_str, z_str));
+            }
         }
     }
+
+    // Column-name pass: prefer the operator-assigned alias for each
+    // sensor (looked up via device_pk per peer's last announce).
+    // Falls back to the raw IP if no alias is set.
+    let aliases_snapshot = {
+        let g = state.device_aliases.lock().await;
+        g.clone()
+    };
+    let pk_by_ip: HashMap<String, String> = {
+        let peers = state.peers.read().await;
+        peers.iter().filter_map(|(sa, p)| {
+            p.last_announce.as_ref().and_then(|frame| {
+                // Parse the announce CBOR enough to extract device_pk.
+                // Lazy path: hex-search the frame bytes for the
+                // device_pk hex string. The announce already carries
+                // a `device_pk` field in its CBOR map (see firmware
+                // sender::send_announce). Cheap to extract by string
+                // scan rather than re-deserialising the whole map.
+                let text = String::from_utf8_lossy(frame);
+                text.find("device_pk").and_then(|i| {
+                    let tail = &text[i..];
+                    tail.find(|c: char| c.is_ascii_hexdigit())
+                        .and_then(|s| {
+                            let hex: String = tail[s..].chars()
+                                .take_while(|c| c.is_ascii_hexdigit())
+                                .collect();
+                            if hex.len() == 64 { Some(hex) } else { None }
+                        })
+                })
+            }).map(|pk| (sa.ip().to_string(), pk))
+        }).collect()
+    };
+    let display_name_for = |ip: &str| -> String {
+        if let Some(pk) = pk_by_ip.get(ip) {
+            if let Some(alias) = aliases_snapshot.get(pk) {
+                return alias.clone();
+            }
+        }
+        ip.replace('.', "_")
+    };
 
     let mut output = String::with_capacity(64 * 1024);
     // Header: ts_ms then three columns per sensor in sorted-IP order.
     output.push_str("ts_ms");
     for (sensor_name, _) in &fetched {
-        // Sanitize IPs for spreadsheet-friendly column names — dots
-        // upset some downstream consumers.
-        let safe = sensor_name.replace('.', "_");
+        let safe = display_name_for(sensor_name);
         output.push(','); output.push_str(&safe); output.push_str("_x");
         output.push(','); output.push_str(&safe); output.push_str("_y");
         output.push(','); output.push_str(&safe); output.push_str("_z");
     }
     output.push('\n');
 
-    for (ts, slots) in &by_ts {
-        output.push_str(&ts.to_string());
-        for slot in slots {
-            output.push(',');
-            if let Some((x, y, z)) = slot {
-                output.push_str(x); output.push(',');
-                output.push_str(y); output.push(',');
-                output.push_str(z);
-            } else {
-                // Three empty cells — blank means "no reading for this
-                // ts_ms from this sensor", per the wide-merge contract.
-                output.push(','); output.push(',');
+    if bin_ms.is_some() {
+        // Emit mean(x/y/z) per bucket; blank trio when a sensor had no
+        // samples in that bucket.
+        for (ts, slots) in &buckets {
+            output.push_str(&ts.to_string());
+            for slot in slots {
+                output.push(',');
+                if let Some((sx, sy, sz, n)) = slot {
+                    let nf = *n as f64;
+                    let _ = std::fmt::Write::write_fmt(&mut output,
+                        format_args!("{:.6}", sx / nf));
+                    output.push(',');
+                    let _ = std::fmt::Write::write_fmt(&mut output,
+                        format_args!("{:.6}", sy / nf));
+                    output.push(',');
+                    let _ = std::fmt::Write::write_fmt(&mut output,
+                        format_args!("{:.6}", sz / nf));
+                } else {
+                    output.push(','); output.push(',');
+                }
             }
+            output.push('\n');
         }
-        output.push('\n');
+    } else {
+        for (ts, slots) in &by_ts {
+            output.push_str(&ts.to_string());
+            for slot in slots {
+                output.push(',');
+                if let Some((x, y, z)) = slot {
+                    output.push_str(x); output.push(',');
+                    output.push_str(y); output.push(',');
+                    output.push_str(z);
+                } else {
+                    // Three empty cells — blank means "no reading for this
+                    // ts_ms from this sensor", per the wide-merge contract.
+                    output.push(','); output.push(',');
+                }
+            }
+            output.push('\n');
+        }
     }
 
     let mut headers = axum::http::HeaderMap::new();
@@ -2806,6 +2920,106 @@ async fn data_merged_handler(
         format!("attachment; filename=\"merged-{}\"", name).parse().unwrap(),
     );
     (axum::http::StatusCode::OK, headers, output).into_response()
+}
+
+/// Path used by `load_device_aliases` / `save_device_aliases`. We
+/// store under `$XDG_CONFIG_HOME` (falling back to `~/.config`) so
+/// renames travel with the controller account; a fresh dashboard
+/// install on the same machine picks them back up.
+fn device_aliases_path() -> std::path::PathBuf {
+    let cfg = std::env::var("XDG_CONFIG_HOME").ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            format!("{home}/.config")
+        });
+    std::path::PathBuf::from(cfg).join("r2-rocker").join("device_aliases.json")
+}
+
+fn load_device_aliases() -> HashMap<String, String> {
+    let path = device_aliases_path();
+    let Ok(bytes) = std::fs::read(&path) else { return HashMap::new(); };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        eprintln!("[aliases] {:?} not valid JSON — starting empty", path);
+        return HashMap::new();
+    };
+    let Some(obj) = value.as_object() else { return HashMap::new(); };
+    let mut out = HashMap::new();
+    for (k, v) in obj {
+        if let Some(s) = v.as_str() {
+            out.insert(k.clone(), s.to_string());
+        }
+    }
+    if !out.is_empty() {
+        eprintln!("[aliases] loaded {} aliases from {:?}", out.len(), path);
+    }
+    out
+}
+
+fn save_device_aliases(map: &HashMap<String, String>) {
+    let path = device_aliases_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let json = serde_json::to_string_pretty(map).unwrap_or_else(|_| "{}".to_string());
+    if let Err(e) = std::fs::write(&path, json) {
+        eprintln!("[aliases] write {:?}: {e}", path);
+    }
+}
+
+/// `GET /api/devices/aliases` — return the current device_pk → name map.
+async fn device_aliases_get_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let g = state.device_aliases.lock().await;
+    let map: serde_json::Map<String, serde_json::Value> = g.iter()
+        .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+        .collect();
+    (axum::http::StatusCode::OK, Json(serde_json::Value::Object(map)))
+}
+
+/// `POST /api/devices/alias` `{device_pk, name}` — set / clear an
+/// alias. Empty / null name clears. Broadcasts on /ws/status so
+/// every connected dashboard browser picks up the change.
+async fn device_alias_set_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let device_pk = body.get("device_pk").and_then(|v| v.as_str())
+        .map(|s| s.to_string()).unwrap_or_default();
+    let name = body.get("name").and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string()).unwrap_or_default();
+    if device_pk.is_empty() {
+        return (axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "device_pk required"})));
+    }
+    // Light validation — device_pk should be 32-byte Ed25519 pk in hex.
+    if device_pk.len() != 64 || !device_pk.chars().all(|c| c.is_ascii_hexdigit()) {
+        return (axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "device_pk must be 64 hex chars"})));
+    }
+    let map_snapshot;
+    {
+        let mut g = state.device_aliases.lock().await;
+        if name.is_empty() {
+            g.remove(&device_pk);
+        } else {
+            // Cap at a sensible length — surfaces in CSV filenames so
+            // we don't want path-busting characters either.
+            let clean: String = name.chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == ' ')
+                .take(64).collect();
+            g.insert(device_pk.clone(), clean);
+        }
+        map_snapshot = g.clone();
+    }
+    save_device_aliases(&map_snapshot);
+    // Broadcast to /ws/status so every dashboard browser updates in
+    // place — no full reload needed.
+    let _ = state.ws_broadcast_tx.send(serde_json::json!({
+        "type": "device_alias",
+        "device_pk": device_pk,
+        "name": map_snapshot.get(&device_pk).cloned().unwrap_or_default(),
+    }).to_string());
+    (axum::http::StatusCode::OK, Json(serde_json::json!({"ok": true})))
 }
 
 fn parse_row_ts_ms(row: &[u8]) -> Option<i64> {
