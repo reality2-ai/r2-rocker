@@ -236,6 +236,13 @@ struct SensorPeer {
     addr: SocketAddr,
     tx: tokio::sync::mpsc::Sender<Vec<u8>>,
     name: Option<String>,
+    /// 64-hex-char Ed25519 public key from the most recent announce.
+    /// Used as the alias-map lookup key in `/api/data/merged` and
+    /// anywhere else we want to address a sensor by *device* identity
+    /// rather than its (ephemeral) IP. Pulled out of the announce
+    /// payload at decode time so downstream code doesn't have to
+    /// re-parse the cached CBOR frame.
+    device_pk: Option<String>,
     /// Most-recent `r2.sensor.announce` raw R2-WIRE frame bytes,
     /// cached so a freshly-connected /ws/raw viewer can be replayed
     /// the announce — otherwise it never sees `fw_ver`, `device_pk`,
@@ -468,10 +475,20 @@ async fn handle_sync_pong(
     );
 
     // Decide whether to push a correction (SPEC-R2-ROCKER-TIMESYNC §3.2).
+    //
+    // Normal-case baseline waits ≥ 5 rounds + std-dev of the last 3
+    // estimates < 5 ms so RTT jitter doesn't get baked into the offset.
+    // But when the sensor's clock is grossly out (cold boot with no
+    // NVS offset, or NVS-stale-by-minutes after an OTA), the smoothed
+    // estimate is ≫ any plausible RTT jitter. Push that immediately —
+    // the wall-clock-driven LED animation (and SD-card mtimes) read
+    // wrong until baseline lands, and waiting 5+ rounds at that scale
+    // is just operator confusion ("my LEDs are out of sync").
+    const BASELINE_FAST_PATH_MS: f64 = 500.0;
     let push_decision: Option<(i64, &'static str)> = if !s.baseline_pushed {
-        // Initial baseline. Need ≥ 5 rounds and a stable estimate
-        // (std-dev of the last 3 estimates < 5 ms).
-        if s.estimates.len() >= 5 && std_dev_last_n(&s.estimates, 3) < 5.0 {
+        if smoothed.abs() >= BASELINE_FAST_PATH_MS {
+            Some((smoothed.round() as i64, "baseline (fast)"))
+        } else if s.estimates.len() >= 5 && std_dev_last_n(&s.estimates, 3) < 5.0 {
             Some((smoothed.round() as i64, "baseline"))
         } else {
             None
@@ -1235,6 +1252,7 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
             addr,
             tx: cmd_tx.clone(),
             name: None,
+            device_pk: None,
             last_announce: None,
             sync: sync_state.clone(),
         });
@@ -1455,11 +1473,24 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
                             // replayed — otherwise it misses `fw_ver` /
                             // `device_pk` / `boot_ts_ms` until the next
                             // sensor reboot.
+                            // Pull device_pk out of the parsed announce payload
+                            // so downstream consumers (data_merged_handler's
+                            // alias lookup, future cert-based routing) don't
+                            // have to re-decode the cached CBOR.
+                            let device_pk_hex = payload.as_ref()
+                                .and_then(|p| p.get("device_pk"))
+                                .and_then(|v| v.as_str())
+                                .filter(|s| s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()))
+                                .map(|s| s.to_string());
+
                             {
                                 let mut peers = read_state.peers.write().await;
                                 if let Some(peer) = peers.get_mut(&addr) {
                                     if let Some(ref name_str) = device_name {
                                         peer.name = Some(name_str.clone());
+                                    }
+                                    if let Some(ref pk) = device_pk_hex {
+                                        peer.device_pk = Some(pk.clone());
                                     }
                                     peer.last_announce = Some(frame.clone());
                                 }
@@ -2827,28 +2858,14 @@ async fn data_merged_handler(
         let g = state.device_aliases.lock().await;
         g.clone()
     };
+    // Map peer IP → device_pk hex. SensorPeer.device_pk is set when
+    // the announce is decoded (handle_sensor_connection); reading it
+    // out beats scanning the raw CBOR for a literal string, which
+    // doesn't work because the CBOR uses integer keys.
     let pk_by_ip: HashMap<String, String> = {
         let peers = state.peers.read().await;
         peers.iter().filter_map(|(sa, p)| {
-            p.last_announce.as_ref().and_then(|frame| {
-                // Parse the announce CBOR enough to extract device_pk.
-                // Lazy path: hex-search the frame bytes for the
-                // device_pk hex string. The announce already carries
-                // a `device_pk` field in its CBOR map (see firmware
-                // sender::send_announce). Cheap to extract by string
-                // scan rather than re-deserialising the whole map.
-                let text = String::from_utf8_lossy(frame);
-                text.find("device_pk").and_then(|i| {
-                    let tail = &text[i..];
-                    tail.find(|c: char| c.is_ascii_hexdigit())
-                        .and_then(|s| {
-                            let hex: String = tail[s..].chars()
-                                .take_while(|c| c.is_ascii_hexdigit())
-                                .collect();
-                            if hex.len() == 64 { Some(hex) } else { None }
-                        })
-                })
-            }).map(|pk| (sa.ip().to_string(), pk))
+            p.device_pk.as_ref().map(|pk| (sa.ip().to_string(), pk.clone()))
         }).collect()
     };
     let display_name_for = |ip: &str| -> String {
