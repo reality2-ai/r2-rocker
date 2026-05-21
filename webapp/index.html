@@ -2325,9 +2325,24 @@ async function captureStop() {
 
 // ── Per-file download / delete (used from inline onclick="…") ─────
 
-async function downloadCaptureFile(addr, name) {
-  // Build an anchor so the browser drives the actual download — no
-  // need to materialise the blob in JS for a 5..50 MB file.
+async function downloadCaptureFile(addr, name, btn) {
+  // The actual download is browser-driven via an `<a>` click — no
+  // need to materialise the blob in JS for a 5..50 MB file. But the
+  // server takes a moment to start streaming bytes (it has to fetch
+  // from the sensor's data-tcp port first), and without visible
+  // feedback operators were double-clicking — firing two downloads.
+  // Disable + show ⏳ on the clicked button, re-enable after a short
+  // debounce so the browser's download dialog has had time to appear.
+  if (btn) {
+    if (btn.disabled) return;
+    const orig = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '⏳';
+    setTimeout(() => {
+      btn.disabled = false;
+      btn.textContent = orig;
+    }, 2500);
+  }
   const a = document.createElement('a');
   a.href = `/api/data/${encodeURIComponent(addr)}/file/${encodeURIComponent(name)}`;
   a.download = name;
@@ -2352,6 +2367,20 @@ async function downloadMergedLatest() {
   if (!lastMarkedFilename) {
     alert('No marked capture in this session yet.');
     return;
+  }
+  // Same debounce + visible-state treatment as per-file downloads
+  // (server takes longer here — fetches in parallel from every
+  // sensor, then merges, so the start-of-bytes gap is bigger).
+  const btn = document.getElementById('dataMergedBtn');
+  if (btn) {
+    if (btn.disabled) return;
+    const orig = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '⏳ Preparing merge…';
+    setTimeout(() => {
+      btn.disabled = false;
+      btn.textContent = orig;
+    }, 4000);
   }
   const a = document.createElement('a');
   a.href = `/api/data/merged?file=${encodeURIComponent(lastMarkedFilename)}`;
@@ -3960,7 +3989,7 @@ class R2DataCard extends HTMLElement {
             <div class="data-file-row${markedCls}">
               <span class="name" title="${nameEsc}">${nameEsc}</span>
               <span class="meta">${sizeKb} KB · ${mt}</span>
-              <button onclick="downloadCaptureFile('${addrAttr}','${nameAttr}')">📥</button>
+              <button onclick="downloadCaptureFile('${addrAttr}','${nameAttr}', this)">📥</button>
               ${delBtn}
             </div>`;
         }).join('');
