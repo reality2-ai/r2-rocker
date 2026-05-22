@@ -283,6 +283,96 @@ export class R2Member {
 }
 if (Symbol.dispose) R2Member.prototype[Symbol.dispose] = R2Member.prototype.free;
 
+export class R2RockerHive {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        R2RockerHiveFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_r2rockerhive_free(ptr, 0);
+    }
+    /**
+     * Construct the rocker hive with the DashboardViewerSentant
+     * registered on the EventBus. Called once from `bootstrapHive`
+     * in `webapp/index.html`.
+     */
+    constructor() {
+        const ret = wasm.r2rockerhive_new();
+        this.__wbg_ptr = ret;
+        R2RockerHiveFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * Snapshot the per-sensor state table as a JSON string. UI code
+     * can `JSON.parse(hive.peek_state())` to consume.
+     *
+     * Shape:
+     *   {
+     *     "event_count": N,
+     *     "sensors": [
+     *       {
+     *         "device_pk": "<64 hex>",
+     *         "hostname": "...",        // optional
+     *         "fw_ver": "...",           // optional
+     *         "has_cert": true|false,
+     *         "last_seq": N,
+     *         "last_ts_ms": N,
+     *         "battery_pct": 0..100,    // optional
+     *         "fsm_state": 0..9,        // optional
+     *         "capture_state": 0|1|2,   // optional
+     *         "capture_file": "...",    // optional
+     *         "sample_count": N
+     *       },
+     *       ...
+     *     ]
+     *   }
+     * @returns {string}
+     */
+    peek_state() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.r2rockerhive_peek_state(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            deferred1_0 = r0;
+            deferred1_1 = r1;
+            return getStringFromWasm0(r0, r1);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export4(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * Forward an R2-WIRE event into the hive. JavaScript pulls the
+     * event hash + CBOR payload out of the binary `/ws/raw` frame
+     * (via `decode_compact_frame`) and calls this. Same shape as
+     * `R2Hive::send_event`.
+     * @param {number} event_hash
+     * @param {Uint8Array} payload
+     */
+    send_event(event_hash, payload) {
+        const ptr0 = passArray8ToWasm0(payload, wasm.__wbindgen_export);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.r2rockerhive_send_event(this.__wbg_ptr, event_hash, ptr0, len0);
+    }
+    /**
+     * Drive one tick of the engine. Intended to be called from
+     * `requestAnimationFrame` in the webapp once the engine grows
+     * timer-driven behaviour. For Track D's first slice the sentant
+     * is purely event-reactive — calling tick is a no-op but the API
+     * is there for symmetry with `R2Hive`.
+     */
+    tick() {
+        wasm.r2rockerhive_tick(this.__wbg_ptr);
+    }
+}
+if (Symbol.dispose) R2RockerHive.prototype[Symbol.dispose] = R2RockerHive.prototype.free;
+
 /**
  * Opaque handle to a TrustGroup (key holder side).
  * Stored in WASM memory; JS holds the index.
@@ -1581,6 +1671,9 @@ const R2HiveFinalization = (typeof FinalizationRegistry === 'undefined')
 const R2MemberFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_r2member_free(ptr, 1));
+const R2RockerHiveFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_r2rockerhive_free(ptr, 1));
 const R2TrustGroupFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_r2trustgroup_free(ptr, 1));

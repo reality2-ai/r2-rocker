@@ -21,6 +21,11 @@ pub mod notekeeper;
 pub mod sync_plugin;
 pub mod hive;
 pub mod wordlist;
+// r2-rocker viewer hive — Track D of the R2-conformance roadmap
+// (audits/2026-05-23-architectural-gaps.md Finding C). Sibling of
+// `hive::R2Hive`; the rocker webapp instantiates `rocker_hive::R2RockerHive`.
+pub mod rocker_viewer;
+pub mod rocker_hive;
 
 // ---------------------------------------------------------------------------
 // r2-fnv: Event name hashing

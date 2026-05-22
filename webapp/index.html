@@ -1472,7 +1472,21 @@ import init, {
   // Pure WASM, doesn't depend on browser SubtleCrypto Ed25519
   // support, which is missing on older mobile Safari / Chrome.
   sign_ed25519 as wasmSignEd25519,
+  // Track D — browser-side R2 hive carrying the rocker viewer sentant.
+  // Audit 2026-05-23 Finding C. The sentant subscribes to the sensor
+  // event family and maintains a per-sensor state table; JS reads it
+  // back via `hive.peek_state()`. v0.1 slice is observation-only: JS
+  // keeps owning UI rendering, the hive runs in parallel.
+  R2RockerHive as WasmRockerHive,
 } from './pkg/r2_wasm.js';
+
+/// Browser-side rocker hive (Track D). Constructed lazily once
+/// `init()` resolves in `bootstrapHive`. Every R2-WIRE frame the
+/// dashboard pushes on `/ws/raw` is forwarded into the hive via
+/// `hive.send_event(hash, payload)` alongside the existing JS
+/// dispatch. The hive maintains its own per-sensor state for the
+/// follow-up slice that migrates UI rendering through it.
+let rockerHive = null;
 
 let ws;
 let HASH_TO_NAME = new Map();           // u32 event_hash → friendly name
@@ -1500,6 +1514,23 @@ async function bootstrapHive() {
     return;
   }
   console.log('[hive] r2-wasm loaded:', wasmVersion());
+
+  // Track D — instantiate the rocker viewer hive. From this point on
+  // every R2-WIRE event arriving via /ws/raw is also forwarded into
+  // `rockerHive.send_event(hash, payload)` (see onRawFrame). The
+  // sentant maintains a per-sensor state table; JS can inspect it
+  // via `JSON.parse(rockerHive.peek_state())` from devtools. UI
+  // rendering still flows through the existing JS state in this
+  // slice; the next slice migrates rendering to use the hive's
+  // snapshot directly.
+  try {
+    rockerHive = new WasmRockerHive();
+    window.rockerHive = rockerHive; // devtools convenience
+    console.log('[hive] R2RockerHive constructed; forwarding /ws/raw events into the sentant');
+  } catch (err) {
+    console.warn('[hive] R2RockerHive construct failed (continuing without it):', err);
+    rockerHive = null;
+  }
 
   // Cross-origin cert import. The lab-origin webapp (loaded from
   // http://<lan_ip>:8080) issues a "Save for off-network use" link
@@ -1888,6 +1919,21 @@ function onRawFrame(buf) {
   let payloadBytes = decoded.payload;
   if (payloadBytes && !(payloadBytes instanceof Uint8Array)) {
     payloadBytes = new Uint8Array(payloadBytes);
+  }
+
+  // Track D — forward the raw R2-WIRE event into the rocker hive so
+  // the DashboardViewerSentant can update its per-sensor state in
+  // parallel with the JS-side state. Observation-only in this slice;
+  // peek_state() output is visible from devtools as
+  //   JSON.parse(rockerHive.peek_state())
+  // for verification. Wrapped in try/catch so a hive panic never
+  // disrupts the JS dispatch path.
+  if (rockerHive && payloadBytes) {
+    try {
+      rockerHive.send_event(eventHash, payloadBytes);
+    } catch (err) {
+      console.warn('[hive] rockerHive.send_event failed:', err);
+    }
   }
   const payload = payloadBytes && payloadBytes.length
     ? remapPayload(eventName, decodeCbor(payloadBytes))

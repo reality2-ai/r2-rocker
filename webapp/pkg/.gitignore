@@ -1,11 +1,1 @@
-# Vendored r2-wasm bundle — produced by `wasm-pack build` upstream,
-# committed here so GitHub Pages can serve the static webapp without
-# a Rust toolchain in CI. Ignore the developer-only build noise but
-# track the runtime files the page actually imports.
 *
-!r2_wasm.js
-!r2_wasm_bg.wasm
-!r2_wasm.d.ts
-!r2_wasm_bg.wasm.d.ts
-!package.json
-!.gitignore

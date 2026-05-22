@@ -98,6 +98,58 @@ export class R2Member {
     readonly trust_group_id: Uint8Array;
 }
 
+export class R2RockerHive {
+    free(): void;
+    [Symbol.dispose](): void;
+    /**
+     * Construct the rocker hive with the DashboardViewerSentant
+     * registered on the EventBus. Called once from `bootstrapHive`
+     * in `webapp/index.html`.
+     */
+    constructor();
+    /**
+     * Snapshot the per-sensor state table as a JSON string. UI code
+     * can `JSON.parse(hive.peek_state())` to consume.
+     *
+     * Shape:
+     *   {
+     *     "event_count": N,
+     *     "sensors": [
+     *       {
+     *         "device_pk": "<64 hex>",
+     *         "hostname": "...",        // optional
+     *         "fw_ver": "...",           // optional
+     *         "has_cert": true|false,
+     *         "last_seq": N,
+     *         "last_ts_ms": N,
+     *         "battery_pct": 0..100,    // optional
+     *         "fsm_state": 0..9,        // optional
+     *         "capture_state": 0|1|2,   // optional
+     *         "capture_file": "...",    // optional
+     *         "sample_count": N
+     *       },
+     *       ...
+     *     ]
+     *   }
+     */
+    peek_state(): string;
+    /**
+     * Forward an R2-WIRE event into the hive. JavaScript pulls the
+     * event hash + CBOR payload out of the binary `/ws/raw` frame
+     * (via `decode_compact_frame`) and calls this. Same shape as
+     * `R2Hive::send_event`.
+     */
+    send_event(event_hash: number, payload: Uint8Array): void;
+    /**
+     * Drive one tick of the engine. Intended to be called from
+     * `requestAnimationFrame` in the webapp once the engine grows
+     * timer-driven behaviour. For Track D's first slice the sentant
+     * is purely event-reactive — calling tick is a no-op but the API
+     * is there for symmetry with `R2Hive`.
+     */
+    tick(): void;
+}
+
 /**
  * Opaque handle to a TrustGroup (key holder side).
  * Stored in WASM memory; JS holds the index.
@@ -462,6 +514,11 @@ export interface InitOutput {
     readonly transcode_to_extended: (a: number, b: number, c: number) => void;
     readonly verify_compact_hmac: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly verify_extended_hmac: (a: number, b: number, c: number, d: number, e: number) => void;
+    readonly __wbg_r2rockerhive_free: (a: number, b: number) => void;
+    readonly r2rockerhive_new: () => number;
+    readonly r2rockerhive_peek_state: (a: number, b: number) => void;
+    readonly r2rockerhive_send_event: (a: number, b: number, c: number, d: number) => void;
+    readonly r2rockerhive_tick: (a: number) => void;
     readonly __wbg_r2hive_free: (a: number, b: number) => void;
     readonly r2hive_drain_outbound: (a: number, b: number) => void;
     readonly r2hive_new: () => number;
