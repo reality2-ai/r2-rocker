@@ -29,12 +29,12 @@ use crate::ring::Ring;
 use crate::sim::AccelSim;
 use crate::wire::{
     decode_compact_frame, frame_for_tcp, parse_capture_mark, parse_dash_ack_through_seq,
-    parse_set_clock_offset, parse_sync_pulse_req_id,
+    parse_identify_set, parse_set_clock_offset, parse_sync_pulse_req_id,
     CborWriter,
     EVT_DASH_ACK, EVT_DASH_CAPTURE_MARK, EVT_DASH_CAPTURE_START, EVT_DASH_CAPTURE_STOP,
-    EVT_DASH_SET_CLOCK_OFFSET, EVT_DASH_SYNC_PULSE, EVT_SENSOR_ACCELERATION,
-    EVT_SENSOR_ANNOUNCE, EVT_SENSOR_BATTERY, EVT_SENSOR_CAPTURE_STATE, EVT_SENSOR_STATUS,
-    EVT_SENSOR_SYNC_PONG,
+    EVT_DASH_IDENTIFY_SET, EVT_DASH_SET_CLOCK_OFFSET, EVT_DASH_SYNC_PULSE,
+    EVT_SENSOR_ACCELERATION, EVT_SENSOR_ANNOUNCE, EVT_SENSOR_BATTERY,
+    EVT_SENSOR_CAPTURE_STATE, EVT_SENSOR_STATUS, EVT_SENSOR_SYNC_PONG,
 };
 
 const SAMPLE_RATE_HZ: u32 = 100;
@@ -392,6 +392,13 @@ impl Sender {
                     }
                     self.send_capture_state(stream)?;
                 }
+            }
+            EVT_DASH_IDENTIFY_SET => {
+                // Payload: `{0: u8}` — 1 = on, 0 = off. Same int-key
+                // CBOR shape as the other small dashboard commands.
+                let on = parse_identify_set(payload).unwrap_or(false);
+                info!("[sender] r2.dash.identify_set on={on}");
+                self.led.set_identify(on);
             }
             EVT_DASH_SYNC_PULSE => {
                 if let Some(req_id) = parse_sync_pulse_req_id(payload) {

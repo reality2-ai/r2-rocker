@@ -1,6 +1,6 @@
 [package]
 name        = "r2-rocker-firmware"
-version     = "0.1.4"
+version     = "0.1.5"
 edition     = "2021"
 description = "r2-rocker sensor firmware (Seeed XIAO ESP32-S3)"
 license     = "MIT OR Apache-2.0"

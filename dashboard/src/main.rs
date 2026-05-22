@@ -53,6 +53,7 @@ const SENSOR_ANNOUNCE:     u32 = r2_fnv::fnv1a_32(b"r2.sensor.announce");
 const DASH_ACK:               u32 = r2_fnv::fnv1a_32(b"r2.dash.ack");
 const DASH_SYNC_PULSE:        u32 = r2_fnv::fnv1a_32(b"r2.dash.sync_pulse");
 const DASH_SET_CLOCK_OFFSET:  u32 = r2_fnv::fnv1a_32(b"r2.dash.set_clock_offset");
+const DASH_IDENTIFY_SET:      u32 = r2_fnv::fnv1a_32(b"r2.dash.identify_set");
 // Capture session (SPEC-R2-ROCKER-CAPTURE §3).
 const DASH_CAPTURE_START:     u32 = r2_fnv::fnv1a_32(b"r2.dash.capture.start");
 const DASH_CAPTURE_MARK:      u32 = r2_fnv::fnv1a_32(b"r2.dash.capture.mark");
@@ -374,6 +375,18 @@ fn encode_empty_map() -> Vec<u8> {
     let used = {
         let mut enc = r2_cbor::Encoder::new(&mut buf);
         let _ = enc.map(0);
+        enc.len()
+    };
+    buf[..used].to_vec()
+}
+
+/// Encode `r2.dash.identify_set` payload `{0: u8 on}`.
+fn encode_identify_set(on: bool) -> Vec<u8> {
+    let mut buf = [0u8; 8];
+    let used = {
+        let mut enc = r2_cbor::Encoder::new(&mut buf);
+        let _ = enc.map(1);
+        let _ = enc.kv(0, &r2_cbor::Value::UInt(if on { 1 } else { 0 }));
         enc.len()
     };
     buf[..used].to_vec()
@@ -779,6 +792,7 @@ async fn main() {
         // SPEC-R2-ROCKER-SENSOR-REMOTE-RESET: push a CMD_RESET to a sensor's
         // reset listener (TCP 21044). Triggers esp_restart() on the sensor.
         .route("/api/sensor/{addr}/reset", post(reset_push_handler))
+        .route("/api/sensor/{addr}/identify", post(identify_handler))
         // Firmware availability: returns the latest release per
         // carrier (GitHub Releases primary, local releases/ dir
         // fallback). 5-minute cache. Webapp diffs against each peer's
@@ -1159,6 +1173,46 @@ fn reset_err(state: &Arc<AppState>, target: &str, msg: &str) -> (axum::http::Sta
         axum::http::StatusCode::BAD_GATEWAY,
         Json(serde_json::json!({"ok": false, "error": msg})),
     )
+}
+
+/// POST /api/sensor/{addr}/identify  body `{on: bool}` — toggle the
+/// operator-identify overlay (solid white LED) on the named sensor.
+/// Used to pick a specific board out of a busy rack for a battery
+/// swap or similar. Frame goes out via the streaming-TCP peer
+/// command channel (same path as set_clock_offset / sync_pulse).
+async fn identify_handler(
+    State(state): State<Arc<AppState>>,
+    Path(addr): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let on = body.get("on").and_then(|v| v.as_bool()).unwrap_or(false);
+    let ip_only: &str = addr.split(':').next().unwrap_or(&addr);
+
+    // Look up the peer by IP — addr from the URL is what the dashboard
+    // tracks, but state.peers is keyed by SocketAddr (ip:port). Match
+    // on the IP portion.
+    let tx = {
+        let peers = state.peers.read().await;
+        peers.iter()
+            .find(|(sa, _)| sa.ip().to_string() == ip_only)
+            .map(|(_, p)| p.tx.clone())
+    };
+    let Some(tx) = tx else {
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"ok": false, "error": "no such connected peer"})),
+        );
+    };
+
+    let frame = build_dash_frame(DASH_IDENTIFY_SET, 0, &encode_identify_set(on));
+    if tx.send(frame).await.is_err() {
+        return (
+            axum::http::StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"ok": false, "error": "peer queue closed"})),
+        );
+    }
+    eprintln!("[identify] {} on={}", ip_only, on);
+    (axum::http::StatusCode::OK, Json(serde_json::json!({"ok": true, "on": on})))
 }
 
 /// Drives the reset protocol from `r2-esp::reset_tcp`:

@@ -692,6 +692,29 @@
   .btn-reset:hover { background: rgba(245, 158, 11, 0.12); }
   .btn-reset:disabled { opacity: 0.5; cursor: not-allowed; }
 
+  /* Identify — toggles the sensor's LED to solid white so the
+     operator can physically locate it in a rack. Idle state is a
+     calm slate outline like btn-logs; when active, the button
+     inverts to a bright white fill so the dashboard mirrors what
+     the operator sees on the bench. */
+  .btn-identify {
+    flex: 0 0 auto;
+    background: transparent;
+    color: #94a3b8;
+    border: 1px solid #334155;
+    border-radius: 6px;
+    padding: 7px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .btn-identify:hover { background: rgba(148, 163, 184, 0.10); }
+  .btn-identify.active {
+    background: #f8fafc;
+    color: #0b1220;
+    border-color: #f8fafc;
+    box-shadow: 0 0 12px rgba(248, 250, 252, 0.55);
+  }
+
   /* Tertiary action — live log tail (slate outline). */
   .btn-logs {
     flex: 0 0 auto;
@@ -3723,6 +3746,7 @@ class R2DeviceCard extends HTMLElement {
         <div class="device-actions">
           <button class="btn-update">⬆ Update Firmware</button>
           <button class="btn-reset">↻ Reset Sensor</button>
+          <button class="btn-identify" title="Light this sensor's LED solid white so you can find it in the rack">💡 Identify</button>
           <button class="btn-logs">↓ Logs</button>
         </div>
         <div class="device-log-host"></div>
@@ -3740,6 +3764,7 @@ class R2DeviceCard extends HTMLElement {
       battBarHost: this.querySelector('.battery-bar-host'),
       btnUpdate:   this.querySelector('.btn-update'),
       btnReset:    this.querySelector('.btn-reset'),
+      btnIdentify: this.querySelector('.btn-identify'),
       btnLogs:     this.querySelector('.btn-logs'),
       logHost:     this.querySelector('.device-log-host'),
     };
@@ -3750,6 +3775,7 @@ class R2DeviceCard extends HTMLElement {
     // operations share one code path and produce identical UI feedback.
     this._refs.btnUpdate.addEventListener('click', () => this._sensor && this.pickAndUpdateFirmware());
     this._refs.btnReset .addEventListener('click', () => this._sensor && this.reset());
+    this._refs.btnIdentify.addEventListener('click', () => this._sensor && this.toggleIdentify());
     this._refs.btnLogs  .addEventListener('click', () => this._sensor && this.toggleLogs());
     // Hide controller-only buttons (firmware + reset) on viewer
     // builds. Logs panel stays — viewers can inspect device logs
@@ -3759,6 +3785,7 @@ class R2DeviceCard extends HTMLElement {
     if (!isControllerRole) {
       this._refs.btnUpdate.hidden = true;
       this._refs.btnReset .hidden = true;
+      this._refs.btnIdentify.hidden = true;
     }
   }
 
@@ -3807,6 +3834,39 @@ class R2DeviceCard extends HTMLElement {
       r.btnReset.disabled = false;
     }, 4000);
     return { ok, message };
+  }
+
+  /// Toggle the sensor's identify light (solid white) so the
+  /// operator can physically locate the device in a rack of many
+  /// sensors. Optimistic UI: flip local state immediately, POST in
+  /// the background, auto-revert after 60 s so an operator who
+  /// forgets to switch it off doesn't drain the battery.
+  async toggleIdentify() {
+    const s = this._sensor;
+    if (!s) return { ok: false, message: 'no sensor' };
+    const r = this._refs;
+    const next = !s.identifyOn;
+    s.identifyOn = next;
+    r.btnIdentify.classList.toggle('active', next);
+    r.btnIdentify.textContent = next ? '💡 Identifying…' : '💡 Identify';
+    if (s._identifyTimer) { clearTimeout(s._identifyTimer); s._identifyTimer = null; }
+    if (next) {
+      s._identifyTimer = setTimeout(() => {
+        if (s.identifyOn) this.toggleIdentify();
+      }, 60_000);
+    }
+    try {
+      const res = await fetch(`/api/sensor/${encodeURIComponent(s.key)}/identify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ on: next }),
+      });
+      const out = await res.json().catch(() => ({}));
+      if (!res.ok || !out.ok) console.warn('[identify]', s.key, out);
+    } catch (err) {
+      console.warn('[identify]', s.key, err);
+    }
+    return { ok: true };
   }
 
   /// Push a firmware Blob to this sensor's OTA endpoint. Returns
@@ -4021,6 +4081,17 @@ class R2DeviceCard extends HTMLElement {
       r.btnLogs.textContent = logsOpen ? '↑ Logs' : '↓ Logs';
       r.btnLogs.classList.toggle('open', logsOpen);
       last.logsOpen = logsOpen;
+    }
+
+    // Identify button state. Sensor object carries the toggle so a
+    // card recreated on tab re-render (or after a sensor came back
+    // online) keeps showing the right visual. The dashboard has no
+    // server-side mirror — it's a fire-and-forget operator aid.
+    const idOn = !!s.identifyOn;
+    if (last.identifyOn !== idOn) {
+      r.btnIdentify.classList.toggle('active', idOn);
+      r.btnIdentify.textContent = idOn ? '💡 Identifying…' : '💡 Identify';
+      last.identifyOn = idOn;
     }
 
     // Log panel — content updates on each tick when open.

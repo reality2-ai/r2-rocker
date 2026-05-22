@@ -44,6 +44,9 @@ pub enum LedState {
     /// every 0.5s so the operator can tell at a glance that the file
     /// is growing, not just that the link is alive.
     Recording = 11,
+    /// Operator "identify" overlay — solid white. Driven by the
+    /// `identify` AtomicBool in LedHandle; see `set_identify`.
+    Identify = 12,
 }
 
 impl LedState {
@@ -61,6 +64,7 @@ impl LedState {
             9 => Self::Error,
             10 => Self::StreamingDegradedSim,
             11 => Self::Recording,
+            12 => Self::Identify,
             _ => Self::Boot,
         }
     }
@@ -73,6 +77,19 @@ pub struct LedHandle {
     state: Arc<AtomicU8>,
     low_battery: Arc<AtomicBool>,
     ota: Arc<AtomicBool>,
+    /// Operator "identify" overlay — solid white over every other
+    /// state. Set / cleared from the streaming-TCP `r2.dash.identify_set`
+    /// command (see sender::dispatch_inbound). Highest priority of
+    /// any overlay so the device is unambiguously findable in a
+    /// busy fleet, even mid-OTA.
+    identify: Arc<AtomicBool>,
+    /// Auto-revert deadline for the identify overlay, per
+    /// `SPEC-R2-ROCKER-SENSOR-IDENTIFY` §3.2. If the dashboard
+    /// fails to send `identify_set off` within 60 s of the on
+    /// command (e.g. operator forgot, dashboard restarted), the
+    /// LED loop clears the overlay so a forgotten Identify
+    /// doesn't pin solid white and drain the LiPo.
+    identify_deadline: Arc<Mutex<Option<Instant>>>,
     /// Optional synchronised wall-clock source. When set (post
     /// `Clock::load()`), the LED loop computes pulse phases from
     /// `clock.ts_ms_i64()` instead of local Instant::elapsed() — so
@@ -105,6 +122,15 @@ impl LedHandle {
     pub fn set_ota(&self, on: bool) {
         self.ota.store(on, Ordering::Relaxed);
     }
+    /// Identify overlay — solid white, highest priority. Set from the
+    /// dashboard's `r2.dash.identify_set` command so the operator can
+    /// pick this specific sensor out of a fleet at a glance.
+    pub fn set_identify(&self, on: bool) {
+        self.identify.store(on, Ordering::Relaxed);
+        if let Ok(mut d) = self.identify_deadline.lock() {
+            *d = if on { Some(Instant::now() + Duration::from_secs(60)) } else { None };
+        }
+    }
     /// Plumb the synchronised clock in once it's loaded. From this
     /// point on all sensors that have converged on the dashboard's
     /// time-sync offset will animate in phase.
@@ -130,11 +156,15 @@ where
     let state = Arc::new(AtomicU8::new(LedState::Boot as u8));
     let low_battery = Arc::new(AtomicBool::new(false));
     let ota = Arc::new(AtomicBool::new(false));
+    let identify = Arc::new(AtomicBool::new(false));
+    let identify_deadline: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
     let sync_clock: Arc<Mutex<Option<Arc<crate::clock::Clock>>>> = Arc::new(Mutex::new(None));
 
     let state_for_thread = state.clone();
     let low_for_thread = low_battery.clone();
     let ota_for_thread = ota.clone();
+    let identify_for_thread = identify.clone();
+    let identify_deadline_for_thread = identify_deadline.clone();
     let clock_for_thread = sync_clock.clone();
 
     std::thread::Builder::new()
@@ -150,11 +180,11 @@ where
                     return;
                 }
             };
-            run_led_loop(&mut led, state_for_thread, low_for_thread, ota_for_thread, clock_for_thread);
+            run_led_loop(&mut led, state_for_thread, low_for_thread, ota_for_thread, identify_for_thread, identify_deadline_for_thread, clock_for_thread);
         })
         .context("spawn LED thread")?;
 
-    Ok(LedHandle { state, low_battery, ota, sync_clock })
+    Ok(LedHandle { state, low_battery, ota, identify, identify_deadline, sync_clock })
 }
 
 const FRAME_MS: u64 = 33; // ~30 Hz tick — smooth pulses at low CPU cost
@@ -178,16 +208,37 @@ fn run_led_loop(
     state: Arc<AtomicU8>,
     low_battery: Arc<AtomicBool>,
     ota: Arc<AtomicBool>,
+    identify: Arc<AtomicBool>,
+    identify_deadline: Arc<Mutex<Option<Instant>>>,
     sync_clock: Arc<Mutex<Option<Arc<crate::clock::Clock>>>>,
 ) {
     let start = Instant::now();
     loop {
-        let s = if ota.load(Ordering::Relaxed) {
+        // Identify auto-revert: if the on-command's 60 s window
+        // elapsed without an explicit off, clear the overlay so the
+        // LED falls back to the underlying state. Belt-and-braces
+        // against a dashboard restart between on and off, per
+        // SPEC-R2-ROCKER-SENSOR-IDENTIFY §3.2.
+        if let Ok(mut d) = identify_deadline.lock() {
+            if let Some(t) = *d {
+                if Instant::now() >= t {
+                    identify.store(false, Ordering::Relaxed);
+                    *d = None;
+                }
+            }
+        }
+        let id = identify.load(Ordering::Relaxed);
+        let s = if id {
+            // Highest-priority overlay — operator is trying to find
+            // this sensor in the fleet. Solid white wins over
+            // everything else (state, OTA, low_battery).
+            LedState::Identify
+        } else if ota.load(Ordering::Relaxed) {
             LedState::Ota
         } else {
             LedState::from_u8(state.load(Ordering::Relaxed))
         };
-        let lb = low_battery.load(Ordering::Relaxed);
+        let lb = low_battery.load(Ordering::Relaxed) && !id;
         // Phase source: prefer the synchronised wall clock once Clock
         // has been plumbed in (post-`Clock::load()` in main.rs). All
         // sensors converged on the dashboard's time-sync offset will
@@ -262,6 +313,10 @@ fn render(state: LedState, low_battery: bool, elapsed: Duration) -> RGB8 {
         // rest. Distinguishable at a glance from `StreamingLive`'s
         // gentle heartbeat: "actively recording" vs "link alive".
         LedState::Recording => scale(rgb(0x00, 0xE0, 0x30), single_tick(elapsed, 0.5)),
+        // Solid white — the operator pressed the Identify toggle on
+        // the Devices tab. Unambiguous: pick THIS sensor out of the
+        // rack. BRIGHTNESS cap applies as usual.
+        LedState::Identify => rgb(0xFF, 0xFF, 0xFF),
     }
 }
 

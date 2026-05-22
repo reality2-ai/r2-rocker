@@ -44,6 +44,10 @@ pub const EVT_SENSOR_SYNC_PONG:    u32 = fnv1a_32(b"r2.sensor.sync_pong");
 pub const EVT_DASH_ACK:              u32 = fnv1a_32(b"r2.dash.ack");
 pub const EVT_DASH_SYNC_PULSE:       u32 = fnv1a_32(b"r2.dash.sync_pulse");
 pub const EVT_DASH_SET_CLOCK_OFFSET: u32 = fnv1a_32(b"r2.dash.set_clock_offset");
+// Operator "identify" overlay — solid white LED so a specific
+// sensor can be picked out in a fleet (battery swap, debugging, …).
+// Payload: `{0: u8}` — 1 = on, 0 = off.
+pub const EVT_DASH_IDENTIFY_SET:     u32 = fnv1a_32(b"r2.dash.identify_set");
 // Capture session events (SPEC-R2-ROCKER-CAPTURE §3).
 pub const EVT_DASH_CAPTURE_START:    u32 = fnv1a_32(b"r2.dash.capture.start");
 pub const EVT_DASH_CAPTURE_MARK:     u32 = fnv1a_32(b"r2.dash.capture.mark");
@@ -227,6 +231,21 @@ pub fn parse_dash_ack_through_seq(payload: &[u8]) -> Option<u32> {
 /// Parse `r2.dash.sync_pulse` — a CBOR map `{0: req_id, 1: dash_ts_ms}` per
 /// SPEC-R2-ROCKER-WIRE §4.5. We only need `req_id` to echo it back in the
 /// pong; `dash_ts_ms` is opaque to the sensor.
+/// Parse `r2.dash.identify_set` — a CBOR map `{0: u8 on}` where on is
+/// 0 (off) or 1 (on). Anything non-zero treated as on.
+pub fn parse_identify_set(payload: &[u8]) -> Option<bool> {
+    let mut p = 0;
+    if payload.len() <= p { return None; }
+    let head = payload[p]; p += 1;
+    if head & 0xE0 != MT_MAP { return None; }
+    if payload.len() <= p { return None; }
+    let kh = payload[p]; p += 1;
+    if kh != 0x00 { return None; }
+    let (mag, mt, _) = read_cbor_int_at(&payload[p..])?;
+    if mt != MT_UINT { return None; }
+    Some(mag != 0)
+}
+
 pub fn parse_sync_pulse_req_id(payload: &[u8]) -> Option<u32> {
     let mut p = 0;
     if payload.len() <= p { return None; }
