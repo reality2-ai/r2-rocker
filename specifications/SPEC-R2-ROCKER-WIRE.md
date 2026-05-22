@@ -120,10 +120,68 @@ multi-sensor receive path on dashboard port 21042.
 | 26 | `r2.dash.access.event` | dash → viewer | Access-flow events. Payload `{0: subtype (text — "request_pending"\|"request_approved"\|"request_denied"\|"revoked"), 1: device_pk (text), 2: name (text, optional), 3: hint (text, optional)}`. Replaces legacy `/ws/status type=access`. |
 | 27 | `r2.dash.bootstrap.progress` | dash → viewer | BLE-bootstrap discovery progress. Payload `{0: kind (text — "Reset"\|"Log"\|"SensorFound"\|"SensorConnected"\|"Done"\|"Error"), 1: data (text, optional)}`. Replaces legacy `/ws/status type=bootstrap`. |
 | 28 | `r2.dash.device.alias.changed` | dash → viewer | Operator renamed a sensor. Payload `{0: device_pk (text), 1: name (text — empty string means alias cleared)}`. Replaces legacy `/ws/status type=device_alias`. |
+| 29 | `r2.dash.cmd.capture.start` | viewer → controller | Operator action: begin capture. Payload `{0: req_id (u32), 1: prefix (text, optional)}`. Controller validates, then fans out row-17 `r2.dash.capture.start` to all sensors. Replaces `POST /api/capture/start`. |
+| 30 | `r2.dash.cmd.capture.mark`  | viewer → controller | Operator action: name a calibration point. Payload `{0: req_id (u32), 1: name (text)}`. Controller fans out row-18 `r2.dash.capture.mark` to all sensors. Replaces `POST /api/capture/mark`. |
+| 31 | `r2.dash.cmd.capture.stop`  | viewer → controller | Operator action: close the capture file. Payload `{0: req_id (u32)}`. Controller fans out row-19 `r2.dash.capture.stop` to all sensors. Replaces `POST /api/capture/stop`. |
+| 32 | `r2.dash.cmd.response` | controller → viewer | Generic operator-action / query response. Payload `{0: req_id (u32), 1: status (text — "ok"\|"err"), 2: message (text, optional), 3: kind (text, e.g. "capture.start")}`. Carried on `/ws/raw`; broadcast to all viewers; correlated by `req_id`. |
 
 Implementations MUST treat unknown event hashes as receivable but
 non-actionable — log them and move on; never close the connection over
 an unrecognised event.
+
+### 2.1 Operator-plane request/response framework
+
+Rows 29-32 above are the first events under the
+`r2.dash.cmd.*` namespace — operator-originated commands that
+flow from a viewer hive (webapp) **up** to the controller. This
+is distinct from `r2.dash.*` (rows 9-21) which is the controller
+fanning commands **down** to sensors. The split mirrors BRIDGE
+§3.2's viewer-inbound table so a future Track E (two-TG +
+bridge sentant) reuses these names verbatim — no wire break.
+
+**Transport.** Inbound viewer frames ride the **same `/ws/raw`
+WebSocket** that already carries outbound sensor frames. Frames
+are R2-WIRE envelopes (see §3 frame layout); no second endpoint
+is introduced. Viewers MAY send commands at any time after the
+WS upgrade completes; the dashboard processes them in the order
+received.
+
+**Correlation.** Every command payload MUST carry `0: req_id`
+as a u32. Viewers SHOULD use a monotonic counter (wrap at u32
+is fine; collisions only matter within in-flight requests). The
+controller's response (`r2.dash.cmd.response`, row 32) echoes
+the `req_id` so the originating viewer can match it. Other
+viewers also receive the response (`/ws/raw` is broadcast) and
+SHOULD ignore responses for `req_id`s they didn't issue.
+
+**Response shape.** A single event hash
+`r2.dash.cmd.response` covers both action ACKs and snapshot
+replies. The `kind` field (CBOR key 3) identifies the original
+command suffix (e.g. `"capture.start"`, `"access.members"`) so
+a viewer that lost its outstanding-requests table after a
+reload can still classify replies it sees.
+
+**Failure modes.**
+
+* Missing `req_id` (key 0) → malformed; dashboard drops the
+  command silently. Viewers MUST send a `req_id` even when
+  they don't intend to act on the response.
+* Unknown action hash → log and discard, per the inventory's
+  "non-actionable" rule. No `r2.dash.cmd.response` is emitted
+  (the request is treated as if it never arrived).
+* Access not configured (no TG keypair) → respond with
+  `status: "err"`, `message: "access not configured"`.
+* Authorisation refused (when role-based gates land in a
+  future slice) → respond with `status: "err"`,
+  `message: "forbidden"`.
+
+**Migration policy.** While the corresponding `POST /api/...`
+route is still mounted (one release for backward compat), both
+paths produce identical side-effects and identical
+status-broadcast events (e.g. `r2.dash.capture.progress`). A
+viewer migration is therefore a per-feature swap of
+`fetch('/api/...')` → `hive.send_event('r2.dash.cmd.…')` with
+no other coordination.
 
 ---
 
