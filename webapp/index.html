@@ -1503,6 +1503,24 @@ const KNOWN_EVENT_NAMES = [
   'r2.sensor.cal.sample.resp',
   'r2.sensor.sync_pong',
   'r2.sensor.capture.state',
+  // Controller-synthesised status events (SPEC-R2-ROCKER-WIRE §2,
+  // rows 22-28). Per-name JS handlers don't yet exist for most of
+  // these in v0.1 — the legacy /ws/status JSON channel drives the
+  // UI for them. They're listed here so the sentant subscription
+  // path (rockerHive.send_event) gets the friendly name resolved
+  // and inbound event_count is accurate.
+  'r2.peer.disconnected',
+  'r2.dash.ota.progress',
+  'r2.dash.reset.progress',
+  'r2.dash.capture.progress',
+  'r2.dash.access.event',
+  'r2.dash.bootstrap.progress',
+  'r2.dash.device.alias.changed',
+  // Operator-plane response (§2.1 row 32). Required for the JS-side
+  // handleCmdResponse correlator to fire — without it the dashboard's
+  // reply resolves to event name 'unknown' and pending sendCmd
+  // promises time out.
+  'r2.dash.cmd.response',
 ];
 
 async function bootstrapHive() {
@@ -1997,6 +2015,153 @@ function decodeCbor(bytes) {
   return readValue();
 }
 
+// Minimal CBOR encoder — mirrors r2_cbor::Encoder for the int-keyed
+// maps used in operator commands (SPEC-R2-ROCKER-WIRE §2.1).
+// Covers exactly what the cmd payloads need: int keys, uint values,
+// text strings. Add more major types only when a command requires it.
+function cborEncodeUint(v) {
+  if (v <= 23)            return new Uint8Array([v]);
+  if (v <= 0xff)          return new Uint8Array([0x18, v]);
+  if (v <= 0xffff) {
+    const b = new Uint8Array(3); b[0] = 0x19;
+    new DataView(b.buffer).setUint16(1, v);
+    return b;
+  }
+  if (v <= 0xffffffff) {
+    const b = new Uint8Array(5); b[0] = 0x1a;
+    new DataView(b.buffer).setUint32(1, v >>> 0);
+    return b;
+  }
+  throw new Error('cbor uint too large: ' + v);
+}
+function cborEncodeText(s) {
+  const bytes = new TextEncoder().encode(s);
+  const n = bytes.length;
+  let header;
+  if (n <= 23)        header = new Uint8Array([0x60 + n]);
+  else if (n <= 0xff) header = new Uint8Array([0x78, n]);
+  else if (n <= 0xffff) {
+    header = new Uint8Array(3); header[0] = 0x79;
+    new DataView(header.buffer).setUint16(1, n);
+  } else throw new Error('cbor text too large');
+  const out = new Uint8Array(header.length + n);
+  out.set(header, 0); out.set(bytes, header.length);
+  return out;
+}
+function cborEncodeMap(entries) {
+  // entries: [[intKey, value], ...]; value: number → uint, string → text.
+  const n = entries.length;
+  let header;
+  if (n <= 23)        header = new Uint8Array([0xa0 + n]);
+  else if (n <= 0xff) header = new Uint8Array([0xb8, n]);
+  else throw new Error('cbor map too large');
+  const parts = [header];
+  for (const [k, v] of entries) {
+    parts.push(cborEncodeUint(k));
+    if (typeof v === 'number')      parts.push(cborEncodeUint(v));
+    else if (typeof v === 'string') parts.push(cborEncodeText(v));
+    else throw new Error('cbor value type unsupported: ' + typeof v);
+  }
+  let total = 0; for (const p of parts) total += p.length;
+  const out = new Uint8Array(total);
+  let off = 0; for (const p of parts) { out.set(p, off); off += p.length; }
+  return out;
+}
+
+// Operator-command machinery — SPEC-R2-ROCKER-WIRE §2.1.
+// Viewer hives emit r2.dash.cmd.* events on the /ws/raw socket as
+// bare R2-WIRE compact bodies (12-byte header + CBOR payload). The
+// dashboard replies with r2.dash.cmd.response correlated by req_id.
+//
+// Event hashes are baked in here rather than read from HASH_TO_NAME
+// because we need them at send-time before any frame has been
+// received that would populate the map (the map is built from
+// inbound traffic).
+const CMD_HASHES = {
+  'capture.start': 0x6d1a1639,
+  'capture.mark':  0xcde3e84e,
+  'capture.stop':  0x3a7d7a93,
+};
+const CMD_RESPONSE_HASH = 0x4bf7986c;
+let _nextCmdReqId = 1;
+const _pendingCmds = new Map(); // req_id → { resolve, reject, kind, sentAt }
+
+/// Build a bare R2-WIRE compact body (12-byte header + payload),
+/// matching dashboard's build_dash_frame_body. Returns Uint8Array
+/// ready for ws.send().
+function buildCmdFrameBody(eventHash, payload) {
+  const out = new Uint8Array(12 + payload.length);
+  out[0] = 0x00;                              // version=0, msg_type=Event=0, flags=0
+  out[1] = (5 << 4) | (3 & 0x0F);             // ttl=5, k=3
+  const dv = new DataView(out.buffer);
+  dv.setUint16(2, 0);                          // msg_id = 0 (correlate via req_id in payload, not msg_id)
+  dv.setUint32(4, eventHash >>> 0);            // event_hash
+  dv.setUint32(8, 0);                          // target = broadcast
+  out.set(payload, 12);
+  return out;
+}
+
+/// Send a r2.dash.cmd.<kind> over the live /ws/raw socket. Resolves
+/// when the matching r2.dash.cmd.response arrives, or rejects on
+/// timeout / err status. `extraEntries` are appended after the
+/// req_id key. Falls back to rejection if the WS isn't ready.
+function sendCmd(kind, extraEntries = []) {
+  return new Promise((resolve, reject) => {
+    if (!ws || ws.readyState !== 1) {
+      reject(new Error('ws not connected'));
+      return;
+    }
+    const eventHash = CMD_HASHES[kind];
+    if (eventHash == null) {
+      reject(new Error('unknown cmd kind: ' + kind));
+      return;
+    }
+    const reqId = (_nextCmdReqId++) >>> 0;
+    const entries = [[0, reqId], ...extraEntries];
+    const payload = cborEncodeMap(entries);
+    const body = buildCmdFrameBody(eventHash, payload);
+    _pendingCmds.set(reqId, { resolve, reject, kind, sentAt: Date.now() });
+    try {
+      ws.send(body);
+    } catch (err) {
+      _pendingCmds.delete(reqId);
+      reject(err);
+      return;
+    }
+    // 5 s timeout — the dashboard's do_capture_* are synchronous
+    // (fan-out is fire-and-forget on per-peer channels), so a healthy
+    // round-trip is well under 100 ms.
+    setTimeout(() => {
+      const pending = _pendingCmds.get(reqId);
+      if (pending) {
+        _pendingCmds.delete(reqId);
+        reject(new Error(`cmd ${kind} timed out (req_id ${reqId})`));
+      }
+    }, 5000);
+  });
+}
+
+function handleCmdResponse(payload) {
+  const reqId = payload['0'];
+  const status = payload['1'];
+  const message = payload['2'];
+  const kind = payload['3'];
+  if (reqId == null) return;
+  const pending = _pendingCmds.get(reqId);
+  if (!pending) {
+    // Reply for a req_id we didn't issue (or already cleared on
+    // timeout). Other viewers' responses arrive here too — that's
+    // expected; broadcast-by-design. Silent ignore is correct.
+    return;
+  }
+  _pendingCmds.delete(reqId);
+  if (status === 'ok') {
+    pending.resolve({ kind, message });
+  } else {
+    pending.reject(new Error(message || `cmd ${kind} failed`));
+  }
+}
+
 // Port of the dashboard's server-side remap_payload — turns int-keyed CBOR
 // maps into named-key JS objects, and scales raw ADXL355 LSB to g for
 // acceleration. Browser-side equivalent of dashboard/src/main.rs.
@@ -2042,6 +2207,15 @@ bootstrapHive();
 function handleEvent(msg) {
   totalEvents++;
   const sensor = msg.source_addr ? getOrCreateSensor(msg.source_addr) : null;
+
+  // Operator-plane response — correlated to an in-flight sendCmd()
+  // promise. Per SPEC-R2-ROCKER-WIRE §2.1, /ws/raw is broadcast so
+  // every viewer receives every reply; sendCmd's req_id map ignores
+  // replies for req_ids it didn't issue.
+  if (msg.event === 'r2.dash.cmd.response' && msg.payload) {
+    handleCmdResponse(msg.payload);
+    return;
+  }
 
   switch (msg.event) {
     case 'r2.sensor.acceleration':
@@ -2400,8 +2574,7 @@ function scheduleDataRefresh(key, delayMs = 600) {
 
 async function captureStart() {
   try {
-    const res = await fetch('/api/capture/start', { method: 'POST' });
-    if (!res.ok) console.warn('[capture] start', await res.text());
+    await sendCmd('capture.start');
   } catch (err) {
     console.warn('[capture] start', err);
   }
@@ -2419,18 +2592,10 @@ async function captureMark() {
   // each shared run ends up with the same human-readable file.
   const prefix = buildLocalTimePrefix(new Date());
   try {
-    const res = await fetch('/api/capture/mark', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, prefix }),
-    });
-    if (!res.ok) {
-      console.warn('[capture] mark', await res.text());
-      return;
-    }
+    await sendCmd('capture.mark', [[1, name], [2, prefix]]);
     // Mirror the prefix locally so "Download merged" knows which file
-    // to fetch from each sensor — the dashboard echoes prefix back in
-    // the response, but we already know what we sent.
+    // to fetch from each sensor — controller-known too but we already
+    // have it here.
     lastMarkedFilename = `${prefix}-${name}.csv`;
     updateCaptureUiFromFleet();
     // Re-render each data card so the new "marked-export" highlight
@@ -2452,8 +2617,7 @@ function buildLocalTimePrefix(d) {
 
 async function captureStop() {
   try {
-    const res = await fetch('/api/capture/stop', { method: 'POST' });
-    if (!res.ok) console.warn('[capture] stop', await res.text());
+    await sendCmd('capture.stop');
   } catch (err) {
     console.warn('[capture] stop', err);
   }
