@@ -112,6 +112,7 @@ multi-sensor receive path on dashboard port 21042.
 | 18 | `r2.dash.capture.mark`  | dash → sensor | `{0: i64 ts_ms, 1: str name}`; lock calibration offset and open `/sdcard/captures/<ts16>-<name>.csv` |
 | 19 | `r2.dash.capture.stop`  | dash → sensor | Close the open capture file |
 | 20 | `r2.sensor.capture.state` | sensor → dash | `{0: u8 state, 1: str? file}` — state ∈ {0=idle, 1=calibrating, 2=recording} |
+| 21 | `r2.dash.enrol` | dash → sensor | Deliver a KeyHolder-signed `DeviceCertificate` over L2CAP CoC during BLE bootstrap, before `#wifi_offer`. See SPEC-R2-ROCKER-SENSOR §3.5. Payload is the 147-byte serialised cert. One-shot per device. |
 
 Implementations MUST treat unknown event hashes as receivable but
 non-actionable — log them and move on; never close the connection over
@@ -137,6 +138,7 @@ session.
 | 4 | uint32 | `boot_ts_ms` — sensor's uptime in ms at connect time |
 | 5 | bytes(16) | `nonce` — random per connection (replay protection) |
 | 6 | bytes(64) | `sig` — Ed25519 signature over the canonical CBOR encoding of keys 0..5 |
+| 8 | bytes(147) | (optional, present iff cert-issued) `device_cert` — KeyHolder-signed `DeviceCertificate` serialised per `r2-trust::types::DEVICE_CERT_LEN`. When present, the dashboard verifies the cert chain under `TG_PUB_KEY` and verifies `sig` against the cert's `device_public_key`. When absent, the dashboard falls back to TOFU (legacy firmware compatibility for one release; see SPEC-R2-ROCKER-SENSOR §3.4). |
 | 10 | uint8 | (optional) `mounting_role` — 0 = unset, 1 = rocker, 2 = bed, 3 = other |
 
 Dashboard responds (after accepting) with `r2.dash.ack {through_seq:

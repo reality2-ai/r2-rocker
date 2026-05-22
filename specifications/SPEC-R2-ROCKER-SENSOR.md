@@ -208,15 +208,79 @@ canonical = canonical_cbor_encode({
 sig = ed25519_sign(device_priv, canonical)
 ```
 
-The dashboard SHALL verify this signature against `TG_PUB_KEY` (i.e. the
-device key is *not* directly checked; rather, the device proves
-possession of a TG-signed device cert — see R2-TRUST). For the v0.1
-deployment with hardwired TG, the device key itself doubles as a TG
-member key; dashboard-side verification reduces to "is this signature
-well-formed and is `device_pk` in the dashboard's accepted-peers list."
-The dashboard's accept-list is initialised empty; new peers are
-admitted on first contact and persisted (TOFU — trust on first use). A
-later spec version SHALL formalise device-cert issuance.
+The dashboard SHALL verify this signature according to the trust mode
+the sensor is operating in (§3.5):
+
+* **Post-cert mode** (the normative target since Phase 5 cert-issuance
+  landed) — the announce carries an additional CBOR key
+  `8: device_cert` (see WIRE §3.1) holding the 147-byte
+  KeyHolder-signed `DeviceCertificate`. The dashboard verifies the
+  cert chain against `TG_PUB_KEY` and verifies the announce signature
+  against the cert's `device_public_key` field. A mismatch (cert
+  for a different pk, expired cert, revoked cert, or invalid cert
+  signature) rejects the announce.
+* **Legacy TOFU mode** (for firmware that pre-dates Phase 5
+  cert-issuance, retained for one release of mixed-fleet
+  compatibility) — the announce omits key `8`. The dashboard
+  accepts any well-formed Ed25519 signature on the canonical
+  payload above and logs the device_pk to its accept-list (trust
+  on first use). The dashboard's `[events]` log marks these
+  `tofu` so the operator can see which fleet members are still on
+  legacy firmware.
+
+Implementations conforming to the post-cert mode SHALL emit cert
+material on every announce (i.e. on every TCP reconnect to the
+dashboard). The dashboard is stateless on this point — a sensor
+that omits key `8` mid-deployment immediately drops back to TOFU
+in the dashboard's log.
+
+### 3.5 Device certificate
+
+After successful BLE bootstrap (§4.2 transitions, the
+`ADVERTISING → BLE_CONNECTED → ...` path), the dashboard SHALL
+issue a KeyHolder-signed `DeviceCertificate` to the sensor before
+WiFi credentials are written. The flow is:
+
+1. Once the sensor's L2CAP CoC channel is open and the dashboard
+   has read the sensor's announced `device_pk` (over the same
+   L2CAP exchange that v0.1 used to deliver `#wifi_offer`), the
+   dashboard runs
+   `r2_trust::TrustGroup::process_join_request(...)` with the
+   sensor's `device_pk` and a freshly-minted join-code. The
+   process is identical to the browser-viewer enrolment path
+   (SPEC-R2-ROCKER-ACCESS §4) — the call is transport-agnostic.
+2. The dashboard serialises the resulting `DeviceCertificate`
+   (147 bytes, per `DEVICE_CERT_LEN` in `r2-trust::types`) into a
+   single R2-WIRE compact frame with event hash
+   `r2.dash.enrol` (see WIRE §2) and writes it to the sensor over
+   L2CAP CoC.
+3. The sensor's L2CAP dispatch loop matches
+   `r2.dash.enrol`, validates the cert under its embedded
+   `TG_PUB_KEY` constant, validates that the cert's
+   `device_public_key` matches the sensor's own `device_pk`, and
+   persists the cert bytes to NVS under key `device_cert` (§3.6).
+4. The dashboard then proceeds with `#wifi_offer` as before. From
+   the sensor's next reboot onwards, every `r2.sensor.announce`
+   carries the cert as CBOR key `8`.
+
+Cert delivery is one-shot per device. The sensor MAY re-bootstrap
+(via `cycle_hotspot` or factory reset) and receive a fresh cert
+under the same `device_pk`; the dashboard MAY issue a new cert
+with a later `issued_at` and the sensor SHALL accept it if the
+chain verifies.
+
+### 3.6 Persistence
+
+The sensor's NVS namespace `r2_rocker` stores:
+
+| Key | Type | Bytes | Purpose |
+|---|---|---|---|
+| `device_priv` | bytes | 32 | Ed25519 secret-key seed; never leaves the device |
+| `device_cert` | bytes | 147 | KeyHolder-signed `DeviceCertificate` (§3.5). Optional — absent on first boot before bootstrap, optional on legacy firmware. |
+| `tg_pk` | bytes | 32 | (optional cache) TG public key extracted from the cert at receipt; used to short-circuit re-derivation. |
+
+Total NVS budget: 211 bytes per device. The carrier's NVS
+partition is 24 KiB (per `partitions.csv`); this is negligible.
 
 ---
 

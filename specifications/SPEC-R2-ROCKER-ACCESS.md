@@ -195,6 +195,17 @@ A single `tg_priv.bin` signs every cert, sensors and viewers
 alike. The "two TGs" terminology above describes the design
 target; on the wire there is one TG hash and one relay bucket.
 
+> **Δ since Track A landed:** sensors now hold KeyHolder-signed
+> `DeviceCertificate`s (SPEC-R2-ROCKER-SENSOR §3.5), so the
+> "controller + paired viewers are TG members; sensors are TOFU"
+> caveat that lived here through v0.1.5 no longer applies.
+> Sensors and viewers are now both formal TG members of the same
+> TG, distinguished by the role tag below. The two-TG split is
+> still target state (Track E in
+> `/home/roycdavies/.claude/plans/sleepy-snuggling-tome.md`,
+> deferred); the relevant audit record is
+> `audits/2026-05-23-architectural-gaps.md` Finding D.
+
 Role disambiguation between Member-Sensor and Member-Viewer is
 carried in the cert metadata (`DeviceCertificate::role`, plus a
 v0.1 `r2-rocker:variant` extension distinguishing
