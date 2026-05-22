@@ -1538,14 +1538,25 @@ async function bootstrapHive() {
     HASH_TO_NAME.set(hash, name);
     console.log('  0x' + hash.toString(16).padStart(8, '0'), name);
   }
-  // Pick transport: if the URL has `?relay=`, we're loaded from the
-  // static-host copy of the webapp and the controller is unreachable
-  // — use the R2 relay. Otherwise the dashboard is on the same host
-  // as us and /ws/raw + /ws/status work directly.
-  const relayUrl = getRelayUrlParam();
-  if (relayUrl) {
-    console.log('[hive] using relay transport →', relayUrl);
-    connectRelay(relayUrl);
+  // Pick transport, in order of preference:
+  //   1. `?relay=` URL parameter (legacy pre-pairing path; rare now
+  //      that the operator-initiated invite-QR is gone).
+  //   2. HTTPS origin + persisted relay_url in IndexedDB → off-network
+  //      viewer leg (the github.io / reality2.ai/r2-rocker case after
+  //      cross-origin cert hand-off). Mixed-content blocking means
+  //      direct /ws/raw can't reach the lab dashboard from here.
+  //   3. Otherwise — same-origin lab dashboard, use /ws/raw + /ws/status
+  //      directly.
+  const relayUrlParam = getRelayUrlParam();
+  const persistedRelay = (location.protocol === 'https:')
+    ? await idbGet('relay_url').catch(() => null)
+    : null;
+  if (relayUrlParam) {
+    console.log('[hive] using relay transport (URL param) →', relayUrlParam);
+    connectRelay(relayUrlParam);
+  } else if (persistedRelay) {
+    console.log('[hive] using relay transport (persisted) →', persistedRelay);
+    connectRelay(persistedRelay);
   } else {
     console.log('[hive] connecting to /ws/raw …');
     connectRaw();
