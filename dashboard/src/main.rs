@@ -78,6 +78,16 @@ const DASH_CAPTURE_MARK:      u32 = r2_fnv::fnv1a_32(b"r2.dash.capture.mark");
 const DASH_CAPTURE_STOP:      u32 = r2_fnv::fnv1a_32(b"r2.dash.capture.stop");
 const SENSOR_CAPTURE_STATE:   u32 = r2_fnv::fnv1a_32(b"r2.sensor.capture.state");
 
+// Track C operator-plane events (viewer → controller). Per
+// SPEC-R2-ROCKER-WIRE §2.1, viewer hives send these inbound on
+// /ws/raw; the dashboard validates and fans the corresponding
+// downstream `r2.dash.<action>` to all sensors, then emits a
+// `r2.dash.cmd.response` correlated by `req_id`.
+const DASH_CMD_CAPTURE_START: u32 = r2_fnv::fnv1a_32(b"r2.dash.cmd.capture.start");
+const DASH_CMD_CAPTURE_MARK:  u32 = r2_fnv::fnv1a_32(b"r2.dash.cmd.capture.mark");
+const DASH_CMD_CAPTURE_STOP:  u32 = r2_fnv::fnv1a_32(b"r2.dash.cmd.capture.stop");
+const DASH_CMD_RESPONSE:      u32 = r2_fnv::fnv1a_32(b"r2.dash.cmd.response");
+
 /// Map hash → human-readable name shipped to the browser.
 fn event_name(hash: u32) -> &'static str {
     match hash {
@@ -332,10 +342,27 @@ impl PeerSyncState {
 /// Build a dashboard → sensor R2-WIRE compact frame, TCP-framed (2-byte
 /// length prefix). Mirrors the firmware's `wire::frame_for_tcp`, minus
 /// the `mcu_origin` flag (we're the controller).
+/// Build a sensor-bound TCP frame: the R2-WIRE compact body, prefixed
+/// with a u16 BE length per the TCP framing convention. Suitable for
+/// `peer.tx.send(...)` (sensor sockets).
 fn build_dash_frame(event_hash: u32, msg_id: u16, payload: &[u8]) -> Vec<u8> {
     let frame_len = 12 + payload.len();
     let mut out = Vec::with_capacity(2 + frame_len);
     out.extend_from_slice(&(frame_len as u16).to_be_bytes());
+    out.extend_from_slice(&build_dash_frame_body(event_hash, msg_id, payload));
+    out
+}
+
+/// Build a bare R2-WIRE compact body (no leading TCP length prefix).
+/// Suitable for storing in `RawFrame.frame` — the envelope's own
+/// `frame_len` field provides framing for /ws/raw consumers, and the
+/// webapp's `decode_compact_frame` reads from byte 0 of this body
+/// (version/type/flags). Putting a TCP-style length prefix here
+/// corrupts the decode: the first two bytes would be parsed as the
+/// header byte, leaving event_hash off by two and silently dropped
+/// by the viewer sentant.
+fn build_dash_frame_body(event_hash: u32, msg_id: u16, payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(12 + payload.len());
     out.push(0x00); // version=0, msg_type=Event=0, flags=0
     out.push((5 << 4) | (3 & 0x0F)); // ttl=5, k=3
     out.extend_from_slice(&msg_id.to_be_bytes());
@@ -1774,7 +1801,7 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
         "tcp_close",
         disconnected_pk_hex.as_deref(),
     );
-    let frame = build_dash_frame(PEER_DISCONNECTED, 0, &payload);
+    let frame = build_dash_frame_body(PEER_DISCONNECTED, 0, &payload);
     let _ = state.raw_frame_tx.send(RawFrame {
         src: addr_str.clone(),
         ts_ms: now_ms,
@@ -1831,7 +1858,7 @@ fn emit_target_progress(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    let frame = build_dash_frame(event_hash, 0, &buf);
+    let frame = build_dash_frame_body(event_hash, 0, &buf);
     let _ = state.raw_frame_tx.send(RawFrame {
         src: target.to_string(),
         ts_ms: now_ms,
@@ -1898,7 +1925,7 @@ fn emit_capture_progress(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    let frame = build_dash_frame(DASH_CAPTURE_PROGRESS, 0, &buf);
+    let frame = build_dash_frame_body(DASH_CAPTURE_PROGRESS, 0, &buf);
     let _ = state.raw_frame_tx.send(RawFrame {
         src: "dash".to_string(),
         ts_ms: now_ms,
@@ -1945,7 +1972,7 @@ fn emit_access_event(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    let frame = build_dash_frame(DASH_ACCESS_EVENT, 0, &buf);
+    let frame = build_dash_frame_body(DASH_ACCESS_EVENT, 0, &buf);
     let _ = state.raw_frame_tx.send(RawFrame {
         src: "dash".to_string(),
         ts_ms: now_ms,
@@ -1974,7 +2001,7 @@ fn emit_device_alias_changed(state: &Arc<AppState>, device_pk: &str, name: &str)
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    let frame = build_dash_frame(DASH_DEVICE_ALIAS_CHANGED, 0, &buf);
+    let frame = build_dash_frame_body(DASH_DEVICE_ALIAS_CHANGED, 0, &buf);
     let _ = state.raw_frame_tx.send(RawFrame {
         src: "dash".to_string(),
         ts_ms: now_ms,
@@ -2010,7 +2037,7 @@ fn emit_bootstrap_progress(state: &Arc<AppState>, kind: &str, data: Option<&str>
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    let frame = build_dash_frame(DASH_BOOTSTRAP_PROGRESS, 0, &buf);
+    let frame = build_dash_frame_body(DASH_BOOTSTRAP_PROGRESS, 0, &buf);
     let _ = state.raw_frame_tx.send(RawFrame {
         src: "dash".to_string(),
         ts_ms: now_ms,
@@ -2960,23 +2987,22 @@ async fn fan_out_dash_frame(
     sent
 }
 
-/// `POST /api/capture/start` — refresh time-sync, then send
-/// `r2.dash.capture.start` to every peer (SPEC-R2-ROCKER-CAPTURE §7.1).
-async fn capture_start_handler(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+// ── Capture core logic (shared by HTTP + /ws/raw operator events) ────
+//
+// Per SPEC-R2-ROCKER-WIRE §2.1, the legacy POST /api/capture/* routes
+// and the new `r2.dash.cmd.capture.*` events on /ws/raw produce
+// identical side-effects. Extracting the core into `do_capture_*`
+// keeps both call sites in lockstep and makes the migration a pure
+// wire-shape swap.
+
+async fn do_capture_start(state: &Arc<AppState>) -> usize {
     // Fire an immediate sync_pulse round to every peer so capture
     // timestamps in the upcoming session share a tightly-refreshed
-    // baseline. The dashboard's existing sync_pong handler smooths
-    // the result via Cristian's algorithm and emits
-    // r2.dash.set_clock_offset to each peer asynchronously — we
-    // don't await pongs here, just kick the round.
+    // baseline. See SPEC-R2-ROCKER-CAPTURE §7.1.
     let dash_ts_ms = dash_wall_ms();
     {
         let peers = state.peers.read().await;
-        for (addr, peer) in peers.iter() {
-            // Per-peer req_id is the low 32 bits of the
-            // dashboard wall-clock — collision-free within a session.
+        for (_addr, peer) in peers.iter() {
             let req_id = (dash_ts_ms & 0xFFFF_FFFF) as u32;
             let payload = encode_sync_pulse(req_id, dash_ts_ms);
             let frame = build_dash_frame(
@@ -2985,69 +3011,77 @@ async fn capture_start_handler(
                 &payload,
             );
             let _ = peer.tx.send(frame).await;
-            // Note: track this req_id on the peer's PeerSyncState so
-            // the pong handler can match. We use the regular periodic
-            // task's state map here. Without registering, the pong
-            // smoothing still works but RTT is wrong for THIS round.
-            // For a forced refresh we accept that tradeoff — the
-            // periodic task picks up the next round anyway.
-            let _ = addr;
         }
     }
 
     let payload = encode_empty_map();
-    let sent = fan_out_dash_frame(&state, DASH_CAPTURE_START, 0x0001, payload).await;
-    emit_capture_progress(&state, "start", sent, None, None, None);
+    let sent = fan_out_dash_frame(state, DASH_CAPTURE_START, 0x0001, payload).await;
+    emit_capture_progress(state, "start", sent, None, None, None);
+    sent
+}
+
+async fn do_capture_mark(
+    state: &Arc<AppState>,
+    name: &str,
+    prefix: Option<&str>,
+) -> Result<(usize, i64), String> {
+    if !is_valid_capture_name(name) {
+        return Err("invalid name (use [A-Za-z0-9_-]{1,32})".to_string());
+    }
+    if let Some(p) = prefix {
+        if !is_valid_capture_prefix(p) {
+            return Err("invalid prefix (use [0-9_-]{1,32})".to_string());
+        }
+    }
+    let ts_ms = dash_wall_ms() as i64;
+    let payload = encode_capture_mark(ts_ms, name, prefix);
+    let sent = fan_out_dash_frame(state, DASH_CAPTURE_MARK, 0x0002, payload).await;
+    emit_capture_progress(state, "mark", sent, Some(name), prefix, Some(ts_ms));
+    Ok((sent, ts_ms))
+}
+
+async fn do_capture_stop(state: &Arc<AppState>) -> usize {
+    let payload = encode_empty_map();
+    let sent = fan_out_dash_frame(state, DASH_CAPTURE_STOP, 0x0003, payload).await;
+    emit_capture_progress(state, "stop", sent, None, None, None);
+    sent
+}
+
+/// `POST /api/capture/start` — legacy HTTP entry. Calls into
+/// `do_capture_start` so behaviour is identical to the
+/// `r2.dash.cmd.capture.start` event path.
+async fn capture_start_handler(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let sent = do_capture_start(&state).await;
     (axum::http::StatusCode::OK, Json(serde_json::json!({"ok": true, "peers": sent})))
 }
 
-/// `POST /api/capture/mark {name}` — fan out capture.mark with the
-/// dashboard's chosen ts_ms (one value shared across the fleet so
-/// every sensor's file shares the same name; SPEC §7.2).
+/// `POST /api/capture/mark {name}` — legacy HTTP entry.
 async fn capture_mark_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CaptureMarkBody>,
 ) -> impl IntoResponse {
-    if !is_valid_capture_name(&body.name) {
-        return (
-            axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "ok": false,
-                "error": "invalid name (use [A-Za-z0-9_-]{1,32})",
-            })),
-        );
+    match do_capture_mark(&state, &body.name, body.prefix.as_deref()).await {
+        Ok((sent, ts_ms)) => (axum::http::StatusCode::OK, Json(serde_json::json!({
+            "ok": true,
+            "ts_ms": ts_ms,
+            "name": body.name,
+            "prefix": body.prefix,
+            "peers": sent,
+        }))),
+        Err(msg) => (axum::http::StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "ok": false,
+            "error": msg,
+        }))),
     }
-    if let Some(p) = body.prefix.as_deref() {
-        if !is_valid_capture_prefix(p) {
-            return (
-                axum::http::StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "ok": false,
-                    "error": "invalid prefix (use [0-9_-]{1,32})",
-                })),
-            );
-        }
-    }
-    let ts_ms = dash_wall_ms() as i64;
-    let payload = encode_capture_mark(ts_ms, &body.name, body.prefix.as_deref());
-    let sent = fan_out_dash_frame(&state, DASH_CAPTURE_MARK, 0x0002, payload).await;
-    emit_capture_progress(&state, "mark", sent, Some(&body.name), body.prefix.as_deref(), Some(ts_ms));
-    (axum::http::StatusCode::OK, Json(serde_json::json!({
-        "ok": true,
-        "ts_ms": ts_ms,
-        "name": body.name,
-        "prefix": body.prefix,
-        "peers": sent,
-    })))
 }
 
-/// `POST /api/capture/stop` — fan out capture.stop.
+/// `POST /api/capture/stop` — legacy HTTP entry.
 async fn capture_stop_handler(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    let payload = encode_empty_map();
-    let sent = fan_out_dash_frame(&state, DASH_CAPTURE_STOP, 0x0003, payload).await;
-    emit_capture_progress(&state, "stop", sent, None, None, None);
+    let sent = do_capture_stop(&state).await;
     (axum::http::StatusCode::OK, Json(serde_json::json!({"ok": true, "peers": sent})))
 }
 
