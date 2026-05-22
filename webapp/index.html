@@ -3121,14 +3121,15 @@ async function forgetViewerIdentity() {
 //
 // The lab-origin webapp (http://<lan_ip>:8080) has the cert in its own
 // IndexedDB after enrolment. A copy of the same webapp loaded from a
-// public HTTPS host (e.g. reality2-ai.github.io/r2-rocker/) lives in a
-// different origin and therefore a different IndexedDB store. To let
-// the same device use the off-network host without re-enrolling, the
-// lab-origin webapp builds a #bundle=… URL that the new origin can
-// import. The fragment never traverses the network, so the cert stays
-// client-side; the operator is the transport.
+// public HTTPS host (https://reality2.ai/r2-rocker/ — a custom-domain
+// front-end on the gh-pages deploy) lives in a different origin and
+// therefore a different IndexedDB store. To let the same device use
+// the off-network host without re-enrolling, the lab-origin webapp
+// builds a #bundle=… URL that the new origin can import. The fragment
+// never traverses the network, so the cert stays client-side; the
+// operator is the transport.
 
-const OFF_NETWORK_HOST = 'https://reality2-ai.github.io/r2-rocker/';
+const OFF_NETWORK_HOST = 'https://reality2.ai/r2-rocker/';
 
 /// Build a #bundle=… URL pointing at the off-network host that, when
 /// opened, will copy this device's cert + relay_url into the off-network
