@@ -48,6 +48,11 @@ const SENSOR_EVENT_LOG:    u32 = r2_fnv::fnv1a_32(b"r2.sensor.event.log");
 const SENSOR_CAL_RESP:     u32 = r2_fnv::fnv1a_32(b"r2.sensor.cal.sample.resp");
 const SENSOR_SYNC_PONG:    u32 = r2_fnv::fnv1a_32(b"r2.sensor.sync_pong");
 const SENSOR_ANNOUNCE:     u32 = r2_fnv::fnv1a_32(b"r2.sensor.announce");
+// Controller-synthesised peer-lifecycle events (BRIDGE §3.1). Today
+// only `r2.peer.disconnected` is emitted; `r2.peer.connected` is
+// covered by the existing announce replay and not yet a separate
+// event — see SPEC-R2-ROCKER-VIEWER-SENTANT §6 outbound roadmap.
+const PEER_DISCONNECTED:   u32 = r2_fnv::fnv1a_32(b"r2.peer.disconnected");
 
 // Dashboard → sensor commands (SPEC-R2-ROCKER-WIRE §4 + SPEC-R2-ROCKER-TIMESYNC §4).
 const DASH_ACK:               u32 = r2_fnv::fnv1a_32(b"r2.dash.ack");
@@ -1736,19 +1741,82 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
         _ = write_handle => {}
     }
 
+    // Capture the peer's `device_pk` BEFORE removal so we can include
+    // it in the r2.peer.disconnected event payload — the
+    // DashboardViewerSentant keys by pk and needs it to drop the
+    // sensor from its snapshot.
+    let disconnected_pk_hex: Option<String> = {
+        let peers = state.peers.read().await;
+        peers.get(&addr).and_then(|p| p.device_pk.clone())
+    };
     {
         let mut peers = state.peers.write().await;
         peers.remove(&addr);
     }
     eprintln!("[events] sensor disconnected: {}", addr);
-    // Push a `peer_disconnected` message on /ws/status so the WASM
-    // viewer can flip the sensor's virtual LED to inert grey instantly,
-    // rather than waiting for its OFFLINE_MS timeout (~6 s) to fire.
+    // Tracks B+C — start the migration from /ws/status JSON to R2-WIRE
+    // events. The first event picked is `r2.peer.disconnected` because
+    // (a) it's purely synthesised by the controller (no sensor side to
+    // touch), (b) its payload is tiny, and (c) BRIDGE §3.1 already
+    // pre-defines the name + shape, so a future Track E doesn't force
+    // a wire break.
+    //
+    // The frame goes out via raw_frame_tx (same channel as the
+    // sensor-originated frames on /ws/raw); the webapp's rocker hive
+    // already forwards every /ws/raw event into the
+    // DashboardViewerSentant, so this slot lands in the sentant
+    // automatically. The legacy JSON message on /ws/status stays for
+    // one release so the existing JS handler (which clears the
+    // virtual LED) keeps working until UI rendering moves through
+    // the hive snapshot.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let addr_str = addr.to_string();
+    let payload = encode_peer_disconnected(
+        &addr_str,
+        now_ms,
+        "tcp_close",
+        disconnected_pk_hex.as_deref(),
+    );
+    let frame = build_dash_frame(PEER_DISCONNECTED, 0, &payload);
+    let _ = state.raw_frame_tx.send(RawFrame {
+        src: addr_str.clone(),
+        ts_ms: now_ms,
+        frame,
+    });
+    // Legacy JSON broadcast — preserved during the transition. Drop
+    // in the next release once the webapp has switched to reading
+    // from the sentant snapshot.
     let msg = serde_json::json!({
         "type": "peer_disconnected",
-        "addr": addr.to_string(),
+        "addr": addr_str,
     }).to_string();
     let _ = state.ws_broadcast_tx.send(msg);
+}
+
+/// Encode the `r2.peer.disconnected` payload per BRIDGE §3.1:
+/// `{0: addr (text), 1: ts_ms (uint), 2: reason (text)}`, plus a
+/// rocker-specific extension `{3: device_pk_hex (text)}` when the
+/// disconnecting peer had identified itself via announce. The hex
+/// form (64 chars) matches the announce's `device_pk` field so the
+/// DashboardViewerSentant can look up + drop the sensor by pk
+/// without keeping its own addr→pk map.
+fn encode_peer_disconnected(addr: &str, ts_ms: u64, reason: &str, device_pk_hex: Option<&str>) -> Vec<u8> {
+    let mut buf = vec![0u8; 64 + addr.len() + reason.len() + device_pk_hex.map(|s| s.len()).unwrap_or(0)];
+    let mut enc = r2_cbor::Encoder::new(&mut buf);
+    let n_keys = if device_pk_hex.is_some() { 4 } else { 3 };
+    let _ = enc.map(n_keys);
+    let _ = enc.kv(0, &r2_cbor::Value::Text(addr));
+    let _ = enc.kv(1, &r2_cbor::Value::UInt(ts_ms));
+    let _ = enc.kv(2, &r2_cbor::Value::Text(reason));
+    if let Some(pk) = device_pk_hex {
+        let _ = enc.kv(3, &r2_cbor::Value::Text(pk));
+    }
+    let used = enc.len();
+    buf.truncate(used);
+    buf
 }
 
 /// Decode an R2-WIRE event frame into a DashboardEvent

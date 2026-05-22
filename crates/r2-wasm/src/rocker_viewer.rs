@@ -44,6 +44,10 @@ const EVT_SENSOR_ACCELERATION:  EventHash = r2_fnv::fnv1a_32(b"r2.sensor.acceler
 const EVT_SENSOR_BATTERY:       EventHash = r2_fnv::fnv1a_32(b"r2.sensor.battery");
 const EVT_SENSOR_STATUS:        EventHash = r2_fnv::fnv1a_32(b"r2.sensor.status");
 const EVT_SENSOR_CAPTURE_STATE: EventHash = r2_fnv::fnv1a_32(b"r2.sensor.capture.state");
+/// Controller-synthesised event (BRIDGE §3.1) — first migrated
+/// status notification from the legacy /ws/status JSON channel.
+/// Payload: `{0: addr (text), 1: ts_ms (uint), 2: reason (text)}`.
+const EVT_PEER_DISCONNECTED:    EventHash = r2_fnv::fnv1a_32(b"r2.peer.disconnected");
 
 const CLASS_HASH: EventHash = r2_fnv::fnv1a_32(b"nz.ac.auckland.rocker.viewer");
 
@@ -53,6 +57,7 @@ const SUBSCRIPTIONS: &[u32] = &[
     EVT_SENSOR_BATTERY,
     EVT_SENSOR_STATUS,
     EVT_SENSOR_CAPTURE_STATE,
+    EVT_PEER_DISCONNECTED,
 ];
 
 /// Per-sensor record. Mirrors the JS-side state in `webapp/index.html`
@@ -208,6 +213,25 @@ impl Sentant for DashboardViewerSentant {
                     if let Some(s) = inner.sensors.get_mut(&pk) {
                         s.capture_state = st;
                         s.capture_file = file;
+                    }
+                }
+            }
+            EVT_PEER_DISCONNECTED => {
+                // Payload per BRIDGE §3.1:
+                //   {0: addr, 1: ts_ms, 2: reason, 3: device_pk_hex (rocker ext)}.
+                // We key by device_pk_hex when present; otherwise the
+                // event is informational only (a peer whose announce
+                // we never saw, e.g. a stalled TCP connect). Dropping
+                // a sensor from the snapshot clears it from
+                // peek_state(); UI consumers re-render accordingly.
+                let map = decode_top_level_map(event.payload);
+                if let Some(pk_hex) = map_get_text(&map, 3) {
+                    inner.sensors.remove(&pk_hex);
+                    // If the cursor pointed at the disconnecting
+                    // sensor, clear it so subsequent samples don't
+                    // misroute to its tombstone.
+                    if inner.last_pk.as_deref() == Some(&pk_hex) {
+                        inner.last_pk = None;
                     }
                 }
             }

@@ -113,6 +113,7 @@ multi-sensor receive path on dashboard port 21042.
 | 19 | `r2.dash.capture.stop`  | dash → sensor | Close the open capture file |
 | 20 | `r2.sensor.capture.state` | sensor → dash | `{0: u8 state, 1: str? file}` — state ∈ {0=idle, 1=calibrating, 2=recording} |
 | 21 | `r2.dash.enrol` | dash → sensor | Deliver a KeyHolder-signed `DeviceCertificate` over L2CAP CoC during BLE bootstrap, before `#wifi_offer`. See SPEC-R2-ROCKER-SENSOR §3.5. Payload is the 147-byte serialised cert. One-shot per device. |
+| 22 | `r2.peer.disconnected` | dash → viewer | Controller-synthesised on TCP close / read timeout. Payload `{0: addr (text), 1: ts_ms (uint), 2: reason (text), 3: device_pk_hex (text, optional)}` per BRIDGE §3.1 + rocker ext. First migrated status notification (Tracks B+C); legacy `/ws/status type=peer_disconnected` JSON message is preserved for one release. |
 
 Implementations MUST treat unknown event hashes as receivable but
 non-actionable — log them and move on; never close the connection over

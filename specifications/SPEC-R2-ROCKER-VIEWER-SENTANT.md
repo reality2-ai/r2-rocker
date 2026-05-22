@@ -91,6 +91,7 @@ the dotted names per SPEC-R2-ROCKER-WIRE §2.
 | `r2.sensor.battery` | sensor → controller → viewer | Update battery_pct. |
 | `r2.sensor.status` | sensor → controller → viewer | Update fsm_state. |
 | `r2.sensor.capture.state` | sensor → controller → viewer | Update capture_state (0=idle, 1=calibrating, 2=recording) + capture_file. |
+| `r2.peer.disconnected` | controller → viewer (controller-synthesised) | Drop the sensor from the snapshot. Lookup is by `device_pk_hex` (key 3); when absent the event is informational only. First migrated status notification under Tracks B+C — legacy `/ws/status type=peer_disconnected` JSON stays alive for one release for backward compat. |
 
 Implementations **SHOULD** ignore unknown event hashes silently
 (per the bus's default dispatch). Adding new sensor events later
