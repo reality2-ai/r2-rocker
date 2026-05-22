@@ -128,6 +128,10 @@ fn remap_payload(event_hash: u32, raw: serde_json::Value) -> serde_json::Value {
             ("4", "boot_ts_ms"),
             ("5", "nonce"),
             ("6", "sig"),
+            // Track A — KeyHolder-signed DeviceCertificate (147 bytes,
+            // hex-encoded after remap). verify_announce_signature
+            // reads this and switches to cert-anchored mode.
+            ("8", "device_cert"),
             ("10", "mounting_role"),
         ],
         SENSOR_STATUS => &[
