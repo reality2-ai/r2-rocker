@@ -32,7 +32,7 @@ use crate::wire::{
     parse_identify_set, parse_set_clock_offset, parse_sync_pulse_req_id,
     CborWriter,
     EVT_DASH_ACK, EVT_DASH_CAPTURE_MARK, EVT_DASH_CAPTURE_START, EVT_DASH_CAPTURE_STOP,
-    EVT_DASH_IDENTIFY_SET, EVT_DASH_SET_CLOCK_OFFSET, EVT_DASH_SYNC_PULSE,
+    EVT_DASH_ENROL, EVT_DASH_IDENTIFY_SET, EVT_DASH_SET_CLOCK_OFFSET, EVT_DASH_SYNC_PULSE,
     EVT_SENSOR_ACCELERATION, EVT_SENSOR_ANNOUNCE, EVT_SENSOR_BATTERY,
     EVT_SENSOR_CAPTURE_STATE, EVT_SENSOR_STATUS, EVT_SENSOR_SYNC_PONG,
 };
@@ -409,6 +409,47 @@ impl Sender {
                 let on = parse_identify_set(payload).unwrap_or(false);
                 info!("[sender] r2.dash.identify_set on={on}");
                 self.led.set_identify(on);
+            }
+            EVT_DASH_ENROL => {
+                // Track A v0.1 TCP path: dashboard issues a fresh
+                // DeviceCertificate over the streaming socket after
+                // observing a cert-less announce. Same validation
+                // logic as the L2CAP arm in main.rs — verify the
+                // cert signature under TG_PUB_KEY and check the
+                // cert's device_pk matches ours, then persist.
+                info!("[sender] r2.dash.enrol received ({} bytes)", payload.len());
+                use crate::identity::{DEVICE_CERT_LEN, TG_PUB_KEY};
+                if payload.len() != DEVICE_CERT_LEN {
+                    warn!(
+                        "[sender] enrol payload length {} != expected {} — ignoring",
+                        payload.len(), DEVICE_CERT_LEN
+                    );
+                } else if let Ok(sig_bytes) = <[u8; 64]>::try_from(&payload[83..]) {
+                    match ed25519_dalek::VerifyingKey::from_bytes(&TG_PUB_KEY) {
+                        Ok(tg_vk) => {
+                            let sig = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+                            if ed25519_dalek::Verifier::verify(&tg_vk, &payload[..83], &sig).is_err() {
+                                warn!("[sender] enrol cert signature does not verify under TG_PUB_KEY");
+                            } else {
+                                let our_pk = self.identity.device_pk();
+                                let cert_pk = &payload[2..34];
+                                if cert_pk != our_pk {
+                                    warn!("[sender] enrol cert is for a different device_pk — ignoring");
+                                } else {
+                                    match self.identity.persist_device_cert(payload) {
+                                        Ok(()) => info!(
+                                            "[sender] enrol cert persisted; next announce will run in post-cert mode"
+                                        ),
+                                        Err(e) => warn!("[sender] persist_device_cert: {e:?}"),
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => warn!("[sender] TG_PUB_KEY invalid: {e:?}"),
+                    }
+                } else {
+                    warn!("[sender] enrol cert sig slice not 64 bytes");
+                }
             }
             EVT_DASH_SYNC_PULSE => {
                 if let Some(req_id) = parse_sync_pulse_req_id(payload) {

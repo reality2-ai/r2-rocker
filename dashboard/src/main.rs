@@ -1532,30 +1532,33 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
                                 .and_then(|n| n.as_str())
                                 .map(|s| s.to_string());
 
-                            // Phase 5b — Ed25519-verify the announce signature.
-                            // TOFU policy in v0.1: log-only; don't reject yet
-                            // (the legacy M10 sender doesn't sign, so a strict
-                            // policy would lock us out of mixed deployments).
-                            // Migrate to reject-on-bad-sig once all sensors
-                            // are r2-rocker-spec firmware.
-                            let sig_ok = payload
-                                .as_ref()
-                                .map(verify_announce_signature)
-                                .unwrap_or(SigStatus::NoPayload);
+                            // Track A — verify the announce signature, with
+                            // cert-chain check when CBOR key 8 is present.
+                            // TOFU policy retained for legacy announces
+                            // (log-only; don't reject yet — see
+                            // SPEC-R2-ROCKER-SENSOR §3.4).
+                            //
+                            // Tg_pk loaded once per announce. Cheap (32-byte
+                            // copy out of the Access handle); not held across
+                            // any await in the verify call.
+                            let tg_pk_bytes: Option<[u8; 32]> = match read_state.access.as_ref() {
+                                Some(h) => Some(h.lock().await.tg_pk_bytes()),
+                                None => None,
+                            };
+                            let sig_ok = match (&payload, &tg_pk_bytes) {
+                                (Some(p), Some(tg_pk)) => verify_announce_signature(p, tg_pk),
+                                (Some(_), None) => SigStatus::Malformed, // no TG loaded — treat as legacy
+                                (None, _) => SigStatus::NoPayload,
+                            };
 
                             eprintln!(
                                 "[events] sensor.announce from {}: name={:?} sig={:?} payload={:?}",
                                 addr, device_name, sig_ok, payload
                             );
 
-                            // Cache the announce frame bytes per peer so a
-                            // /ws/raw viewer that connects later can be
-                            // replayed — otherwise it misses `fw_ver` /
-                            // `device_pk` / `boot_ts_ms` until the next
-                            // sensor reboot.
                             // Pull device_pk out of the parsed announce payload
                             // so downstream consumers (data_merged_handler's
-                            // alias lookup, future cert-based routing) don't
+                            // alias lookup, the Track-A cert issuance below) don't
                             // have to re-decode the cached CBOR.
                             let device_pk_hex = payload.as_ref()
                                 .and_then(|p| p.get("device_pk"))
@@ -1563,6 +1566,56 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
                                 .filter(|s| s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()))
                                 .map(|s| s.to_string());
 
+                            // Track A — cert issuance. When the sensor's
+                            // announce passes signature verification but
+                            // carries no cert (legacy TOFU mode), issue a
+                            // fresh KeyHolder-signed DeviceCertificate and
+                            // push it down the same TCP socket as
+                            // r2.dash.enrol. The sensor persists it to NVS
+                            // and the NEXT announce will carry the cert at
+                            // CBOR key 8 (post-cert mode). One-shot per
+                            // session — idempotent across sensor reconnects.
+                            if matches!(sig_ok, SigStatus::Valid) {
+                                let tx_opt = read_state.peers.read().await.get(&addr).map(|p| p.tx.clone());
+                                if let (Some(pk_hex), Some(handle), Some(tx)) = (
+                                    device_pk_hex.clone(),
+                                    read_state.access.as_ref(),
+                                    tx_opt,
+                                ) {
+                                    if let Ok(pk_bytes) = hex::decode(&pk_hex) {
+                                        if let Ok(pk_arr) = <[u8; 32]>::try_from(pk_bytes.as_slice()) {
+                                            let cert_bytes = {
+                                                let access = handle.lock().await;
+                                                access.issue_sensor_cert(pk_arr)
+                                            };
+                                            let frame = build_dash_frame(
+                                                r2_fnv::fnv1a_32(b"r2.dash.enrol"),
+                                                0,
+                                                &cert_bytes,
+                                            );
+                                            if tx.send(frame).await.is_err() {
+                                                eprintln!(
+                                                    "[enrol] {} peer.tx closed; cert push skipped",
+                                                    addr
+                                                );
+                                            } else {
+                                                eprintln!(
+                                                    "[enrol] issued + pushed cert ({} bytes) to {} (pk first 8: {})",
+                                                    cert_bytes.len(),
+                                                    addr,
+                                                    &pk_hex[..16]
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Cache the announce frame bytes per peer so a
+                            // /ws/raw viewer that connects later can be
+                            // replayed — otherwise it misses `fw_ver` /
+                            // `device_pk` / `boot_ts_ms` until the next
+                            // sensor reboot.
                             {
                                 let mut peers = read_state.peers.write().await;
                                 if let Some(peer) = peers.get_mut(&addr) {
@@ -1750,11 +1803,23 @@ fn decode_event_frame(frame: &[u8], addr: &SocketAddr) -> Option<DashboardEvent>
 /// state. Other variants log loudly so misconfiguration is visible.
 #[derive(Debug, Clone, Copy)]
 enum SigStatus {
+    /// Announce sig verifies AND a cert at CBOR key 8 verifies under the
+    /// dashboard's TG_PUB_KEY, with `cert.device_public_key` matching the
+    /// announce's `device_pk`. This is the post-Track-A normative mode.
+    ValidWithCert,
+    /// Announce sig verifies; no cert present (legacy TOFU mode).
     Valid,
     /// Signature bytes don't verify against the announced device_pk.
     /// Means either the firmware is buggy, the network is forging
     /// announces, or the canonical CBOR re-encoding doesn't match.
     BadSignature,
+    /// Cert at CBOR key 8 either fails to verify under TG_PUB_KEY, or
+    /// the cert's `device_public_key` doesn't match the announce's
+    /// `device_pk`, or the cert is expired. The announce signature
+    /// itself may still be well-formed; we reject because the
+    /// cert-anchored chain is broken (per SPEC-R2-ROCKER-SENSOR §3.4
+    /// post-cert mode).
+    BadCert,
     /// Required field missing / wrong type. Often a legacy M10 announce
     /// (no signature field at all) — log-and-accept under TOFU for now.
     Malformed,
@@ -1769,7 +1834,14 @@ enum SigStatus {
 /// Both sides use deterministic CBOR (smallest-form heads, ascending
 /// integer keys), so a fresh encode here MUST match the firmware's
 /// signed bytes exactly.
-fn verify_announce_signature(payload: &serde_json::Value) -> SigStatus {
+///
+/// Track A — if the announce includes CBOR key 8 (`device_cert`,
+/// 147 bytes), the dashboard ALSO verifies the cert chain under
+/// `tg_pk` and checks that the cert's `device_public_key` matches
+/// the announce's `device_pk`. Returns `ValidWithCert` on success,
+/// `BadCert` on chain failure. Legacy announces (no key 8) fall
+/// back to plain `Valid` (TOFU mode).
+fn verify_announce_signature(payload: &serde_json::Value, tg_pk: &[u8; 32]) -> SigStatus {
     use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
     let obj = match payload.as_object() {
@@ -1781,6 +1853,9 @@ fn verify_announce_signature(payload: &serde_json::Value) -> SigStatus {
         let s = obj.get(key)?.as_str()?;
         let b = hex::decode(s).ok()?;
         if b.len() == len { Some(b) } else { None }
+    };
+    let hex_field_any = |key: &str| -> Option<Vec<u8>> {
+        obj.get(key)?.as_str().and_then(|s| hex::decode(s).ok())
     };
     let text_field = |key: &str| -> Option<&str> {
         obj.get(key)?.as_str()
@@ -1829,11 +1904,48 @@ fn verify_announce_signature(payload: &serde_json::Value) -> SigStatus {
         return SigStatus::Malformed;
     };
     let signature = Signature::from_bytes(&sig_arr);
-    if verifying_key.verify(body, &signature).is_ok() {
-        SigStatus::Valid
-    } else {
-        SigStatus::BadSignature
+    if verifying_key.verify(body, &signature).is_err() {
+        return SigStatus::BadSignature;
     }
+
+    // Announce sig OK. Check for a cert at key 8 (Track A). The CBOR
+    // decoder writes bytes(N) fields as hex strings into our JSON
+    // intermediate; same accessor as `device_pk` / `nonce`. Length is
+    // 147 (DEVICE_CERT_LEN) when present.
+    let Some(cert_bytes) = hex_field_any("device_cert") else {
+        // Legacy / pre-cert announce — TOFU accept per SPEC-R2-ROCKER-SENSOR §3.4.
+        return SigStatus::Valid;
+    };
+    if cert_bytes.len() != 147 {
+        return SigStatus::BadCert;
+    }
+    // 1. Verify the cert's trailing 64-byte signature over the leading
+    //    83 bytes under the dashboard's TG_PUB_KEY.
+    let signed = &cert_bytes[..83];
+    let Ok(cert_sig_arr) = <[u8; 64]>::try_from(&cert_bytes[83..]) else {
+        return SigStatus::BadCert;
+    };
+    let Ok(tg_vk) = VerifyingKey::from_bytes(tg_pk) else {
+        return SigStatus::BadCert;
+    };
+    let cert_sig = Signature::from_bytes(&cert_sig_arr);
+    if tg_vk.verify(signed, &cert_sig).is_err() {
+        return SigStatus::BadCert;
+    }
+    // 2. Cert's device_public_key (bytes 2..34) must match announce's device_pk.
+    if &cert_bytes[2..34] != device_pk.as_slice() {
+        return SigStatus::BadCert;
+    }
+    // 3. Expiry check — cert.expires_at at bytes 75..83 (big-endian u64).
+    let expires_at = u64::from_be_bytes(cert_bytes[75..83].try_into().unwrap_or([0u8; 8]));
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if now_secs >= expires_at {
+        return SigStatus::BadCert;
+    }
+    SigStatus::ValidWithCert
 }
 
 /// Decode CBOR payload into JSON

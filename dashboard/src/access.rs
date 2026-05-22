@@ -14,7 +14,7 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use r2_trust::{
-    DeviceRole, EncryptedJoinResponse, RevocationReason, TrustGroup,
+    DeviceCertificate, DeviceRole, EncryptedJoinResponse, RevocationReason, TrustGroup,
 };
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
@@ -304,6 +304,32 @@ impl Access {
     /// HELLO. Cheap clone (32-byte seed under the hood).
     pub fn tg_signing_key(&self) -> ed25519_dalek::SigningKey {
         self.tg.signing_key().clone()
+    }
+
+    /// Issue a KeyHolder-signed DeviceCertificate for a sensor known
+    /// only by its `device_pk` — used by Track A (sensors as formal
+    /// TG members, SPEC-R2-ROCKER-SENSOR §3.5). Returns the 147-byte
+    /// serialised cert ready to pack into an `r2.dash.enrol` frame
+    /// down the sensor's streaming-TCP cmd channel.
+    ///
+    /// Sensors are NOT added to `tg.members()` in v0.1 — that list
+    /// remains the browser-viewer roster for revocation tracking
+    /// (ACCESS §4.3). The cert chain itself is what the dashboard
+    /// re-checks on every announce; the per-cert TTL bounds the trust
+    /// window without needing a member-state lookup. Sensor
+    /// revocation is deferred (a future Track adds it to a separate
+    /// `sensor_revocations` set if needed).
+    pub fn issue_sensor_cert(&self, device_pk: [u8; 32]) -> [u8; 147] {
+        let now = now_secs();
+        let cert = DeviceCertificate::issue(
+            self.tg.signing_key(),
+            device_pk,
+            self.tg.trust_group_id(),
+            DeviceRole::Member,
+            now,
+            now + CERT_TTL_SECS,
+        );
+        cert.to_bytes()
     }
 
     /// SPEC §4.1 — mint a single-use 5-min-expiring invite token and

@@ -236,38 +236,47 @@ in the dashboard's log.
 
 ### 3.5 Device certificate
 
-After successful BLE bootstrap (§4.2 transitions, the
-`ADVERTISING → BLE_CONNECTED → ...` path), the dashboard SHALL
-issue a KeyHolder-signed `DeviceCertificate` to the sensor before
-WiFi credentials are written. The flow is:
+The dashboard SHALL issue a KeyHolder-signed `DeviceCertificate`
+to each sensor it accepts. The cryptographic call is identical to
+the browser-viewer enrolment path
+(`r2_trust::TrustGroup::process_join_request`, see
+SPEC-R2-ROCKER-ACCESS §4) — transport-agnostic. The transport
+choice is implementation-defined:
 
-1. Once the sensor's L2CAP CoC channel is open and the dashboard
-   has read the sensor's announced `device_pk` (over the same
-   L2CAP exchange that v0.1 used to deliver `#wifi_offer`), the
-   dashboard runs
-   `r2_trust::TrustGroup::process_join_request(...)` with the
-   sensor's `device_pk` and a freshly-minted join-code. The
-   process is identical to the browser-viewer enrolment path
-   (SPEC-R2-ROCKER-ACCESS §4) — the call is transport-agnostic.
-2. The dashboard serialises the resulting `DeviceCertificate`
-   (147 bytes, per `DEVICE_CERT_LEN` in `r2-trust::types`) into a
-   single R2-WIRE compact frame with event hash
-   `r2.dash.enrol` (see WIRE §2) and writes it to the sensor over
-   L2CAP CoC.
-3. The sensor's L2CAP dispatch loop matches
-   `r2.dash.enrol`, validates the cert under its embedded
-   `TG_PUB_KEY` constant, validates that the cert's
-   `device_public_key` matches the sensor's own `device_pk`, and
-   persists the cert bytes to NVS under key `device_cert` (§3.6).
-4. The dashboard then proceeds with `#wifi_offer` as before. From
-   the sensor's next reboot onwards, every `r2.sensor.announce`
-   carries the cert as CBOR key `8`.
+**v0.1 path — post-announce, over TCP (default):** the sensor
+first connects to the dashboard over TCP:21042 and sends a
+cert-less `r2.sensor.announce` (no CBOR key 8). The dashboard
+verifies under TOFU (§3.4 legacy mode), runs
+`process_join_request(device_pk, ...)`, serialises the resulting
+147-byte cert, and writes it as an `r2.dash.enrol` R2-WIRE
+compact frame down the same TCP socket. The sensor's
+`dispatch_inbound` matches `r2.dash.enrol`, validates the cert
+under its embedded `TG_PUB_KEY`, validates that the cert's
+`device_public_key` matches its own `device_pk`, and persists
+the cert bytes to NVS under key `device_cert` (§3.6). From the
+sensor's *next* TCP reconnect (or reboot) onwards, every
+announce carries the cert at CBOR key `8` and the dashboard
+switches to cert-anchored verification.
 
-Cert delivery is one-shot per device. The sensor MAY re-bootstrap
-(via `cycle_hotspot` or factory reset) and receive a fresh cert
-under the same `device_pk`; the dashboard MAY issue a new cert
-with a later `issued_at` and the sensor SHALL accept it if the
-chain verifies.
+**v0.2 path — pre-WiFi, over BLE L2CAP CoC (forward-looking):**
+during BLE bootstrap, before `#wifi_offer`, the sensor sends a
+sensor-initiated L2CAP frame carrying its `device_pk`; the
+dashboard responds with `r2.dash.enrol` over the same L2CAP
+channel; the sensor persists the cert before WiFi creds arrive,
+so the very first TCP announce already carries the cert. This
+path is the eventual target (the sensor's L2CAP loop already
+accepts `r2.dash.enrol` — see `firmware/.../main.rs`) but
+requires a new sensor→dashboard `r2.sensor.hello_pk` event that
+is out of scope for v0.1.
+
+Cert delivery is one-shot per device per cert. The sensor MAY
+re-bootstrap (via `cycle_hotspot` or factory reset) and receive
+a fresh cert under the same `device_pk`; the dashboard MAY issue
+a new cert with a later `issued_at` and the sensor SHALL accept
+it if the chain verifies. The dashboard SHOULD skip re-issuing a
+cert when the sensor's announce already carries a valid one
+under the current TG (i.e. the announce arrived in post-cert
+mode, §3.4).
 
 ### 3.6 Persistence
 
