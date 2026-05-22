@@ -485,6 +485,69 @@ fn run(
             } else if msg.header.event_hash == wifi_clear_hash {
                 warn!("[PROV] wifi_clear — clearing stored credentials");
                 wifi_prov::clear_credentials();
+            } else if msg.header.event_hash == wire::EVT_DASH_ENROL {
+                // Track A — receive + verify + persist the KeyHolder-signed
+                // DeviceCertificate. SPEC-R2-ROCKER-SENSOR §3.5 / WIRE §2
+                // row 21. Payload layout per `r2-trust::cert::DeviceCertificate`:
+                //   [0]     version u8
+                //   [1]     sig_algo u8
+                //   [2..34] device_public_key (32)
+                //   [34..66] trust_group_id (32)
+                //   [66]    role u8
+                //   [67..75] issued_at u64 BE
+                //   [75..83] expires_at u64 BE
+                //   [83..147] Ed25519 signature over bytes [0..83]
+                info!("[ENROL] r2.dash.enrol received ({} bytes)", msg.payload.len());
+                if msg.payload.len() != identity::DEVICE_CERT_LEN {
+                    warn!(
+                        "[ENROL] payload length {} != expected {} — ignoring",
+                        msg.payload.len(), identity::DEVICE_CERT_LEN
+                    );
+                    continue;
+                }
+                // 1. Verify the cert's signature under TG_PUB_KEY. The
+                //    signed bytes are the first 83 (CERT_DATA_LEN);
+                //    the trailing 64 bytes are the signature.
+                let signed = &msg.payload[..83];
+                let sig_bytes: [u8; 64] = match msg.payload[83..].try_into() {
+                    Ok(s) => s,
+                    Err(_) => { warn!("[ENROL] sig slice not 64 bytes"); continue; }
+                };
+                let tg_vk = match ed25519_dalek::VerifyingKey::from_bytes(&identity::TG_PUB_KEY) {
+                    Ok(k) => k,
+                    Err(e) => {
+                        warn!("[ENROL] TG_PUB_KEY invalid: {e:?}");
+                        continue;
+                    }
+                };
+                let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+                if let Err(e) = ed25519_dalek::Verifier::verify(&tg_vk, signed, &signature) {
+                    warn!("[ENROL] cert signature does not verify under TG_PUB_KEY: {e:?}");
+                    continue;
+                }
+                // 2. Verify the cert's `device_public_key` matches our own.
+                //    Otherwise the cert is for a different sensor and
+                //    persisting it would impersonate them on announce.
+                let our_pk = identity.device_pk();
+                let cert_pk = &msg.payload[2..34];
+                if cert_pk != our_pk {
+                    warn!(
+                        "[ENROL] cert is for a different device_pk (cert={:02x}{:02x}{:02x}{:02x}…, ours={:02x}{:02x}{:02x}{:02x}…) — ignoring",
+                        cert_pk[0], cert_pk[1], cert_pk[2], cert_pk[3],
+                        our_pk[0],  our_pk[1],  our_pk[2],  our_pk[3]
+                    );
+                    continue;
+                }
+                // 3. Persist the cert. The next announce will carry it
+                //    as CBOR key 8 and the dashboard will switch to
+                //    post-cert verification.
+                match identity.persist_device_cert(msg.payload) {
+                    Ok(()) => info!(
+                        "[ENROL] cert verified + persisted; expires_at=ts {} (Unix seconds)",
+                        u64::from_be_bytes(msg.payload[75..83].try_into().unwrap_or([0u8; 8]))
+                    ),
+                    Err(e) => warn!("[ENROL] persist_device_cert failed: {e:?}"),
+                }
             } else {
                 info!("[BLE] L2CAP event hash=0x{:08x} (unhandled, {} bytes)",
                       msg.header.event_hash, data.len());

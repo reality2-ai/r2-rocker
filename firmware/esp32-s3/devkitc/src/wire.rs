@@ -48,6 +48,12 @@ pub const EVT_DASH_SET_CLOCK_OFFSET: u32 = fnv1a_32(b"r2.dash.set_clock_offset")
 // sensor can be picked out in a fleet (battery swap, debugging, …).
 // Payload: `{0: u8}` — 1 = on, 0 = off.
 pub const EVT_DASH_IDENTIFY_SET:     u32 = fnv1a_32(b"r2.dash.identify_set");
+/// Per SPEC-R2-ROCKER-WIRE §2 row 21 and SPEC-R2-ROCKER-SENSOR §3.5
+/// — dashboard delivers a 147-byte KeyHolder-signed DeviceCertificate
+/// over L2CAP during BLE bootstrap, before `#wifi_offer`. The cert is
+/// persisted to NVS by `identity::persist_device_cert` and surfaced
+/// on every subsequent announce as CBOR key 8.
+pub const EVT_DASH_ENROL:            u32 = fnv1a_32(b"r2.dash.enrol");
 // Capture session events (SPEC-R2-ROCKER-CAPTURE §3).
 pub const EVT_DASH_CAPTURE_START:    u32 = fnv1a_32(b"r2.dash.capture.start");
 pub const EVT_DASH_CAPTURE_MARK:     u32 = fnv1a_32(b"r2.dash.capture.mark");

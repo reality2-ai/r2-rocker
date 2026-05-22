@@ -456,7 +456,11 @@ impl Sender {
         // The signature at key 6 covers the canonical CBOR of keys 0..5.
         // We build the body twice for byte-identical encoding: once for
         // signing, once again as the prefix of the full payload that
-        // adds key 6 (the signature).
+        // adds key 6 (the signature) and, when the sensor has been
+        // enrolled (Track A), key 8 (the KeyHolder-signed device cert).
+        // The cert is NOT part of the signed body — it's auxiliary
+        // chain-of-trust material the dashboard cross-checks against
+        // key 0's device_pk.
         let mut nonce = [0u8; 16];
         unsafe {
             for chunk in nonce.chunks_exact_mut(4) {
@@ -487,19 +491,32 @@ impl Sender {
         // 2. Sign body bytes with device key.
         let sig = self.identity.sign(body);
 
-        // 3. Encode full payload (keys 0..6, map header = 7 entries).
-        let mut payload = [0u8; 320];
+        // 3. Pull the cert (if persisted) up front so we know the final
+        //    map cardinality. Per SPEC-R2-ROCKER-SENSOR §3.4 post-cert
+        //    mode the dashboard verifies the cert chain under
+        //    TG_PUB_KEY; absent cert drops to TOFU mode.
+        let device_cert = self.identity.device_cert();
+        let n_keys_full = if device_cert.is_some() { 8 } else { 7 };
+
+        // 4. Encode full payload (keys 0..6 always; key 8 when cert
+        //    present). Payload buffer sized for the 147-byte cert plus
+        //    the existing ~250-byte head.
+        let mut payload = [0u8; 512];
         let mut w = CborWriter::new(&mut payload);
-        write_keys_0_to_5(&mut w, 7);
+        write_keys_0_to_5(&mut w, n_keys_full);
         w.key(6); w.bytes(&sig);
+        if let Some(ref cert_bytes) = device_cert {
+            w.key(8); w.bytes(cert_bytes);
+        }
         let used = w.pos();
 
-        let mut frame = [0u8; 384];
+        let mut frame = [0u8; 576];
         let n = frame_for_tcp(&mut frame, self.random_msg_id(), EVT_SENSOR_ANNOUNCE, &payload[..used]);
         stream.write_all(&frame[..n])?;
         info!(
-            "sender: sent ANNOUNCE ({} bytes payload, signed; device_pk first 8 bytes = {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}…)",
+            "sender: sent ANNOUNCE ({} bytes payload, signed, cert={}; device_pk first 8 bytes = {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}…)",
             used,
+            if device_cert.is_some() { "present" } else { "absent (TOFU)" },
             device_pk[0], device_pk[1], device_pk[2], device_pk[3],
             device_pk[4], device_pk[5], device_pk[6], device_pk[7],
         );

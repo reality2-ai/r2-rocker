@@ -6,33 +6,55 @@
 //! so `device_pk` is stable across reboots and OTA updates (unless a
 //! factory reset clears NVS, in which case a new identity is minted).
 //!
-//! The TG public key is embedded at compile time (Phase 5a uses it for
-//! reference / future TG-cert verification; Phase 5b/c will use it to
-//! verify wifi_offer + frame HMACs). For now the dashboard uses TOFU
-//! against `device_pk` directly.
+//! Phase 5 (Track A — `audits/2026-05-23-architectural-gaps.md` finding D):
+//! once the sensor completes BLE bootstrap, the dashboard delivers a
+//! KeyHolder-signed `DeviceCertificate` over L2CAP as
+//! `r2.dash.enrol` (WIRE §2 row 21). The 147-byte cert is persisted
+//! to NVS alongside the device key, and surfaced on every announce as
+//! CBOR key 8 (WIRE §3.1) so the dashboard can verify the cert chain
+//! under `TG_PUB_KEY` instead of TOFU-pinning the announced pk.
 
 use anyhow::{anyhow, Context, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, SECRET_KEY_LENGTH};
 use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs, NvsDefault};
 use esp_idf_svc::sys::esp_fill_random;
 use log::info;
+use std::sync::Mutex;
 
 /// TG public key — same bytes the dashboard verifies against. Embedded
 /// at compile time per SPEC-R2-ROCKER-SENSOR §3.2.
 pub const TG_PUB_KEY: [u8; 32] = *include_bytes!("../../../../trust_keys/tg_pub.bin");
 
+/// Serialised DeviceCertificate length, per `r2-trust::types::DEVICE_CERT_LEN`.
+/// Kept as a sensor-side constant rather than depending on r2-trust here
+/// — the firmware doesn't yet pull in r2-trust as a build dep (would
+/// inflate the binary), so the cert is validated as opaque bytes.
+pub const DEVICE_CERT_LEN: usize = 147;
+
 const NVS_NS: &str = "r2-rocker";
 const NVS_KEY_DEVICE_PRIV: &str = "device_priv";
+const NVS_KEY_DEVICE_CERT: &str = "device_cert";
 const NVS_KEY_RBID: &str = "rbid";
 
 pub struct Identity {
     signing: SigningKey,
+    /// Persisted DeviceCertificate, if the sensor has been enrolled
+    /// (Track A). `None` on a factory-fresh device before BLE bootstrap
+    /// has delivered the cert, or on legacy firmware that hasn't been
+    /// re-enrolled. The Mutex slot is interior-mutable so the L2CAP
+    /// enrol handler can write through an `Arc<Identity>` after boot.
+    device_cert: Mutex<Option<Vec<u8>>>,
+    /// Kept for write-backs from `persist_device_cert`. Cheap to clone
+    /// — `EspDefaultNvsPartition` is a handle, not the partition data.
+    nvs: EspDefaultNvsPartition,
 }
 
 impl Identity {
     /// Load the device key from NVS, or generate + persist a fresh one.
+    /// Also loads the optional DeviceCertificate (None until BLE
+    /// bootstrap delivers one).
     pub fn load_or_generate(nvs: EspDefaultNvsPartition) -> Result<Self> {
-        let mut store = EspNvs::<NvsDefault>::new(nvs, NVS_NS, true)
+        let mut store = EspNvs::<NvsDefault>::new(nvs.clone(), NVS_NS, true)
             .context("EspNvs::new")?;
 
         let mut buf = [0u8; SECRET_KEY_LENGTH];
@@ -66,7 +88,35 @@ impl Identity {
             }
         };
 
-        Ok(Self { signing })
+        // Best-effort cert load. A missing or short cert is normal on
+        // pre-enrol devices; only log + skip.
+        let mut cert_buf = [0u8; DEVICE_CERT_LEN];
+        let device_cert = match store.get_blob(NVS_KEY_DEVICE_CERT, &mut cert_buf) {
+            Ok(Some(slice)) if slice.len() == DEVICE_CERT_LEN => {
+                info!(
+                    "identity: loaded device_cert from NVS ({} bytes); announce will run in post-cert mode",
+                    slice.len()
+                );
+                Some(slice.to_vec())
+            }
+            Ok(Some(slice)) => {
+                info!(
+                    "identity: device_cert NVS blob has unexpected length {} (expected {}) — ignoring",
+                    slice.len(), DEVICE_CERT_LEN
+                );
+                None
+            }
+            _ => {
+                info!("identity: no device_cert in NVS — announce will run in legacy TOFU mode");
+                None
+            }
+        };
+
+        Ok(Self {
+            signing,
+            device_cert: Mutex::new(device_cert),
+            nvs,
+        })
     }
 
     /// Returns the 32-byte Ed25519 public key — the device's stable identity.
@@ -79,6 +129,44 @@ impl Identity {
     pub fn sign(&self, msg: &[u8]) -> [u8; 64] {
         let sig: Signature = self.signing.sign(msg);
         sig.to_bytes()
+    }
+
+    /// Returns a clone of the persisted DeviceCertificate, or `None` if
+    /// the sensor hasn't been enrolled yet. Cloned because the announce
+    /// builder needs to pack the bytes into a CBOR-encoded frame while
+    /// holding no NVS lock. Per SPEC-R2-ROCKER-SENSOR §3.4 post-cert
+    /// mode, the dashboard verifies the announce signature against the
+    /// cert's `device_public_key`; absent cert means legacy TOFU mode.
+    pub fn device_cert(&self) -> Option<Vec<u8>> {
+        self.device_cert.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// Persist a freshly-issued DeviceCertificate to NVS and update
+    /// the in-memory copy. Called from the L2CAP enrol handler after
+    /// the cert's chain signature and `device_public_key` have been
+    /// verified against `TG_PUB_KEY` and this device's own pk.
+    /// Cert payload is the 147-byte serialised form per
+    /// `r2-trust::types::DEVICE_CERT_LEN`.
+    pub fn persist_device_cert(&self, cert: &[u8]) -> Result<()> {
+        if cert.len() != DEVICE_CERT_LEN {
+            return Err(anyhow!(
+                "device_cert must be {} bytes (got {})",
+                DEVICE_CERT_LEN, cert.len()
+            ));
+        }
+        let mut store = EspNvs::<NvsDefault>::new(self.nvs.clone(), NVS_NS, true)
+            .context("EspNvs::new for persist_device_cert")?;
+        store
+            .set_blob(NVS_KEY_DEVICE_CERT, cert)
+            .context("set_blob device_cert")?;
+        if let Ok(mut g) = self.device_cert.lock() {
+            *g = Some(cert.to_vec());
+        }
+        info!(
+            "identity: persisted device_cert ({} bytes) — post-cert announce mode active",
+            cert.len()
+        );
+        Ok(())
     }
 }
 
