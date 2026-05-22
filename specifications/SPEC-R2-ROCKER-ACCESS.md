@@ -1,8 +1,16 @@
 # SPEC-R2-ROCKER-ACCESS: Device-access lifecycle (enrolment, certs, revocation)
 
-**Version:** 0.1 Draft
-**Date:** 2026-05-18
+**Version:** 0.2 Draft
+**Date:** 2026-05-22
 **Status:** Normative Draft
+
+> **v0.2 Δ from v0.1:** Enrolment is **local-WiFi-only**. The relay
+> URL is delivered as part of the `/api/access/claim` response
+> (§4.2 step 9), not embedded in the invitation token. The relay
+> never sees enrolment material. Sections affected: §3.2 (token
+> representations), §3.4 (relay endpoint), §4 (routes table),
+> §4.1 (invite), §4.2 (claim), §5 (post-enrolment paths). See
+> §3.4 *Rationale* for the threat-model motivation.
 **Depends on:** SPEC-R2-ROCKER-SYSTEM (§3 trust), SPEC-R2-ROCKER-DASHBOARD (§5 HTTP), SPEC-R2-ROCKER-BRIDGE (§2 two-TG topology), SPEC-R2-ROCKER-WIRE, R2-TRUST (canonical, vendored under `crates/r2-trust/`), R2-TRANSPORT (relay, when needed for §5.2)
 
 ---
@@ -244,32 +252,39 @@ server-side (§4.1). Browser-side countdowns are display only.
 ### 3.2 Three representations
 
 The token is presented to the operator in three forms
-simultaneously, all encoding the same `(tg_hash, entropy)` tuple:
+simultaneously, all encoding the same `(tg_hash, entropy)` tuple.
+**Every form addresses the controller on the local WiFi.**
+Enrolment happens face-to-face on the lab network; the relay
+plays no part in admitting a new device. Once the cert is
+in-hand, the new viewer is free to leave the LAN and reconnect
+through the relay (§5.2) — but the secret material that gets it
+*into* the Trust Group never crosses the relay.
 
 * **QR code** — embeds an `r2:` URL of the form
   ```
-  r2://join/<tg_hash>/<entropy_hex>?relay=<relay_url>
+  r2://join/<tg_hash>/<entropy_hex>?host=<controller_lan_ip>:8080
   ```
-  where `relay_url` is the URL of the relay the viewer should use
-  if it cannot reach the controller on the local network (see
-  §3.4 for the relay default).
-* **Plain shareable URL** — two variants generated together:
+  The `host=` parameter is the controller's LAN address (the
+  same address sensors connect to on port 21042; see §3.4 for
+  how the dashboard picks it). The viewer's webapp uses it to
+  POST `/api/access/claim` (§4.2) directly. There is no
+  `?relay=` here — see §3.4.
+* **Plain shareable URL** — one variant only:
   * `url_local = http://<controller_lan_ip>:8080/?join=<tg_hash>.<entropy_hex>`
-  * `url_relay = https://reality2-ai.github.io/r2-rocker/?join=<tg_hash>.<entropy_hex>&relay=<relay_url>`
-  The viewer picks the one that matches its network situation.
-  The static-host URL is the same pattern used by `r2-notekeeper`
-  (AI-CONTEXT §"Browser enrolment via QR / link"). The webapp
-  hosted at either URL **MUST** implement the same enrolment
-  flow.
+  The viewer **MUST** be on the controller's LAN to reach it.
+  This URL is shown alongside the QR for operators who prefer to
+  type or paste rather than scan.
 * **3-word code** (OPTIONAL display) — three space-separated
   BIP39 words deterministically derived from the entropy. Same
   wordlist as r2-notekeeper for ecosystem parity. The viewer
   webapp **MUST** accept a typed 3-word code as an alternative
-  to the URL `?join=` parameter. The dashboard **SHOULD** hide
-  this representation behind a "show 3-word code" toggle in the
-  invite modal — useful only when QR + URL both fail (the
-  operator and viewer are on the phone together rather than in
-  the same room).
+  to the URL `?join=` parameter, **and** **MUST** still require
+  the viewer to be on the LAN to complete the claim. The
+  dashboard **SHOULD** hide this representation behind a "show
+  3-word code" toggle in the invite modal — useful only when
+  QR + URL both fail (the operator and viewer are on the phone
+  together rather than in the same room, but the viewer is
+  still on the LAN).
 
 ### 3.3 Server-side state
 
@@ -295,18 +310,39 @@ table for at least their original expiry window so that
 re-claims with the same `device_pk` are idempotent (§4.2). After
 that they MAY be garbage-collected.
 
-### 3.4 Relay endpoint
+### 3.4 Relay endpoint — delivered post-enrolment, not in the token
 
-The relay URL embedded in tokens is **operator-configurable** per
-deployment. The dashboard reads it from `--relay-url` at startup
-(default: empty — no relay path advertised, viewers must use the
-same-WiFi URL). A future deployment SHOULD publish a canonical
-relay URL for the university handoff; the spec deliberately does
-not name one in v0.1.
+The relay URL is **not** part of the enrolment token. Enrolment
+is local-WiFi-only (§3.2); the relay never sees the
+`(tg_hash, entropy)` pair. Once a viewer has successfully
+claimed a token, the `/api/access/claim` response (§4.2) carries
+the configured relay URL alongside the signed cert and the
+encrypted `(DEK, HK)` bundle. The viewer persists all of these
+together (§6) and uses the relay URL to reconnect from off-LAN
+later (§5.2).
 
-When `--relay-url` is empty, `url_relay` and the QR's `?relay=`
-fragment **MUST** be omitted. Implementations **MUST NOT** invent
-a placeholder relay URL.
+The relay URL is **operator-configurable** per deployment. The
+dashboard reads it from `--relay-url` at startup (default: empty
+— no relay path advertised, viewers are LAN-only). A future
+deployment SHOULD publish a canonical relay URL for the
+university handoff; the spec deliberately does not name one in
+v0.1.
+
+When `--relay-url` is empty, `/api/access/claim` responses
+**MUST** omit the `relay_url` field. Implementations **MUST NOT**
+invent a placeholder relay URL.
+
+**Rationale.** Pushing the relay into the enrolment token would
+make the relay a co-trusted party for new-device admission. That
+adds an attack surface (anyone who controls or impersonates the
+relay can sit between an off-LAN viewer and the controller during
+the moment cert material is being issued) for no operational
+gain (in practice every viewer enrolling is in the lab, since
+that's where the QR is shown). Doing enrolment locally and using
+the relay *only* as a forwarding plane for cert-authenticated
+sessions keeps the trust boundary at the controller — which is
+where R2-TRUST has it by design (R2-TRUST §7, KeyHolder is the
+sole issuer of certs).
 
 ---
 
@@ -319,10 +355,15 @@ They formalise (and supersede) the stubs presently at
 
 | Route | Method | Body | Returns | Auth |
 |---|---|---|---|---|
-| `/api/access/invite` | POST | `{name?: str}` | `{token, qr_png_b64, url_local, url_relay?, words_3?, expires_at}` | KeyHolder-only |
-| `/api/access/claim`  | POST | `{tg_hash: hex, entropy_hex: hex, device_pk: hex, device_name: str}` | `{cert: r2trust-CBOR, encrypted_creds: bytes_b64, tg_pk: hex, paired_at}` | none (the token IS the auth) |
+| `/api/access/invite` | POST | `{name?: str}` | `{token, qr_png_b64, url_local, words_3?, expires_at}` | KeyHolder-only |
+| `/api/access/claim`  | POST | `{tg_hash: hex, entropy_hex: hex, device_pk: hex, device_name: str}` | `{cert: r2trust-CBOR, encrypted_creds: bytes_b64, tg_pk: hex, relay_url?: str, paired_at}` | none (the token IS the auth) |
 | `/api/access/members` | GET | — | `{members: [{device_pk, name, role, paired_at, last_seen, revoked}]}` | KeyHolder-only |
 | `/api/access/revoke/{device_pk}` | POST | `{}` | `{ok: bool, revoked_at}` | KeyHolder-only |
+
+**No `url_relay` in invite responses, no `relay_url` in invite tokens.**
+The relay URL is **only** delivered as part of the post-enrolment
+claim response (§4.2 step 9). Enrolment is local-WiFi-only by
+design (§3.2, §3.4).
 
 The legacy `/api/enrol-init` and `/api/enrol-complete` routes in
 v0.1 **MAY** be deleted (no implementation depends on them) or
@@ -345,13 +386,17 @@ tab; the webapp POSTs to this route. The dashboard:
 4. Builds `url_local` from the controller's primary IPv4 on the
    hotspot interface (the same address sensors connect to on
    port 21042).
-5. If `--relay-url` is set, builds `url_relay` and the QR's
-   `r2:` URL with `?relay=`.
+5. Builds the QR-embedded `r2://join/<tg_hash>/<entropy_hex>?host=<lan_ip>:8080`
+   URL. The QR carries the **LAN address only** — no `?relay=`,
+   per §3.2 and §3.4.
 6. Renders the QR PNG (base64-encoded, ≤ 4 KB for 16-byte +
    short URL payload).
 7. Returns the JSON envelope. The token itself (raw `tg_hash` +
    `entropy_hex`) is **NOT** returned as a separate field —
-   it's already embedded in the URLs and reachable via the QR.
+   it's already embedded in the URL and reachable via the QR.
+   The relay URL is **NOT** returned here either; the operator
+   is inviting a viewer who is in the lab right now, so relay
+   reachability is irrelevant at the invite step.
 
 Implementations **MUST** rate-limit `/api/access/invite` to at
 most one issue per second per source IP to prevent token-flooding
@@ -385,8 +430,13 @@ The viewer's webapp POSTs to this route on first load with a
 8. Broadcasts `r2.dash.access.member_added {device_pk, name,
    role: "viewer", paired_at}` on `/ws/status` so other connected
    members see the change without polling.
-9. Returns the JSON envelope. The webapp persists the cert per
-   §6.
+9. Returns the JSON envelope, including the configured
+   `relay_url` if `--relay-url` is set (§3.4). The viewer
+   persists the cert, the encrypted creds, **and** the relay URL
+   together per §6 — that bundle is what lets the viewer
+   reconnect off-LAN later (§5.2). If `--relay-url` is unset,
+   the `relay_url` field is omitted from the response and the
+   viewer is permanently LAN-only on this deployment.
 
 The route is **public** — anyone who knows the token can claim
 it. That's the design: the token IS the authentication. If the
@@ -432,10 +482,19 @@ returns 400.
 
 ## 5. Connection paths after enrolment
 
-A viewer holds a `DeviceCertificate` after a successful claim.
-It can reach the dashboard in two ways. The spec defines the
-*behaviour at the path boundary*; the wire protocol of each leg
-lives elsewhere.
+A viewer holds a `DeviceCertificate` (and optionally the relay
+URL, per §4.2 step 9) after a successful claim. It can reach the
+dashboard in two ways. The spec defines the *behaviour at the
+path boundary*; the wire protocol of each leg lives elsewhere.
+
+**Phase order matters.** Enrolment (§3, §4.1, §4.2) happens
+once, on the LAN, while the new viewer's browser is on the
+controller's hotspot. The two paths below are post-enrolment
+*re-connection* paths: a viewer with a cert can use either,
+choosing whichever is reachable. A viewer **without** a cert has
+no business on the relay path — it has nothing to authenticate
+with — and a viewer that needs a cert MUST come back to the LAN
+to claim one.
 
 ### 5.1 Same-WiFi (direct)
 
@@ -469,14 +528,22 @@ documented here as future work:
 > Phase-5 implementation slice after the v0.1 slice is on the
 > bench.
 
-### 5.2 Off-network (relay)
+### 5.2 Off-network (relay) — post-enrolment only
 
 The viewer loaded the webapp from the static host
 (`https://reality2-ai.github.io/r2-rocker/`) and is not on the
 controller's hotspot. Its WASM hive connects to the operator's
-configured R2 relay (from `?relay=` or the persisted cert
-bundle) and the dashboard's relay-side state forwards
-encrypted blobs.
+configured R2 relay (from the relay URL the viewer received in
+its claim response and persisted alongside its cert per §6) and
+the dashboard's relay-side state forwards encrypted blobs.
+
+A viewer that never enrolled has nothing to present here — the
+relay session below requires a `DeviceCertificate` that only the
+controller can issue, and the controller only issues certs over
+the LAN-bound `/api/access/claim` route (§4.2). The static-host
+landing page **MUST** detect "no persisted cert in IndexedDB" and
+render the not-enrolled state, which tells the operator to come
+back on the lab WiFi to enrol — not to keep trying the relay.
 
 The wire protocol between viewer ↔ relay ↔ dashboard is
 specified in **R2-TRANSPORT** (vendored under `crates/r2-transport/`).
@@ -499,9 +566,9 @@ This spec only constrains the bits r2-rocker contributes:
   point.
 
 If the operator's `--relay-url` configuration is empty, the
-off-network path is not available in this deployment. Tokens
-issued in such a deployment omit `url_relay`; the operator and
-viewers are expected to be co-located on the hotspot.
+off-network path is not available in this deployment. Claim
+responses (§4.2) omit `relay_url`; the operator and viewers are
+expected to be co-located on the hotspot.
 
 ---
 
@@ -646,8 +713,11 @@ Below the tab heading, in order:
    `/api/access/invite` and opens a modal containing:
    * The QR code, sized at ≥ 256 × 256 CSS pixels.
    * The `url_local` URL, in a copy-to-clipboard chip.
-   * The `url_relay` URL, in a separate copy-to-clipboard chip,
-     **iff** the response included one (per §3.4).
+   * A "must be on the lab WiFi to enrol" hint near the URL,
+     so an operator doesn't paste the link into a remote chat
+     and wait for nothing to happen. The hint can be unobtrusive
+     (a single line below the URL) since the QR + URL are
+     intended for use in-room.
    * A 5-minute countdown timer, prominent.
    * A "Show 3-word code" toggle that reveals `words_3` on
      demand (§3.2).
@@ -850,13 +920,14 @@ either includes it or marks it explicitly out of scope:
 | Notekeeper feature | This spec |
 |---|---|
 | QR code | §3.2 — included. |
-| Shareable URL | §3.2 — included, with `url_local` + `url_relay` variants. |
+| Shareable URL | §3.2 — included; `url_local` only. The v0.1 draft had a `url_relay` variant; v0.2 (§3.4) removes it — enrolment is LAN-only. |
 | 3-word code | §3.2 — included as optional display. |
 | 5-minute expiry | §3.1 — included, server-side enforced. |
 | Single-use token | §3.3 — included. |
 | Browser keypair generation | §6 — included. |
 | Cert + DEK + HK in localStorage | §6 — moved to IndexedDB. |
-| Relay-mediated enrolment | §5.2 — included; relay wire protocol cross-referenced to R2-TRANSPORT. |
+| Relay-mediated **enrolment** | DEFERRED / OUT OF SCOPE. Notekeeper has it; r2-rocker v0.2 explicitly does not (§3.4 *Rationale*). |
+| Relay-mediated **post-enrolment connection** | §5.2 — included; relay wire protocol cross-referenced to R2-TRANSPORT. |
 | Word-code → join-code relay lookup | OUT OF SCOPE — the 3-word code is recovered from the entropy locally, no relay round-trip needed. |
 | Member list view | §8 (2) — included. |
 | Revoke button | §4.4 + §8 (2) — included. |
