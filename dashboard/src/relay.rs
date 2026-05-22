@@ -175,6 +175,11 @@ async fn run_one_session(
     const RELAY_FRAME_MIN_INTERVAL_MS: u128 = 100; // 10 Hz per sensor
     let mut last_forward_at: std::collections::HashMap<String, std::time::Instant> =
         std::collections::HashMap::new();
+    // Debug counters — logged every 50 frames so we can verify the
+    // path is alive without spamming the log.
+    let mut frames_seen = 0u64;
+    let mut frames_forwarded = 0u64;
+    let mut frames_skipped = 0u64;
 
     let mut ping_tick = tokio::time::interval(Duration::from_millis(PING_INTERVAL_MS));
     ping_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -187,12 +192,16 @@ async fn run_one_session(
             res = raw_rx.recv() => {
                 match res {
                     Ok(rf) => {
+                        frames_seen += 1;
                         let now = std::time::Instant::now();
                         let skip = match last_forward_at.get(&rf.src) {
                             Some(prev) => now.duration_since(*prev).as_millis() < RELAY_FRAME_MIN_INTERVAL_MS,
                             None => false,
                         };
-                        if skip { continue; }
+                        if skip {
+                            frames_skipped += 1;
+                            continue;
+                        }
                         last_forward_at.insert(rf.src.clone(), now);
                         // Wrap the same envelope shape /ws/raw uses
                         // so viewers can decode it with the existing
@@ -201,6 +210,10 @@ async fn run_one_session(
                         let envelope = crate::encode_raw_frame_envelope(&rf);
                         if let Err(e) = sink.send(WsMessage::Binary(envelope.into())).await {
                             return Err(format!("write outbound frame: {e}"));
+                        }
+                        frames_forwarded += 1;
+                        if frames_forwarded % 50 == 0 {
+                            eprintln!("[relay] frames_seen={frames_seen} forwarded={frames_forwarded} skipped={frames_skipped}");
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
