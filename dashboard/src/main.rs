@@ -2013,6 +2013,63 @@ fn emit_device_alias_changed(state: &Arc<AppState>, device_pk: &str, name: &str)
 /// kind/data pair. R2-WIRE payload encodes it as
 ///   `{0: kind (text), 1: data (text, optional)}` where kind is one of
 ///   "Reset", "Log", "SensorFound", "SensorConnected", "Done", "Error".
+/// Broadcast a `r2.dash.cmd.response` correlated to a viewer-issued
+/// operator command (SPEC-R2-ROCKER-WIRE §2.1). Payload shape:
+///   `{0: req_id (u32), 1: status (text),
+///     2: message (text, optional), 3: kind (text)}`
+///
+/// `kind` is the command's name suffix without the `r2.dash.cmd.`
+/// prefix (e.g. `"capture.start"`). Sent on `raw_frame_tx`, so every
+/// connected viewer sees the reply; viewers correlate by `req_id`.
+fn emit_cmd_response(
+    state: &Arc<AppState>,
+    req_id: u32,
+    status: &str,
+    message: Option<&str>,
+    kind: &str,
+) {
+    let mut buf = vec![0u8; 64 + status.len() + kind.len() + message.map(|m| m.len()).unwrap_or(0)];
+    let mut enc = r2_cbor::Encoder::new(&mut buf);
+    let n_keys = 3 + message.is_some() as usize;
+    let _ = enc.map(n_keys);
+    let _ = enc.kv(0, &r2_cbor::Value::UInt(req_id as u64));
+    let _ = enc.kv(1, &r2_cbor::Value::Text(status));
+    if let Some(m) = message { let _ = enc.kv(2, &r2_cbor::Value::Text(m)); }
+    let _ = enc.kv(3, &r2_cbor::Value::Text(kind));
+    let used = enc.len();
+    buf.truncate(used);
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let frame = build_dash_frame_body(DASH_CMD_RESPONSE, 0, &buf);
+    let _ = state.raw_frame_tx.send(RawFrame {
+        src: "dash".to_string(),
+        ts_ms: now_ms,
+        frame,
+    });
+}
+
+/// Decode an inbound operator-command frame received on /ws/raw.
+/// Returns `(event_hash, req_id, payload_json)` on success.
+///
+/// The frame body is the bare R2-WIRE compact shape (12-byte header +
+/// CBOR payload) — viewers SHOULD send the same shape that
+/// `build_dash_frame_body` produces; the /ws/raw envelope does not
+/// apply to viewer-emitted frames because the WebSocket layer already
+/// provides message boundaries.
+fn decode_cmd_frame(body: &[u8]) -> Option<(u32, u32, serde_json::Value)> {
+    if body.len() < 12 {
+        return None;
+    }
+    // Bytes 4..8 = event_hash (BE).
+    let event_hash = u32::from_be_bytes([body[4], body[5], body[6], body[7]]);
+    let payload = decode_cbor_payload(&body[12..])?;
+    let req_id = payload.get("0").and_then(|v| v.as_u64())? as u32;
+    Some((event_hash, req_id, payload))
+}
+
 fn emit_bootstrap_progress(state: &Arc<AppState>, kind: &str, data: Option<&str>) {
     // Legacy JSON (matches existing webapp handler shape).
     let legacy = if kind == "Reset" {
@@ -2418,6 +2475,51 @@ mod hex {
 /// controller's wall-clock arrival time (low 32 bits — wraps every
 /// ~49 days, matches the firmware's ts_ms field width). Frame is the
 /// raw R2-WIRE compact frame: header + payload, no transport prefix.
+/// Dispatch a viewer-emitted operator-command frame received on
+/// /ws/raw. Per SPEC-R2-ROCKER-WIRE §2.1, malformed frames and
+/// unknown event hashes are dropped silently; everything else hits
+/// the shared do_* core and yields a `r2.dash.cmd.response` reply
+/// correlated by `req_id`.
+async fn dispatch_cmd_frame(state: &Arc<AppState>, body: &[u8]) {
+    let (event_hash, req_id, payload) = match decode_cmd_frame(body) {
+        Some(t) => t,
+        None => {
+            eprintln!("[ws/raw inbound] malformed frame (len={}) — ignoring", body.len());
+            return;
+        }
+    };
+    match event_hash {
+        DASH_CMD_CAPTURE_START => {
+            let _peers = do_capture_start(state).await;
+            emit_cmd_response(state, req_id, "ok", None, "capture.start");
+        }
+        DASH_CMD_CAPTURE_MARK => {
+            let name = payload.get("1").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let prefix = payload.get("2").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let name = match name {
+                Some(n) => n,
+                None => {
+                    emit_cmd_response(state, req_id, "err", Some("missing name (key 1)"), "capture.mark");
+                    return;
+                }
+            };
+            match do_capture_mark(state, &name, prefix.as_deref()).await {
+                Ok(_) => emit_cmd_response(state, req_id, "ok", None, "capture.mark"),
+                Err(msg) => emit_cmd_response(state, req_id, "err", Some(&msg), "capture.mark"),
+            }
+        }
+        DASH_CMD_CAPTURE_STOP => {
+            let _peers = do_capture_stop(state).await;
+            emit_cmd_response(state, req_id, "ok", None, "capture.stop");
+        }
+        _ => {
+            // Unknown hash — log and drop per WIRE §2 "non-actionable".
+            // No response emitted, per §2.1's failure-modes table.
+            eprintln!("[ws/raw inbound] unknown event hash 0x{:08x} — ignoring", event_hash);
+        }
+    }
+}
+
 async fn ws_raw_handler(
     ws: WebSocketUpgrade,
     state: Arc<AppState>,
@@ -2470,13 +2572,21 @@ async fn handle_ws_raw(mut socket: WebSocket, state: Arc<AppState>) {
 
     loop {
         tokio::select! {
-            // Inbound: viewer might send pings or commands later. For
-            // now we just drain and discard; close on close-frame.
+            // Inbound: operator-plane commands per SPEC-R2-ROCKER-WIRE
+            // §2.1. Viewer hives emit r2.dash.cmd.* events as bare
+            // R2-WIRE compact bodies (no length prefix; WebSocket
+            // provides message boundaries). We decode, dispatch to the
+            // shared do_* core, and emit a r2.dash.cmd.response back
+            // on raw_frame_tx (broadcast to all viewers; correlated by
+            // req_id).
             inbound = socket.recv() => {
                 match inbound {
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Err(_)) => break,
-                    _ => {} // ignore other inbound messages for now
+                    Some(Ok(Message::Binary(bytes))) => {
+                        dispatch_cmd_frame(&state, &bytes).await;
+                    }
+                    _ => {} // text / ping / pong — ignore
                 }
             }
             // Outbound: a fresh raw frame from the TCP listener.
