@@ -397,6 +397,14 @@ persists across reboots:
 
 ### 5.4 Timestamp
 
+> **AMENDED BY [SPEC-R2-ROCKER-TIMESYNC](SPEC-R2-ROCKER-TIMESYNC.md)
+> §2.2**: post-Phase-5 firmware emits `ts_ms` as synchronised
+> deployment milliseconds (a 32-bit-wide window into the dashboard's
+> wall-clock-aligned timeline), not monotonic uptime. Per TIMESYNC
+> §2.5, SD-record semantics follow the post-amendment meaning. The
+> "monotonic uptime" description below is preserved for legacy
+> firmware that has not yet received `r2.dash.set_clock_offset`.
+
 `ts_ms` is a 32-bit monotonic uptime counter in milliseconds, captured
 at sample-read time using `esp_timer_get_time() / 1000`. Wraps every
 ~49 days; the dashboard's per-device offset (WIRE §7) accommodates wraps

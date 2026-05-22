@@ -357,6 +357,16 @@ impl Sender {
                 if let Some(delta_ms) = parse_set_clock_offset(payload) {
                     info!("[sender] r2.dash.set_clock_offset delta_ms={:+}", delta_ms);
                     self.clock.apply_delta(delta_ms);
+                    // Per SPEC-R2-ROCKER-TIMESYNC §2.3 step 4: emit a
+                    // fresh status frame within 200 ms so the dashboard
+                    // sees the corrected `ts_ms` and can short-circuit
+                    // its 1 s retry-after-no-confirmation policy.
+                    // Without this the next status frame waits up to
+                    // STATUS_PERIOD_MS = 2 s; closes 2026-05-18 audit
+                    // Finding G.
+                    if let Err(e) = self.send_status(stream) {
+                        warn!("[sender] post-offset status ack failed: {e}");
+                    }
                 } else {
                     warn!("[sender] malformed set_clock_offset payload");
                 }

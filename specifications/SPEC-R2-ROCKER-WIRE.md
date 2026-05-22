@@ -151,7 +151,7 @@ One frame per sample.
 | CBOR key | Type | Description |
 |---|---|---|
 | 0 | uint32 | `seq` — monotonic per device, increments by 1 per sample, persists across reboot |
-| 1 | uint32 | `ts_ms` — sensor uptime in milliseconds at the sample instant |
+| 1 | uint32 | `ts_ms` — sensor uptime in milliseconds at the sample instant *(AMENDED BY [SPEC-R2-ROCKER-TIMESYNC](SPEC-R2-ROCKER-TIMESYNC.md) §2.2: carries synchronised deployment milliseconds, not monotonic uptime)* |
 | 2 | int32 | `x` — 20-bit signed, sign-extended to i32, raw LSB (no scaling on the wire) |
 | 3 | int32 | `y` |
 | 4 | int32 | `z` |
@@ -200,8 +200,8 @@ state transitions.
 
 | CBOR key | Type | Description |
 |---|---|---|
-| 0 | uint8 | `state` — see §6 enum (Idle=0, Advertising=1, BleListening=2, WifiConnecting=3, Streaming=4, Calibrating=5, Error=6) |
-| 1 | uint32 | `uptime_ms` |
+| 0 | uint8 | `state` — see [SPEC-R2-ROCKER-SENSOR](SPEC-R2-ROCKER-SENSOR.md) §4.1.1 for the authoritative `state → u8` mapping (10-value enum; this row's earlier 7-value inline list was pre-Phase-5L). |
+| 1 | uint32 | `uptime_ms` *(AMENDED BY [SPEC-R2-ROCKER-TIMESYNC](SPEC-R2-ROCKER-TIMESYNC.md) §2.2: carries synchronised deployment milliseconds, not monotonic uptime)* |
 | 2 | uint32 | `samples_total` — total samples logged to SD (this run) |
 | 3 | uint32 | `samples_acked` — cumulative `seq` ACKed by dashboard |
 | 4 | uint8 | `sd_pct_used` — 0..100 |
@@ -232,7 +232,7 @@ offset estimation.
 | CBOR key | Type | Description |
 |---|---|---|
 | 0 | uint32 | `req_id` — echoed from `sync_pulse` |
-| 1 | uint32 | `sensor_ts_ms` — sensor's monotonic time at frame-receive instant |
+| 1 | uint32 | `sensor_ts_ms` — sensor's monotonic time at frame-receive instant *(AMENDED BY [SPEC-R2-ROCKER-TIMESYNC](SPEC-R2-ROCKER-TIMESYNC.md) §2.2: carries synchronised deployment milliseconds, not monotonic uptime)* |
 
 The dashboard computes `offset = dash_send_ts + (rtt / 2) − sensor_ts`
 once per round and exponentially smooths. See `SPEC-R2-ROCKER-DASHBOARD`
