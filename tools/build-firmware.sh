@@ -40,6 +40,66 @@ if [[ ! -f "${FW_DIR}/Cargo.toml" ]]; then
     exit 1
 fi
 
+# Trust-Group key guard. The firmware embeds trust_keys/tg_pub.bin
+# at compile time via include_bytes!. Two failure modes to catch
+# before kicking off a 30 s xtensa build:
+#
+#   1. No tg_pub.bin / tg_cert.bin at all — fresh clone, no deployment
+#      keys yet. The build would fail late with an include_bytes!
+#      error; we'd rather print actionable setup instructions early.
+#
+#   2. tg_pub.bin is the canonical upstream demo key. Identifiable
+#      by SHA-256 against a hash recorded under
+#      `trust_keys/.tg_pub_demo_sha256`. Building against this key
+#      means every lab that clones the public repo gets the same TG
+#      embedded, which only works for the one deployment that owns
+#      the matching tg_priv.bin. Per
+#      audits/2026-05-23-architectural-gaps.md (post-handoff
+#      recommendation), refuse this case so the new lab is forced
+#      to keygen first.
+TG_PUB="${REPO_ROOT}/trust_keys/tg_pub.bin"
+TG_CERT="${REPO_ROOT}/trust_keys/tg_cert.bin"
+KEYGEN_HINT=$(cat <<'EOF'
+This deployment has no Trust Group keys, or is still on the upstream
+demo keys. Each r2-rocker deployment needs its own keypair — sensors
+verify their certs against the public key baked into the firmware at
+build time, so cloning the repo and re-using the committed key would
+mean every lab shares a TG identity (whoever holds the matching
+private key is the only one who can sign certs).
+
+Generate a fresh TG keypair for this deployment (one-time per lab):
+
+    cd "$REPO_ROOT" && cargo run -p r2-rocker-tg --release -- init
+
+That writes:
+  trust_keys/tg_pub.bin            (committed; embedded into firmware)
+  trust_keys/tg_cert.bin           (committed; self-signed KeyHolder cert)
+  ~/.config/r2-rocker/tg_signer/tg_priv.bin   (off-tree; read by dashboard)
+
+After it completes, re-run this script. See SECRETS-POLICY.md for the
+full key-handling policy.
+EOF
+)
+
+if [[ ! -s "${TG_PUB}" || ! -s "${TG_CERT}" ]]; then
+    echo "ERROR: no Trust Group keys at trust_keys/tg_pub.bin (or tg_cert.bin)." >&2
+    echo "" >&2
+    echo "$KEYGEN_HINT" >&2
+    exit 1
+fi
+
+DEMO_HASH_FILE="${REPO_ROOT}/trust_keys/.tg_pub_demo_sha256"
+if [[ -s "${DEMO_HASH_FILE}" ]]; then
+    DEMO_HASH=$(cat "${DEMO_HASH_FILE}")
+    ACTUAL_HASH=$(sha256sum "${TG_PUB}" | awk '{print $1}')
+    if [[ "${ACTUAL_HASH}" == "${DEMO_HASH}" ]]; then
+        echo "ERROR: trust_keys/tg_pub.bin matches the upstream demo key SHA." >&2
+        echo "" >&2
+        echo "$KEYGEN_HINT" >&2
+        exit 1
+    fi
+fi
+
 # Pull in the ESP-IDF / xtensa toolchain if exported. Best-effort —
 # users in a fresh shell still need to source `~/export-esp.sh` first.
 if [[ -f "${HOME}/export-esp.sh" ]]; then

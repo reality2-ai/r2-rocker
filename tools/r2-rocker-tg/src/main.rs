@@ -33,6 +33,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// One-shot Trust Group setup for a new deployment.
+    ///
+    /// Generates a fresh keypair + self-signed cert and writes them to
+    /// the canonical paths:
+    ///   ~/.config/r2-rocker/tg_signer/tg_priv.bin   (mode 0600)
+    ///   trust_keys/tg_pub.bin                       (relative to cwd)
+    ///   trust_keys/tg_cert.bin                      (relative to cwd)
+    ///
+    /// Run this once per deployment from the repo root, before
+    /// building firmware. After running, `tools/build-firmware.sh`
+    /// will pick up the new TG public key via `include_bytes!`.
+    Init(InitArgs),
     /// Generate a fresh Ed25519 trust-group keypair, optionally with a self-signed cert.
     Keygen(KeygenArgs),
     /// Verify the signature in a cert file.
@@ -45,6 +57,18 @@ enum Commands {
         /// Path to the file (raw key or cert).
         path: PathBuf,
     },
+}
+
+#[derive(Args)]
+struct InitArgs {
+    /// TG name to embed in the self-signed cert. Defaults to
+    /// `rocker-rig-<YYYY-MM-DD>` if omitted.
+    #[arg(long)]
+    name: Option<String>,
+    /// Overwrite existing files. Without this, refuses if any of
+    /// tg_priv.bin / tg_pub.bin / tg_cert.bin already exists.
+    #[arg(long)]
+    force: bool,
 }
 
 #[derive(Args)]
@@ -69,10 +93,90 @@ struct KeygenArgs {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Commands::Init(args) => init(args),
         Commands::Keygen(args) => keygen(args),
         Commands::Verify { cert } => verify_cert(&cert),
         Commands::Inspect { path } => inspect(&path),
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// init — one-shot setup for a new deployment
+
+fn init(args: InitArgs) -> Result<()> {
+    // Default paths per SECRETS-POLICY.md §1.
+    let home = std::env::var("HOME").context("$HOME not set — required to resolve tg_priv.bin path")?;
+    let priv_path = PathBuf::from(&home).join(".config/r2-rocker/tg_signer/tg_priv.bin");
+    let pub_path = PathBuf::from("trust_keys/tg_pub.bin");
+    let cert_path = PathBuf::from("trust_keys/tg_cert.bin");
+
+    // Refuse early if cwd doesn't look like the repo root.
+    if !PathBuf::from("trust_keys").is_dir() {
+        bail!(
+            "trust_keys/ not found in current directory — run `r2-rocker-tg init` \
+             from the repo root (where trust_keys/ lives)"
+        );
+    }
+
+    // Default name: rocker-rig-YYYY-MM-DD. Stable enough to recognise
+    // later; doesn't leak any host-identifying info.
+    let name = args.name.unwrap_or_else(|| {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        // YYYY-MM-DD from unix seconds, UTC. Avoids pulling in chrono.
+        let days = now / 86_400;
+        let (y, m, d) = unix_days_to_ymd(days as i64);
+        format!("rocker-rig-{:04}-{:02}-{:02}", y, m, d)
+    });
+
+    eprintln!("r2-rocker-tg init — fresh Trust Group for this deployment");
+    eprintln!("  name:    {}", name);
+    eprintln!("  priv:    {}", priv_path.display());
+    eprintln!("  pub:     {}", pub_path.display());
+    eprintln!("  cert:    {}", cert_path.display());
+    eprintln!();
+
+    if let Some(parent) = priv_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+
+    keygen(KeygenArgs {
+        private: priv_path,
+        public: pub_path,
+        cert: Some(cert_path),
+        name: Some(name),
+        force: args.force,
+    })?;
+
+    eprintln!();
+    eprintln!("Done. The next firmware build (e.g. `tools/build-firmware.sh devkitc`)");
+    eprintln!("will embed the new tg_pub.bin via include_bytes!. The dashboard will");
+    eprintln!("pick up the new tg_priv.bin on its next start.");
+    eprintln!();
+    eprintln!("If this deployment had earlier sensors flashed with a different TG,");
+    eprintln!("re-flash them with firmware built from the new keys — their old certs");
+    eprintln!("won't verify under the new TG_PUB_KEY.");
+    Ok(())
+}
+
+/// Convert days-since-1970-01-01 to (year, month, day). Algorithm
+/// from "Hinnant's Date Algorithms" — handles all dates within
+/// i64 range, no chrono dependency.
+fn unix_days_to_ymd(z: i64) -> (i32, u8, u8) {
+    let z = z + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u8;
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u8;
+    let y = if m <= 2 { y + 1 } else { y };
+    (y as i32, m, d)
 }
 
 // ──────────────────────────────────────────────────────────────────────────

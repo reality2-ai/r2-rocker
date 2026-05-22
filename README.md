@@ -245,16 +245,23 @@ source ~/export-esp.sh
 # 3. One-time firmware build setup.
 ./tools/setup-firmware.sh
 
-# 4. Generate the cryptographic keys for your deployment. Run ONCE
-#    per rig. The private key MUST be stored outside the repo
-#    (e.g. an encrypted USB key); only the public key + cert get
-#    committed. See specifications/SECRETS-POLICY.md.
-cargo run -p r2-rocker-tg -- keygen \
-    --priv  ~/secure/tg_priv.bin \
-    --pub   trust_keys/tg_pub.bin \
-    --cert  trust_keys/tg_cert.bin \
-    --name  "my-rocker-rig"
+# 4. Generate the cryptographic keys for THIS deployment. Run ONCE
+#    per rig — your lab gets its own Trust Group. One command, no
+#    flags; defaults to:
+#      trust_keys/tg_pub.bin                      (committed, baked into firmware)
+#      trust_keys/tg_cert.bin                     (committed, self-signed)
+#      ~/.config/r2-rocker/tg_signer/tg_priv.bin  (off-tree; dashboard reads)
+cargo run -p r2-rocker-tg --release -- init
 ```
+
+> **Why step 4 matters:** the firmware embeds `trust_keys/tg_pub.bin`
+> via `include_bytes!` at compile time, so two deployments cannot
+> share keys unless they trust the same KeyHolder to sign each
+> other's sensors. The `build-firmware.sh` script refuses to build
+> if the keys are missing or still on the upstream demo key. If
+> you're not the original developer and you're seeing a "no Trust
+> Group keys" error from the build script, that's the prompt to
+> run step 4.
 
 ## Day-to-day operation
 
