@@ -54,6 +54,19 @@ const SENSOR_ANNOUNCE:     u32 = r2_fnv::fnv1a_32(b"r2.sensor.announce");
 // event — see SPEC-R2-ROCKER-VIEWER-SENTANT §6 outbound roadmap.
 const PEER_DISCONNECTED:   u32 = r2_fnv::fnv1a_32(b"r2.peer.disconnected");
 
+// Tracks B+C operator-plane status notifications. These wrap the
+// legacy `/ws/status` JSON messages of the same names (preserved
+// for one release for backward compat with un-upgraded browsers).
+// Each event is a CBOR map with small integer keys; the per-event
+// shape is documented at the encode helper. Hash names align with
+// SPEC-R2-ROCKER-BRIDGE.md §3.1 where applicable.
+const DASH_OTA_PROGRESS:       u32 = r2_fnv::fnv1a_32(b"r2.dash.ota.progress");
+const DASH_RESET_PROGRESS:     u32 = r2_fnv::fnv1a_32(b"r2.dash.reset.progress");
+const DASH_CAPTURE_PROGRESS:   u32 = r2_fnv::fnv1a_32(b"r2.dash.capture.progress");
+const DASH_ACCESS_EVENT:       u32 = r2_fnv::fnv1a_32(b"r2.dash.access.event");
+const DASH_BOOTSTRAP_PROGRESS: u32 = r2_fnv::fnv1a_32(b"r2.dash.bootstrap.progress");
+const DASH_DEVICE_ALIAS_CHANGED: u32 = r2_fnv::fnv1a_32(b"r2.dash.device.alias.changed");
+
 // Dashboard → sensor commands (SPEC-R2-ROCKER-WIRE §4 + SPEC-R2-ROCKER-TIMESYNC §4).
 const DASH_ACK:               u32 = r2_fnv::fnv1a_32(b"r2.dash.ack");
 const DASH_SYNC_PULSE:        u32 = r2_fnv::fnv1a_32(b"r2.dash.sync_pulse");
@@ -909,8 +922,7 @@ async fn bootstrap_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
         let mut log = state.bootstrap_log.lock().await;
         log.clear();
     }
-    let reset_msg = serde_json::json!({ "type": "bootstrap", "event": { "Reset": null } }).to_string();
-    let _ = state.ws_broadcast_tx.send(reset_msg);
+    emit_bootstrap_progress(&state, "Reset", None);
 
     let config = BootstrapConfig {
         ssid: None,
@@ -935,17 +947,18 @@ async fn bootstrap_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
     };
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<BootstrapEvent>(64);
-    let ws_tx = state.ws_broadcast_tx.clone();
+    let state_for_relay = state.clone();
     let log_store = state.bootstrap_log.clone();
     let running_flag = state.bootstrap_running.clone();
 
     // Spawn the event relay task
     tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
-            // Build WS message
+            // Build WS message — preserved for the legacy /ws/status
+            // JSON path (one release for backward compat).
             let ws_msg = serde_json::json!({
                 "type": "bootstrap",
-                "event": event,
+                "event": &event,
             });
             let json_str = serde_json::to_string(&ws_msg).unwrap_or_default();
 
@@ -955,8 +968,14 @@ async fn bootstrap_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
                 log.push(json_str.clone());
             }
 
-            // Broadcast to all WS clients
-            let _ = ws_tx.send(json_str);
+            // Legacy + R2-WIRE broadcasts. The structured `event` shape
+            // (serde-tagged "kind"/"data" per BootstrapEvent) stays in
+            // the JSON path; the R2-WIRE event carries the flattened
+            // (kind, data-as-text) form so the rocker hive can consume
+            // it without ad-hoc nested-decoder.
+            let _ = state_for_relay.ws_broadcast_tx.send(json_str);
+            let (kind, data) = bootstrap_event_to_pair(&event);
+            emit_bootstrap_progress(&state_for_relay, kind, data.as_deref());
         }
 
         running_flag.store(false, Ordering::SeqCst);
@@ -1003,12 +1022,7 @@ async fn ota_push_handler(
     }
 
     eprintln!("[ota] push to {} ({} bytes)", ota_target, body.len());
-    let _ = state.ws_broadcast_tx.send(serde_json::json!({
-        "type": "ota",
-        "phase": "uploading",
-        "target": ota_target,
-        "size": body.len(),
-    }).to_string());
+    emit_ota_progress(&state, "uploading", &ota_target, Some(body.len()), None);
 
     // Resolve so DNS errors fail fast (we expect numeric IPs but be safe).
     let socket = match ota_target.to_socket_addrs() {
@@ -1037,12 +1051,7 @@ async fn ota_push_handler(
         Ok(Ok((status_byte, msg))) => {
             let ok = status_byte == 0x00; // STATUS_OK in r2-esp::ota_tcp
             let phase = if ok { "applied" } else { "rejected" };
-            let _ = state.ws_broadcast_tx.send(serde_json::json!({
-                "type": "ota",
-                "phase": phase,
-                "target": ota_target,
-                "message": msg,
-            }).to_string());
+            emit_ota_progress(&state, phase, &ota_target, None, Some(&msg));
             (
                 axum::http::StatusCode::OK,
                 Json(serde_json::json!({
@@ -1061,12 +1070,7 @@ async fn ota_push_handler(
 
 fn ota_err(state: &Arc<AppState>, target: &str, msg: &str) -> (axum::http::StatusCode, Json<serde_json::Value>) {
     eprintln!("[ota] {} — {}", target, msg);
-    let _ = state.ws_broadcast_tx.send(serde_json::json!({
-        "type": "ota",
-        "phase": "error",
-        "target": target,
-        "message": msg,
-    }).to_string());
+    emit_ota_progress(state, "error", target, None, Some(msg));
     (
         axum::http::StatusCode::BAD_GATEWAY,
         Json(serde_json::json!({"ok": false, "error": msg})),
@@ -1137,11 +1141,7 @@ async fn reset_push_handler(
     let reset_target = format!("{}:21044", ip_only);
 
     eprintln!("[reset] push to {}", reset_target);
-    let _ = state.ws_broadcast_tx.send(serde_json::json!({
-        "type": "reset",
-        "phase": "requested",
-        "target": reset_target,
-    }).to_string());
+    emit_reset_progress(&state, "requested", &reset_target, None);
 
     let socket = match reset_target.to_socket_addrs() {
         Ok(mut it) => match it.next() {
@@ -1162,12 +1162,7 @@ async fn reset_push_handler(
         Ok(Ok((status_byte, msg))) => {
             let ok = status_byte == 0x00; // STATUS_OK in r2-esp::reset_tcp
             let phase = if ok { "applied" } else { "error" };
-            let _ = state.ws_broadcast_tx.send(serde_json::json!({
-                "type": "reset",
-                "phase": phase,
-                "target": reset_target,
-                "message": msg,
-            }).to_string());
+            emit_reset_progress(&state, phase, &reset_target, Some(&msg));
             (
                 axum::http::StatusCode::OK,
                 Json(serde_json::json!({
@@ -1184,12 +1179,7 @@ async fn reset_push_handler(
 
 fn reset_err(state: &Arc<AppState>, target: &str, msg: &str) -> (axum::http::StatusCode, Json<serde_json::Value>) {
     eprintln!("[reset] {} — {}", target, msg);
-    let _ = state.ws_broadcast_tx.send(serde_json::json!({
-        "type": "reset",
-        "phase": "error",
-        "target": target,
-        "message": msg,
-    }).to_string());
+    emit_reset_progress(state, "error", target, Some(msg));
     (
         axum::http::StatusCode::BAD_GATEWAY,
         Json(serde_json::json!({"ok": false, "error": msg})),
@@ -1798,6 +1788,256 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
         "addr": addr_str,
     }).to_string();
     let _ = state.ws_broadcast_tx.send(msg);
+}
+
+/// Broadcast a target-scoped progress notification to viewers — the
+/// shared shape behind OTA / reset / capture status events. Tracks
+/// B+C migration. Legacy JSON kept one release.
+///
+/// CBOR payload: `{0: target (text), 1: phase (text),
+///                 2: size (uint, optional), 3: message (text, optional)}`.
+fn emit_target_progress(
+    state: &Arc<AppState>,
+    event_hash: u32,
+    legacy_json_type: &str,
+    phase: &str,
+    target: &str,
+    size: Option<usize>,
+    message: Option<&str>,
+) {
+    // Legacy JSON (preserved one release for old browsers).
+    let mut json = serde_json::json!({
+        "type": legacy_json_type,
+        "phase": phase,
+        "target": target,
+    });
+    if let Some(s) = size { json["size"] = serde_json::json!(s); }
+    if let Some(m) = message { json["message"] = serde_json::json!(m); }
+    let _ = state.ws_broadcast_tx.send(json.to_string());
+
+    // R2-WIRE event on /ws/raw — picked up by the rocker viewer hive.
+    let mut buf = vec![0u8; 64 + target.len() + phase.len() + message.map(|m| m.len()).unwrap_or(0)];
+    let mut enc = r2_cbor::Encoder::new(&mut buf);
+    let n_keys = 2 + size.is_some() as usize + message.is_some() as usize;
+    let _ = enc.map(n_keys);
+    let _ = enc.kv(0, &r2_cbor::Value::Text(target));
+    let _ = enc.kv(1, &r2_cbor::Value::Text(phase));
+    if let Some(s) = size { let _ = enc.kv(2, &r2_cbor::Value::UInt(s as u64)); }
+    if let Some(m) = message { let _ = enc.kv(3, &r2_cbor::Value::Text(m)); }
+    let used = enc.len();
+    buf.truncate(used);
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let frame = build_dash_frame(event_hash, 0, &buf);
+    let _ = state.raw_frame_tx.send(RawFrame {
+        src: target.to_string(),
+        ts_ms: now_ms,
+        frame,
+    });
+}
+
+fn emit_ota_progress(
+    state: &Arc<AppState>,
+    phase: &str,
+    target: &str,
+    size: Option<usize>,
+    message: Option<&str>,
+) {
+    emit_target_progress(state, DASH_OTA_PROGRESS, "ota", phase, target, size, message);
+}
+
+fn emit_reset_progress(
+    state: &Arc<AppState>,
+    phase: &str,
+    target: &str,
+    message: Option<&str>,
+) {
+    emit_target_progress(state, DASH_RESET_PROGRESS, "reset", phase, target, None, message);
+}
+
+/// Capture-state progress event (fleet-scoped, not per-sensor like the
+/// reset/OTA ones). CBOR payload:
+///   `{0: phase (text), 1: peers (uint), 2: name (text, optional),
+///     3: prefix (text, optional), 4: ts_ms (uint, optional)}`.
+fn emit_capture_progress(
+    state: &Arc<AppState>,
+    phase: &str,
+    peers: usize,
+    name: Option<&str>,
+    prefix: Option<&str>,
+    ts_ms: Option<i64>,
+) {
+    // Legacy JSON.
+    let mut json = serde_json::json!({
+        "type": "capture",
+        "phase": phase,
+        "peers": peers,
+    });
+    if let Some(n) = name { json["name"] = serde_json::json!(n); }
+    if let Some(p) = prefix { json["prefix"] = serde_json::json!(p); }
+    if let Some(t) = ts_ms { json["ts_ms"] = serde_json::json!(t); }
+    let _ = state.ws_broadcast_tx.send(json.to_string());
+
+    // R2-WIRE event.
+    let mut buf = vec![0u8; 64 + phase.len() + name.map(|s| s.len()).unwrap_or(0) + prefix.map(|s| s.len()).unwrap_or(0)];
+    let mut enc = r2_cbor::Encoder::new(&mut buf);
+    let n_keys = 2 + name.is_some() as usize + prefix.is_some() as usize + ts_ms.is_some() as usize;
+    let _ = enc.map(n_keys);
+    let _ = enc.kv(0, &r2_cbor::Value::Text(phase));
+    let _ = enc.kv(1, &r2_cbor::Value::UInt(peers as u64));
+    if let Some(n) = name   { let _ = enc.kv(2, &r2_cbor::Value::Text(n)); }
+    if let Some(p) = prefix { let _ = enc.kv(3, &r2_cbor::Value::Text(p)); }
+    if let Some(t) = ts_ms  { let _ = enc.kv(4, &r2_cbor::Value::UInt(t as u64)); }
+    let used = enc.len();
+    buf.truncate(used);
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let frame = build_dash_frame(DASH_CAPTURE_PROGRESS, 0, &buf);
+    let _ = state.raw_frame_tx.send(RawFrame {
+        src: "dash".to_string(),
+        ts_ms: now_ms,
+        frame,
+    });
+}
+
+/// Access-event broadcast — payload mirrors the JSON shape that
+/// `request_pending` / `request_approved` / `request_denied` /
+/// `revoked` send today. CBOR payload:
+///   `{0: subtype (text), 1: device_pk (text),
+///     2: name (text, optional), 3: hint (text, optional)}`.
+fn emit_access_event(
+    state: &Arc<AppState>,
+    subtype: &str,
+    device_pk: &str,
+    name: Option<&str>,
+    hint: Option<&str>,
+) {
+    // Legacy JSON.
+    let mut json = serde_json::json!({
+        "type": "access",
+        "event": subtype,
+        "device_pk": device_pk,
+    });
+    if let Some(n) = name { json["name"] = serde_json::json!(n); }
+    if let Some(h) = hint { json["hint"] = serde_json::json!(h); }
+    let _ = state.ws_broadcast_tx.send(json.to_string());
+
+    let mut buf = vec![0u8; 64 + subtype.len() + device_pk.len()
+        + name.map(|s| s.len()).unwrap_or(0)
+        + hint.map(|s| s.len()).unwrap_or(0)];
+    let mut enc = r2_cbor::Encoder::new(&mut buf);
+    let n_keys = 2 + name.is_some() as usize + hint.is_some() as usize;
+    let _ = enc.map(n_keys);
+    let _ = enc.kv(0, &r2_cbor::Value::Text(subtype));
+    let _ = enc.kv(1, &r2_cbor::Value::Text(device_pk));
+    if let Some(n) = name { let _ = enc.kv(2, &r2_cbor::Value::Text(n)); }
+    if let Some(h) = hint { let _ = enc.kv(3, &r2_cbor::Value::Text(h)); }
+    let used = enc.len();
+    buf.truncate(used);
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let frame = build_dash_frame(DASH_ACCESS_EVENT, 0, &buf);
+    let _ = state.raw_frame_tx.send(RawFrame {
+        src: "dash".to_string(),
+        ts_ms: now_ms,
+        frame,
+    });
+}
+
+/// Device-alias change broadcast. CBOR payload:
+///   `{0: device_pk (text), 1: name (text)}` — empty name means alias cleared.
+fn emit_device_alias_changed(state: &Arc<AppState>, device_pk: &str, name: &str) {
+    let _ = state.ws_broadcast_tx.send(serde_json::json!({
+        "type": "device_alias",
+        "device_pk": device_pk,
+        "name": name,
+    }).to_string());
+
+    let mut buf = vec![0u8; 32 + device_pk.len() + name.len()];
+    let mut enc = r2_cbor::Encoder::new(&mut buf);
+    let _ = enc.map(2);
+    let _ = enc.kv(0, &r2_cbor::Value::Text(device_pk));
+    let _ = enc.kv(1, &r2_cbor::Value::Text(name));
+    let used = enc.len();
+    buf.truncate(used);
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let frame = build_dash_frame(DASH_DEVICE_ALIAS_CHANGED, 0, &buf);
+    let _ = state.raw_frame_tx.send(RawFrame {
+        src: "dash".to_string(),
+        ts_ms: now_ms,
+        frame,
+    });
+}
+
+/// Bootstrap progress — the shape is `{"event": ...}` with a nested
+/// kind/data pair. R2-WIRE payload encodes it as
+///   `{0: kind (text), 1: data (text, optional)}` where kind is one of
+///   "Reset", "Log", "SensorFound", "SensorConnected", "Done", "Error".
+fn emit_bootstrap_progress(state: &Arc<AppState>, kind: &str, data: Option<&str>) {
+    // Legacy JSON (matches existing webapp handler shape).
+    let legacy = if kind == "Reset" {
+        serde_json::json!({ "type": "bootstrap", "event": { "Reset": null } })
+    } else if let Some(d) = data {
+        serde_json::json!({ "type": "bootstrap", "event": { "kind": kind, "data": d } })
+    } else {
+        serde_json::json!({ "type": "bootstrap", "event": { "kind": kind } })
+    };
+    let _ = state.ws_broadcast_tx.send(legacy.to_string());
+
+    let mut buf = vec![0u8; 64 + kind.len() + data.map(|s| s.len()).unwrap_or(0)];
+    let mut enc = r2_cbor::Encoder::new(&mut buf);
+    let n_keys = 1 + data.is_some() as usize;
+    let _ = enc.map(n_keys);
+    let _ = enc.kv(0, &r2_cbor::Value::Text(kind));
+    if let Some(d) = data { let _ = enc.kv(1, &r2_cbor::Value::Text(d)); }
+    let used = enc.len();
+    buf.truncate(used);
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let frame = build_dash_frame(DASH_BOOTSTRAP_PROGRESS, 0, &buf);
+    let _ = state.raw_frame_tx.send(RawFrame {
+        src: "dash".to_string(),
+        ts_ms: now_ms,
+        frame,
+    });
+}
+
+/// Map a BootstrapEvent enum variant to a flat (kind, data) pair for
+/// the R2-WIRE `r2.dash.bootstrap.progress` event. The data string is
+/// a human-readable summary; structured consumers should rely on the
+/// legacy /ws/status JSON path (which keeps the serde-tagged
+/// "kind"/"data" object) until Tracks B+C lands the second-pass
+/// migration that gives each variant its own R2 event.
+fn bootstrap_event_to_pair(ev: &BootstrapEvent) -> (&'static str, Option<String>) {
+    match ev {
+        BootstrapEvent::Log(s) => ("Log", Some(s.clone())),
+        BootstrapEvent::SensorFound { addr, name } => (
+            "SensorFound",
+            Some(format!("{} {}", addr, name)),
+        ),
+        BootstrapEvent::SensorConnected { addr, name, ip } => (
+            "SensorConnected",
+            Some(format!("{} {} {}", addr, name, ip)),
+        ),
+        BootstrapEvent::Done { count } => ("Done", Some(count.to_string())),
+        BootstrapEvent::Error(s) => ("Error", Some(s.clone())),
+    }
 }
 
 /// Encode the `r2.peer.disconnected` payload per BRIDGE §3.1:
@@ -2757,11 +2997,7 @@ async fn capture_start_handler(
 
     let payload = encode_empty_map();
     let sent = fan_out_dash_frame(&state, DASH_CAPTURE_START, 0x0001, payload).await;
-    let _ = state.ws_broadcast_tx.send(serde_json::json!({
-        "type": "capture",
-        "phase": "start",
-        "peers": sent,
-    }).to_string());
+    emit_capture_progress(&state, "start", sent, None, None, None);
     (axum::http::StatusCode::OK, Json(serde_json::json!({"ok": true, "peers": sent})))
 }
 
@@ -2795,14 +3031,7 @@ async fn capture_mark_handler(
     let ts_ms = dash_wall_ms() as i64;
     let payload = encode_capture_mark(ts_ms, &body.name, body.prefix.as_deref());
     let sent = fan_out_dash_frame(&state, DASH_CAPTURE_MARK, 0x0002, payload).await;
-    let _ = state.ws_broadcast_tx.send(serde_json::json!({
-        "type": "capture",
-        "phase": "mark",
-        "name": body.name,
-        "prefix": body.prefix,
-        "ts_ms": ts_ms,
-        "peers": sent,
-    }).to_string());
+    emit_capture_progress(&state, "mark", sent, Some(&body.name), body.prefix.as_deref(), Some(ts_ms));
     (axum::http::StatusCode::OK, Json(serde_json::json!({
         "ok": true,
         "ts_ms": ts_ms,
@@ -2818,11 +3047,7 @@ async fn capture_stop_handler(
 ) -> impl IntoResponse {
     let payload = encode_empty_map();
     let sent = fan_out_dash_frame(&state, DASH_CAPTURE_STOP, 0x0003, payload).await;
-    let _ = state.ws_broadcast_tx.send(serde_json::json!({
-        "type": "capture",
-        "phase": "stop",
-        "peers": sent,
-    }).to_string());
+    emit_capture_progress(&state, "stop", sent, None, None, None);
     (axum::http::StatusCode::OK, Json(serde_json::json!({"ok": true, "peers": sent})))
 }
 
@@ -3306,13 +3531,10 @@ async fn device_alias_set_handler(
         map_snapshot = g.clone();
     }
     save_device_aliases(&map_snapshot);
-    // Broadcast to /ws/status so every dashboard browser updates in
-    // place — no full reload needed.
-    let _ = state.ws_broadcast_tx.send(serde_json::json!({
-        "type": "device_alias",
-        "device_pk": device_pk,
-        "name": map_snapshot.get(&device_pk).cloned().unwrap_or_default(),
-    }).to_string());
+    // Broadcast so every dashboard browser updates in place — no
+    // full reload needed.
+    let name = map_snapshot.get(&device_pk).cloned().unwrap_or_default();
+    emit_device_alias_changed(&state, &device_pk, &name);
     (axum::http::StatusCode::OK, Json(serde_json::json!({"ok": true})))
 }
 
@@ -3545,12 +3767,7 @@ async fn access_revoke_handler(
             // that lands with the v1 cert-handshake variant; for v0.1
             // the broadcast + future-connection-rejection is the
             // operative guarantee.
-            let _ = state.ws_broadcast_tx.send(serde_json::json!({
-                "type": "access",
-                "event": "revoked",
-                "device_pk": hex::encode(&pk[..]),
-                "revoked_at_ms": now_ms,
-            }).to_string());
+            emit_access_event(&state, "revoked", &hex::encode(&pk[..]), None, None);
             (axum::http::StatusCode::OK, Json(serde_json::json!({
                 "ok": true,
                 "revoked_at_ms": now_ms,
@@ -3595,13 +3812,7 @@ async fn access_request_handler(
         Submitted(pk) => {
             // Operator-side notification — picked up by the Link tab's
             // /ws/status hook to show the pending row.
-            let _ = state.ws_broadcast_tx.send(serde_json::json!({
-                "type": "access",
-                "event": "request_pending",
-                "device_pk": hex::encode(&pk[..]),
-                "name": body.name,
-                "hint": hint,
-            }).to_string());
+            emit_access_event(&state, "request_pending", &hex::encode(&pk[..]), Some(&body.name), Some(&hint));
             (axum::http::StatusCode::OK, Json(serde_json::json!({
                 "ok": true,
                 "device_pk": hex::encode(&pk[..]),
@@ -3696,11 +3907,7 @@ async fn access_approve_handler(
             let pk_hex = hex::encode(&pk[..]);
             // Operator-side: the row disappears from "pending". The
             // device polling /check will pick up the bundle next.
-            let _ = state.ws_broadcast_tx.send(serde_json::json!({
-                "type": "access",
-                "event": "request_approved",
-                "device_pk": pk_hex.clone(),
-            }).to_string());
+            emit_access_event(&state, "request_approved", &pk_hex, None, None);
             // Relay-side: build a notekeeper-format JOIN_RESPONSE
             // binary frame and push it onto the relay's outbound
             // channel. Off-network viewers receive it as a raw
@@ -3766,11 +3973,7 @@ async fn access_deny_handler(
     match outcome {
         Denied(pk) => {
             let pk_hex = hex::encode(&pk[..]);
-            let _ = state.ws_broadcast_tx.send(serde_json::json!({
-                "type": "access",
-                "event": "request_denied",
-                "device_pk": pk_hex.clone(),
-            }).to_string());
+            emit_access_event(&state, "request_denied", &pk_hex, None, None);
             (axum::http::StatusCode::OK, Json(serde_json::json!({
                 "ok": true,
                 "device_pk": pk_hex,

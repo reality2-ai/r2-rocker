@@ -114,6 +114,12 @@ multi-sensor receive path on dashboard port 21042.
 | 20 | `r2.sensor.capture.state` | sensor → dash | `{0: u8 state, 1: str? file}` — state ∈ {0=idle, 1=calibrating, 2=recording} |
 | 21 | `r2.dash.enrol` | dash → sensor | Deliver a KeyHolder-signed `DeviceCertificate` over L2CAP CoC during BLE bootstrap, before `#wifi_offer`. See SPEC-R2-ROCKER-SENSOR §3.5. Payload is the 147-byte serialised cert. One-shot per device. |
 | 22 | `r2.peer.disconnected` | dash → viewer | Controller-synthesised on TCP close / read timeout. Payload `{0: addr (text), 1: ts_ms (uint), 2: reason (text), 3: device_pk_hex (text, optional)}` per BRIDGE §3.1 + rocker ext. First migrated status notification (Tracks B+C); legacy `/ws/status type=peer_disconnected` JSON message is preserved for one release. |
+| 23 | `r2.dash.ota.progress` | dash → viewer | OTA push lifecycle. Payload `{0: target (text), 1: phase (text — "uploading"\|"applied"\|"rejected"\|"error"), 2: size (uint, optional), 3: message (text, optional)}`. Replaces legacy `/ws/status type=ota`. |
+| 24 | `r2.dash.reset.progress` | dash → viewer | Sensor-reset lifecycle. Payload `{0: target (text), 1: phase (text — "requested"\|"applied"\|"error"), 3: message (text, optional)}`. Replaces legacy `/ws/status type=reset`. |
+| 25 | `r2.dash.capture.progress` | dash → viewer | Capture-state lifecycle. Payload `{0: phase (text — "start"\|"mark"\|"stop"), 1: peers (uint), 2: name (text, optional), 3: prefix (text, optional), 4: ts_ms (uint, optional)}`. Replaces legacy `/ws/status type=capture`. |
+| 26 | `r2.dash.access.event` | dash → viewer | Access-flow events. Payload `{0: subtype (text — "request_pending"\|"request_approved"\|"request_denied"\|"revoked"), 1: device_pk (text), 2: name (text, optional), 3: hint (text, optional)}`. Replaces legacy `/ws/status type=access`. |
+| 27 | `r2.dash.bootstrap.progress` | dash → viewer | BLE-bootstrap discovery progress. Payload `{0: kind (text — "Reset"\|"Log"\|"SensorFound"\|"SensorConnected"\|"Done"\|"Error"), 1: data (text, optional)}`. Replaces legacy `/ws/status type=bootstrap`. |
+| 28 | `r2.dash.device.alias.changed` | dash → viewer | Operator renamed a sensor. Payload `{0: device_pk (text), 1: name (text — empty string means alias cleared)}`. Replaces legacy `/ws/status type=device_alias`. |
 
 Implementations MUST treat unknown event hashes as receivable but
 non-actionable — log them and move on; never close the connection over

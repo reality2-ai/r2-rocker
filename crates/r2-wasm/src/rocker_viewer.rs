@@ -49,6 +49,19 @@ const EVT_SENSOR_CAPTURE_STATE: EventHash = r2_fnv::fnv1a_32(b"r2.sensor.capture
 /// Payload: `{0: addr (text), 1: ts_ms (uint), 2: reason (text)}`.
 const EVT_PEER_DISCONNECTED:    EventHash = r2_fnv::fnv1a_32(b"r2.peer.disconnected");
 
+// Tracks B+C operator-plane status notifications (the 6 sibling
+// events to peer.disconnected). v0.1 of this sentant subscribes to
+// them so peek_state's `event_count` reflects them; future slices
+// will surface them via dedicated state fields or callbacks. The
+// hashes are also documented in `dashboard/src/main.rs` constants
+// and SPEC-R2-ROCKER-WIRE §2.
+const EVT_DASH_OTA_PROGRESS:        EventHash = r2_fnv::fnv1a_32(b"r2.dash.ota.progress");
+const EVT_DASH_RESET_PROGRESS:      EventHash = r2_fnv::fnv1a_32(b"r2.dash.reset.progress");
+const EVT_DASH_CAPTURE_PROGRESS:    EventHash = r2_fnv::fnv1a_32(b"r2.dash.capture.progress");
+const EVT_DASH_ACCESS_EVENT:        EventHash = r2_fnv::fnv1a_32(b"r2.dash.access.event");
+const EVT_DASH_BOOTSTRAP_PROGRESS:  EventHash = r2_fnv::fnv1a_32(b"r2.dash.bootstrap.progress");
+const EVT_DASH_DEVICE_ALIAS_CHANGED: EventHash = r2_fnv::fnv1a_32(b"r2.dash.device.alias.changed");
+
 const CLASS_HASH: EventHash = r2_fnv::fnv1a_32(b"nz.ac.auckland.rocker.viewer");
 
 const SUBSCRIPTIONS: &[u32] = &[
@@ -58,6 +71,12 @@ const SUBSCRIPTIONS: &[u32] = &[
     EVT_SENSOR_STATUS,
     EVT_SENSOR_CAPTURE_STATE,
     EVT_PEER_DISCONNECTED,
+    EVT_DASH_OTA_PROGRESS,
+    EVT_DASH_RESET_PROGRESS,
+    EVT_DASH_CAPTURE_PROGRESS,
+    EVT_DASH_ACCESS_EVENT,
+    EVT_DASH_BOOTSTRAP_PROGRESS,
+    EVT_DASH_DEVICE_ALIAS_CHANGED,
 ];
 
 /// Per-sensor record. Mirrors the JS-side state in `webapp/index.html`

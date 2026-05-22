@@ -92,10 +92,25 @@ the dotted names per SPEC-R2-ROCKER-WIRE §2.
 | `r2.sensor.status` | sensor → controller → viewer | Update fsm_state. |
 | `r2.sensor.capture.state` | sensor → controller → viewer | Update capture_state (0=idle, 1=calibrating, 2=recording) + capture_file. |
 | `r2.peer.disconnected` | controller → viewer (controller-synthesised) | Drop the sensor from the snapshot. Lookup is by `device_pk_hex` (key 3); when absent the event is informational only. First migrated status notification under Tracks B+C — legacy `/ws/status type=peer_disconnected` JSON stays alive for one release for backward compat. |
+| `r2.dash.ota.progress` | controller → viewer | OTA push lifecycle (uploading / applied / rejected / error). v0.1 of this sentant subscribes for `event_count` bookkeeping only; UI continues to render from the parallel `/ws/status type=ota` JSON message in this release. Per SPEC-R2-ROCKER-WIRE row 23. |
+| `r2.dash.reset.progress` | controller → viewer | Sensor-reset lifecycle (requested / applied / error). v0.1 bookkeeping-only; UI rendering follows legacy JSON for one release. Per SPEC-R2-ROCKER-WIRE row 24. |
+| `r2.dash.capture.progress` | controller → viewer | Capture lifecycle (start / mark / stop) — distinct from the per-sensor `r2.sensor.capture.state`; this event carries the controller's aggregate count of acknowledging peers. v0.1 bookkeeping-only. Per SPEC-R2-ROCKER-WIRE row 25. |
+| `r2.dash.access.event` | controller → viewer | Access-flow notifications (request_pending / request_approved / request_denied / revoked). v0.1 bookkeeping-only. Per SPEC-R2-ROCKER-WIRE row 26. |
+| `r2.dash.bootstrap.progress` | controller → viewer | BLE bootstrap progress events (Reset / Log / SensorFound / SensorConnected / Done / Error — flattened from the structured BootstrapEvent). v0.1 bookkeeping-only. Per SPEC-R2-ROCKER-WIRE row 27. |
+| `r2.dash.device.alias.changed` | controller → viewer | Operator-set sensor alias updated. v0.1 bookkeeping-only; alias is also carried in the next `r2.sensor.announce` cycle so per-sensor state stays consistent. Per SPEC-R2-ROCKER-WIRE row 28. |
 
 Implementations **SHOULD** ignore unknown event hashes silently
 (per the bus's default dispatch). Adding new sensor events later
 SHALL be additive.
+
+Note on the v0.1 "bookkeeping-only" status of the six
+`r2.dash.*` events: subscribing now ensures the sentant's
+`event_count` is the canonical counter and prevents a future
+slice (UI rendering migration) from needing to revisit the
+subscription list. The actual UI continues to render from the
+legacy `/ws/status` JSON channel until the webapp is migrated to
+read state from `peek_state()` (Track D follow-up, separate
+commit).
 
 ---
 
