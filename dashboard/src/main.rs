@@ -250,6 +250,13 @@ struct SensorPeer {
     /// or `boot_ts_ms` because the announce only fires on TCP
     /// (re)connect, which already happened before the viewer arrived.
     last_announce: Option<Vec<u8>>,
+    /// Most-recent `r2.sensor.capture.state` raw frame, cached for the
+    /// same reason: capture.state only fires on transitions
+    /// (start/mark/stop), so a viewer that hard-refreshes mid-recording
+    /// would see the Run-Control buttons reset to the IDLE defaults.
+    /// Replaying the cached state on /ws/raw open re-syncs the UI
+    /// without needing a round-trip to the sensor.
+    last_capture_state: Option<Vec<u8>>,
     /// Per-peer time-sync state per SPEC-R2-ROCKER-TIMESYNC §3.
     /// Updated by both the sync_pulse-sender task and the sync_pong
     /// handler in the read loop, hence Mutex-wrapped.
@@ -767,8 +774,6 @@ async fn main() {
         // KeyHolder-only routes (invite, members, revoke) are gated by
         // a localhost check in v0.1 per §11.1 (2); claim is public
         // because the token IS the auth.
-        .route("/api/access/invite", post(access_invite_handler))
-        .route("/api/access/claim", post(access_claim_handler))
         .route("/api/access/members", get(access_members_handler))
         .route("/api/access/revoke/{device_pk}", post(access_revoke_handler))
         // Request → approve flow (v0.1.1, the "calm-tech" enrolment
@@ -781,6 +786,13 @@ async fn main() {
         .route("/api/access/pending",     get(access_pending_handler))
         .route("/api/access/approve/{device_pk}", post(access_approve_handler))
         .route("/api/access/deny/{device_pk}",    post(access_deny_handler))
+        // ACCESS v0.3 §8 — operator-only helper that returns the
+        // pair of QR payloads for the "Onboard a visitor" modal.
+        .route("/api/access/onboard",     get(access_onboard_handler))
+        // Self-heal: a paired viewer calls this on every load with
+        // its own device_pk to confirm it's still a known member.
+        // 404 → stale cert → webapp wipes IndexedDB and re-prompts.
+        .route("/api/access/whoami/{device_pk}", get(access_whoami_handler))
         // Legacy stubs from before the ACCESS spec landed — still
         // marked DEPRECATED in SPEC-R2-ROCKER-DASHBOARD §5.1.
         .route("/api/enrol-init", post(enrol_init_handler))
@@ -1308,6 +1320,7 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
             name: None,
             device_pk: None,
             last_announce: None,
+            last_capture_state: None,
             sync: sync_state.clone(),
         });
     }
@@ -1475,6 +1488,19 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
                             // inner records to pick up the LAST seq. v0.1
                             // sensors don't emit batches yet (catch-up
                             // mode is deferred); leave a TODO once they do.
+                        }
+
+                        // Cache the latest capture.state per peer so a
+                        // viewer that connects (or hard-refreshes) mid-
+                        // recording can have its Run-Control buttons re-sync
+                        // to the actual sensor state without waiting for the
+                        // next start/mark/stop transition (sensors only emit
+                        // capture.state on transitions, not periodically).
+                        if event_hash == Some(SENSOR_CAPTURE_STATE) {
+                            let mut peers = read_state.peers.write().await;
+                            if let Some(peer) = peers.get_mut(&addr) {
+                                peer.last_capture_state = Some(frame.clone());
+                            }
                         }
 
                         // SPEC-R2-ROCKER-TIMESYNC §3 — handle sync_pong inline,
@@ -1966,6 +1992,19 @@ async fn handle_ws_raw(mut socket: WebSocket, state: Arc<AppState>) {
         let peers = state.peers.read().await;
         for (addr, peer) in peers.iter() {
             if let Some(ref frame) = peer.last_announce {
+                let envelope = encode_raw_frame_envelope(&RawFrame {
+                    src: addr.to_string(),
+                    ts_ms: now_ms,
+                    frame: frame.clone(),
+                });
+                if socket.send(Message::Binary(envelope.into())).await.is_err() {
+                    return;
+                }
+            }
+            // Replay the last capture.state too so the Run-Control bar
+            // reflects the actual recording state, not the IDLE default,
+            // when the operator refreshes mid-session.
+            if let Some(ref frame) = peer.last_capture_state {
                 let envelope = encode_raw_frame_envelope(&RawFrame {
                     src: addr.to_string(),
                     ts_ms: now_ms,
@@ -3210,7 +3249,37 @@ fn is_keyholder(connect: SocketAddr) -> bool {
     connect.ip().is_loopback()
 }
 
-async fn access_invite_handler(
+async fn access_whoami_handler(
+    State(state): State<Arc<AppState>>,
+    Path(device_pk): Path<String>,
+) -> impl IntoResponse {
+    let handle = match require_access(&state).await {
+        Ok(h) => h,
+        Err(r) => return r,
+    };
+    let access = handle.lock().await;
+    match access.lookup_member(&device_pk) {
+        Some(row) => (
+            axum::http::StatusCode::OK,
+            Json(serde_json::json!({
+                "enrolled": !row.revoked,
+                "revoked":  row.revoked,
+                "name":     row.name,
+                "role":     row.role,
+                "paired_at_ms": row.paired_at_ms,
+            })),
+        ).into_response(),
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "enrolled": false,
+                "error":    "no such member",
+            })),
+        ).into_response(),
+    }
+}
+
+async fn access_onboard_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
     headers: axum::http::HeaderMap,
@@ -3223,76 +3292,20 @@ async fn access_invite_handler(
         return (
             axum::http::StatusCode::FORBIDDEN,
             Json(serde_json::json!({
-                "error": "only the KeyHolder (localhost) may issue invitations in v0.1",
+                "error": "only the KeyHolder (localhost) may fetch onboarding QRs",
             })),
         ).into_response();
     }
-    // The operator's browser is loading the dashboard from some
-    // host:port the viewer can also reach — use that as the URL we
-    // bake into the invite, rather than the dashboard's bind
-    // address (which is often 0.0.0.0 and useless to a phone).
     let host_override = headers
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
-    let mut access = handle.lock().await;
-    match access.mint_invite_with_host(host_override.as_deref()) {
-        Ok(env) => (axum::http::StatusCode::OK, Json(serde_json::to_value(&env).unwrap_or_default())).into_response(),
+    let access = handle.lock().await;
+    match access.onboard_info(host_override.as_deref()) {
+        Ok(info) => (axum::http::StatusCode::OK, Json(serde_json::to_value(&info).unwrap_or_default())).into_response(),
         Err(e) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("mint_invite: {e:#}")})),
-        ).into_response(),
-    }
-}
-
-async fn access_claim_handler(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<access::ClaimRequest>,
-) -> impl IntoResponse {
-    let handle = match require_access(&state).await {
-        Ok(h) => h,
-        Err(r) => return r,
-    };
-    let device_pk_for_broadcast = body.device_pk.clone();
-    let device_name_for_broadcast = body.device_name.clone();
-    let outcome = {
-        let mut access = handle.lock().await;
-        access.process_claim(&body)
-    };
-    use access::ClaimOutcome::*;
-    match outcome {
-        Success(resp) => {
-            // §4.2 step 8: broadcast member_added on /ws/status so
-            // every connected member can refresh its Access tab.
-            let _ = state.ws_broadcast_tx.send(serde_json::json!({
-                "type": "access",
-                "event": "member_added",
-                "device_pk": device_pk_for_broadcast,
-                "name": device_name_for_broadcast,
-                "role": "viewer",
-                "paired_at_ms": resp.get("paired_at_ms"),
-            }).to_string());
-            (axum::http::StatusCode::OK, Json(resp)).into_response()
-        }
-        BadRequest(msg) => (
-            axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": msg})),
-        ).into_response(),
-        BadRequestBoxed(msg) => (
-            axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": msg})),
-        ).into_response(),
-        NotFound => (
-            axum::http::StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "no such invitation (wrong TG, wrong token, or never issued)"})),
-        ).into_response(),
-        Conflict => (
-            axum::http::StatusCode::CONFLICT,
-            Json(serde_json::json!({"error": "invitation already claimed by a different device"})),
-        ).into_response(),
-        Gone => (
-            axum::http::StatusCode::GONE,
-            Json(serde_json::json!({"error": "invitation expired — ask the operator to issue a fresh one"})),
+            Json(serde_json::json!({"error": e})),
         ).into_response(),
     }
 }

@@ -115,6 +115,19 @@ pub struct InviteEnvelope {
     pub expires_at_ms: i64,
 }
 
+/// Response shape for `/api/access/onboard` — operator helper that
+/// shows the visitor two QR codes (WiFi-join + plain dashboard URL)
+/// per SPEC-R2-ROCKER-ACCESS v0.3 §8. No token, no expiry — it's
+/// just a static pair of QRs the operator can flash at the visitor.
+#[derive(Serialize)]
+pub struct OnboardInfo {
+    pub dashboard_url: String,
+    pub dashboard_qr_data_url: String,
+    pub wifi_qr_data_url: Option<String>,
+    pub wifi_ssid: Option<String>,
+    pub wifi_psk: Option<String>,
+}
+
 /// Request body for `/api/access/claim`.
 #[derive(Deserialize)]
 pub struct ClaimRequest {
@@ -304,6 +317,37 @@ impl Access {
     /// usable URL on a phone. The Host header is what the operator
     /// is actually using right now, so a viewer on the same network
     /// can reach the same URL.
+    /// Per SPEC-R2-ROCKER-ACCESS v0.3 §8 — return the two QR payloads
+    /// for the "Onboard a visitor" modal: a WiFi-join QR (when creds
+    /// available) and a plain dashboard-URL QR. Neither carries a
+    /// token; both are static helpers that an operator can hand to a
+    /// visitor any number of times without server-side state change.
+    pub fn onboard_info(&self, host_override: Option<&str>) -> std::result::Result<OnboardInfo, String> {
+        let local_origin = resolve_public_origin(host_override)
+            .unwrap_or_else(|| self.local_origin.clone());
+        let dashboard_url = format!("{}/", local_origin);
+        let dashboard_qr_data_url = render_qr_png(&dashboard_url)
+            .map_err(|e| format!("render dashboard QR: {e:#}"))?;
+        let (wifi_qr_data_url, wifi_ssid, wifi_psk) = match &self.wifi_creds {
+            Some((ssid, psk)) => {
+                let payload = format!(
+                    "WIFI:T:WPA2;S:{};P:{};H:false;;",
+                    qr_escape(ssid), qr_escape(psk),
+                );
+                let png = render_qr_png(&payload).ok();
+                (png, Some(ssid.clone()), Some(psk.clone()))
+            }
+            None => (None, None, None),
+        };
+        Ok(OnboardInfo {
+            dashboard_url,
+            dashboard_qr_data_url,
+            wifi_qr_data_url,
+            wifi_ssid,
+            wifi_psk,
+        })
+    }
+
     pub fn mint_invite_with_host(
         &mut self,
         host_override: Option<&str>,
@@ -490,7 +534,7 @@ impl Access {
         self.paired_at_ms.insert(device_pk, now_ms);
 
         // 9. Cache the response body for idempotent re-claims.
-        let response_body = encode_claim_response(&self.tg, &encrypted, now_ms);
+        let response_body = encode_claim_response(&self.tg, &encrypted, now_ms, self.relay_url.as_deref());
         self.tokens.entry(entropy).and_modify(|t| {
             t.claim = Some(TokenClaim {
                 device_pk,
@@ -504,6 +548,41 @@ impl Access {
 
     /// SPEC §4.3 — list of paired devices. The TG owns the canonical
     /// member list; this method assembles the JSON-friendly view.
+    /// Self-heal lookup: returns the device's own row (if it exists),
+    /// or `None` if the dashboard has no record of this `device_pk`.
+    /// Public-callable so a paired viewer can verify on every load
+    /// that its persisted cert still corresponds to a known member
+    /// — guards against a stale cert lingering in IndexedDB after the
+    /// dashboard's member set was rotated or wiped between sessions.
+    pub fn lookup_member(&self, device_pk_hex: &str) -> Option<MemberRow> {
+        let pk = hex_to_arr32(device_pk_hex)?;
+        if let Some(m) = self.tg.members().iter().find(|m| m.certificate.device_public_key == pk) {
+            let name = self.names.get(&pk).cloned().unwrap_or_else(|| m.name.clone());
+            let paired_at_ms = self.paired_at_ms.get(&pk).copied()
+                .unwrap_or_else(|| (m.certificate.issued_at as i64) * 1000);
+            return Some(MemberRow {
+                device_pk: device_pk_hex.to_string(),
+                name,
+                role: cert_role_name(m.certificate.role),
+                paired_at_ms,
+                revoked: false,
+            });
+        }
+        if let Some(entry) = self.tg.revocations().iter().find(|e| e.device_public_key == pk) {
+            let _ = entry; // (placeholder so the future "revoked_at" field can come from the revocation entry)
+            let name = self.names.get(&pk).cloned().unwrap_or_else(|| "(revoked)".into());
+            let paired_at_ms = self.paired_at_ms.get(&pk).copied().unwrap_or(0);
+            return Some(MemberRow {
+                device_pk: device_pk_hex.to_string(),
+                name,
+                role: "viewer".to_string(),
+                paired_at_ms,
+                revoked: true,
+            });
+        }
+        None
+    }
+
     pub fn members(&self) -> Vec<MemberRow> {
         let mut rows: Vec<MemberRow> = self
             .tg
@@ -642,7 +721,7 @@ impl Access {
         self.names.insert(device_pk, rec.name.clone());
         self.paired_at_ms.insert(device_pk, now_ms);
 
-        let response = encode_claim_response(&self.tg, &encrypted, now_ms);
+        let response = encode_claim_response(&self.tg, &encrypted, now_ms, self.relay_url.as_deref());
         if let Some(p) = self.pending.get_mut(&device_pk) {
             p.approved = Some(response);
         }
@@ -768,6 +847,7 @@ fn encode_claim_response(
     tg: &TrustGroup,
     encrypted: &EncryptedJoinResponse,
     paired_at_ms: i64,
+    relay_url: Option<&str>,
 ) -> serde_json::Value {
     // Packed wire format: 24-byte nonce ++ 4-byte BE u32 ciphertext_len
     // ++ ciphertext. This is the layout that r2-wasm's
@@ -781,11 +861,22 @@ fn encode_claim_response(
     packed.extend_from_slice(&ct_len.to_be_bytes());
     packed.extend_from_slice(&encrypted.ciphertext);
 
-    serde_json::json!({
+    let mut body = serde_json::json!({
         "encrypted_b64": B64.encode(&packed),
         "tg_pk_hex": hex::encode(tg.verifying_key().to_bytes()),
         "paired_at_ms": paired_at_ms,
-    })
+    });
+    // Per SPEC-R2-ROCKER-ACCESS v0.2 §4.2 step 9: deliver the
+    // operator-configured relay URL inside the claim response so the
+    // viewer can persist it alongside its cert and reconnect through
+    // the relay later (§5.2). Omitted if the dashboard wasn't started
+    // with `--relay-url` — the deployment is LAN-only.
+    if let Some(url) = relay_url {
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("relay_url".to_string(), serde_json::Value::String(url.to_string()));
+        }
+    }
+    body
 }
 
 fn cert_role_name(role: DeviceRole) -> String {

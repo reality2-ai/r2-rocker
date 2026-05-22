@@ -1,16 +1,34 @@
 # SPEC-R2-ROCKER-ACCESS: Device-access lifecycle (enrolment, certs, revocation)
 
-**Version:** 0.2 Draft
+**Version:** 0.3 Draft
 **Date:** 2026-05-22
 **Status:** Normative Draft
 
+> **v0.3 Δ from v0.2:** **Request/approve is the sole enrolment flow.**
+> Operator-initiated invitation tokens (the `/api/access/invite` +
+> `/api/access/claim` round-trip and the time-limited QR/URL token
+> from old §3) are removed. A new viewer instead lands on the
+> dashboard's not-enrolled page, submits a request with its public
+> key + a chosen name, and waits for the operator to Approve or Deny
+> on the Link tab. The cryptographic outcome is the same — the
+> KeyHolder runs `process_join_request` at approve time and the
+> viewer's polling `/api/access/check/{device_pk}` returns the cert +
+> DEK + HK + relay_url bundle — but the operator UX is simpler (one
+> button, no expiring tokens) and the protocol surface is smaller
+> (no invite-token table, no 5-minute timeout, no QR-with-token).
+> Two QRs (WiFi-join + dashboard URL) remain on the Link tab as a
+> static "Onboard a visitor" helper, but neither carries a token.
+> Sections affected: §3 (replaced — token format gone), §4 (routes
+> table + handlers), §5 (unchanged, relay still post-enrolment),
+> §8 (Link tab UX), Appendix A.
+
 > **v0.2 Δ from v0.1:** Enrolment is **local-WiFi-only**. The relay
-> URL is delivered as part of the `/api/access/claim` response
-> (§4.2 step 9), not embedded in the invitation token. The relay
-> never sees enrolment material. Sections affected: §3.2 (token
-> representations), §3.4 (relay endpoint), §4 (routes table),
-> §4.1 (invite), §4.2 (claim), §5 (post-enrolment paths). See
-> §3.4 *Rationale* for the threat-model motivation.
+> URL is delivered as part of the claim response (now the approve
+> response under v0.3), not embedded in the invitation token. The
+> relay never sees enrolment material. Sections affected: §3.2
+> (token representations), §3.4 (relay endpoint), §4 (routes table),
+> §4.1 (invite), §4.2 (claim), §5 (post-enrolment paths). See §3.4
+> *Rationale* for the threat-model motivation.
 **Depends on:** SPEC-R2-ROCKER-SYSTEM (§3 trust), SPEC-R2-ROCKER-DASHBOARD (§5 HTTP), SPEC-R2-ROCKER-BRIDGE (§2 two-TG topology), SPEC-R2-ROCKER-WIRE, R2-TRUST (canonical, vendored under `crates/r2-trust/`), R2-TRANSPORT (relay, when needed for §5.2)
 
 ---
@@ -206,143 +224,108 @@ one TG.
 
 ---
 
-## 3. Enrolment token
+## 3. Enrolment via request-and-approve
 
-### 3.0 Invitations are active and KeyHolder-only
+### 3.0 The KeyHolder still gates every admission
 
-A foundational R2-TRUST invariant, restated here for emphasis:
+A foundational R2-TRUST invariant, restated here because it
+shapes the rest of this section:
 
-* **Inviting** a new device into a Trust Group is **always an
-  active process initiated by a member device that holds the
-  KeyHolder role.** A device cannot "ask to join"; it can only
-  *redeem an invitation* that a KeyHolder has already issued.
-  There is no anonymous self-enrolment, no public join page, no
-  pre-shared community password. The token is the explicit
-  output of an explicit KeyHolder action.
-* **Every invitation is time-limited.** Expiry is server-side
-  enforced (§3.3). After expiry, the token is unrecoverable
-  even by the KeyHolder that issued it — re-inviting means
-  issuing a fresh one.
+* **Admission to a Trust Group is always an explicit KeyHolder
+  action.** v0.3 changes *how* that action is initiated — the
+  prospective member opens a request, the operator approves it
+  — but the cryptographic outcome is unchanged: the KeyHolder
+  runs `process_join_request` and signs the resulting cert. No
+  cert is ever produced without an explicit operator click.
+* **There is no anonymous self-enrolment.** A request that the
+  operator never approves never becomes a cert. The request
+  surface is open by design (anyone on the LAN can POST one)
+  but the only thing it gets you without operator action is a
+  spot in the pending queue.
 
-These invariants frame the rest of this section: the token
-format (§3.1), its three representations (§3.2), and the
-dashboard's server-side record (§3.3) all serve the KeyHolder
-explicitly choosing to admit one specific new device for a
-bounded window.
+The v0.1 / v0.2 invitation-token model (single-use entropy + QR
+URL) is removed. Operators **MUST NOT** rely on `/api/access/invite`
+or `/api/access/claim` — both are deleted in v0.3.
 
-### 3.1 Format
+### 3.1 Lifecycle states
 
-A token is a tuple:
+A request progresses through these states:
 
+| State | Triggered by | Persisted between dashboard restarts? |
+|---|---|---|
+| `Pending` | viewer POSTs `/api/access/request` | NO — in-memory only |
+| `Approved` | KeyHolder POSTs `/api/access/approve/{device_pk}` | partial — the issued cert + DEK + HK bundle is cached in the same pending record until the viewer's next `/check` poll consumes it, then the cert is also written to the persistent member set per [[r2-trust/persist.rs]]. |
+| `Denied` | KeyHolder POSTs `/api/access/deny/{device_pk}` | NO — visible to the viewer's next `/check` poll, then the pending record is dropped. |
+| `Consumed` | viewer's `/check` returns the approved bundle | n/a — record dropped |
+| `Revoked` | KeyHolder POSTs `/api/access/revoke/{device_pk}` (§4.4) | YES — G-Set CRDT in [[r2-trust/revocation.rs]] |
+
+Each state transition broadcasts an event on `/ws/status` so the
+operator's Link tab can refresh without polling.
+
+### 3.2 Request payload
+
+The viewer's webapp POSTs `/api/access/request` with:
+
+```json
+{
+  "device_pk": "<64 hex chars>",
+  "name":      "<1..=64 chars, charset [A-Za-z0-9 ._-]>"
+}
 ```
-  tg_hash : 8 hex chars     ← first 16 bits of SHA-256(TG_PK)
-  entropy : 16 bytes        ← random, ed25519-pk-grade (csprng)
-```
 
-The TG hash binds the token to a specific Trust Group; the entropy
-is the secret. A device claiming the token **MUST** prove
-knowledge of both. The TG hash is short on purpose — it's
-identifying, not authenticating; the secrecy lives in the
-16-byte entropy.
+`device_pk` is the viewer's locally-generated Ed25519 public key
+(from `wasmGenerateDeviceKeypair`). `name` is the operator-facing
+label the requester picks — it appears in the operator's
+pending-queue row so they know which physical device they're
+approving. The dashboard MAY append a transport hint (the
+requester's IP) to the row internally, but the spec does not
+require it to be displayed.
 
-Tokens are **single-use** and **expire 300 seconds (5 min)** after
-issuance. The dashboard **MUST** enforce both invariants
-server-side (§4.1). Browser-side countdowns are display only.
-
-### 3.2 Three representations
-
-The token is presented to the operator in three forms
-simultaneously, all encoding the same `(tg_hash, entropy)` tuple.
-**Every form addresses the controller on the local WiFi.**
-Enrolment happens face-to-face on the lab network; the relay
-plays no part in admitting a new device. Once the cert is
-in-hand, the new viewer is free to leave the LAN and reconnect
-through the relay (§5.2) — but the secret material that gets it
-*into* the Trust Group never crosses the relay.
-
-* **QR code** — embeds an `r2:` URL of the form
-  ```
-  r2://join/<tg_hash>/<entropy_hex>?host=<controller_lan_ip>:8080
-  ```
-  The `host=` parameter is the controller's LAN address (the
-  same address sensors connect to on port 21042; see §3.4 for
-  how the dashboard picks it). The viewer's webapp uses it to
-  POST `/api/access/claim` (§4.2) directly. There is no
-  `?relay=` here — see §3.4.
-* **Plain shareable URL** — one variant only:
-  * `url_local = http://<controller_lan_ip>:8080/?join=<tg_hash>.<entropy_hex>`
-  The viewer **MUST** be on the controller's LAN to reach it.
-  This URL is shown alongside the QR for operators who prefer to
-  type or paste rather than scan.
-* **3-word code** (OPTIONAL display) — three space-separated
-  BIP39 words deterministically derived from the entropy. Same
-  wordlist as r2-notekeeper for ecosystem parity. The viewer
-  webapp **MUST** accept a typed 3-word code as an alternative
-  to the URL `?join=` parameter, **and** **MUST** still require
-  the viewer to be on the LAN to complete the claim. The
-  dashboard **SHOULD** hide this representation behind a "show
-  3-word code" toggle in the invite modal — useful only when
-  QR + URL both fail (the operator and viewer are on the phone
-  together rather than in the same room, but the viewer is
-  still on the LAN).
+The route is **open** — no auth header, no enrolment token. The
+dashboard's only gate is a per-IP rate limit (MUST be at most one
+new pending request per 5 seconds per source IP; over the limit
+returns 429).
 
 ### 3.3 Server-side state
 
-Between `/api/access/invite` (issue) and `/api/access/claim`
-(consume), the dashboard **MUST** keep a per-token record:
+For each pending request, the dashboard keeps an in-memory record:
 
 | Field | Type | Purpose |
 |---|---|---|
-| `entropy` | 16 bytes | the secret being authorised |
-| `issued_at` | i64 ms | issue timestamp (wall clock) |
-| `expires_at` | i64 ms | `issued_at + 300_000` |
-| `claimed_by` | optional `device_pk` (32 bytes) | set on first successful claim |
-| `claimed_at` | optional i64 ms | set on first successful claim |
-| `nonce` | u64 | monotonic per-process counter for log correlation |
+| `device_pk` | 32 bytes | requester's Ed25519 public key — also the lookup key |
+| `name` | UTF-8 string ≤ 64 bytes | requester's chosen device name |
+| `hint` | UTF-8 string | dashboard-internal transport hint (e.g. source IP) |
+| `submitted_at_ms` | i64 ms | wall-clock when the request arrived |
+| `decided` | optional `(approved\|denied, decided_at_ms)` | set on operator action |
+| `approved_bundle` | optional `{cert+DEK+HK+relay_url+tg_pk}` JSON | cached at approve time; consumed on the requester's first successful `/check` poll |
 
-The record is in-memory only in v0.1. It **MUST NOT** be
-persisted to disk; a dashboard restart invalidates every
-unclaimed token. Operator-level re-issue is trivial and the
-shorter the persistence window, the smaller the replay surface.
+Records are dropped immediately on `/check` consumption (success
+or denial) and on `/api/access/revoke/{device_pk}` (the operator
+explicitly removing a pending entry). A dashboard restart drops
+every pending request — the viewer must re-submit. There is no
+expiry timer in v0.3; an unattended pending request stays in the
+queue until the operator decides or the dashboard restarts.
 
-Successfully-claimed tokens **MUST** be retained in the record
-table for at least their original expiry window so that
-re-claims with the same `device_pk` are idempotent (§4.2). After
-that they MAY be garbage-collected.
+### 3.4 Relay endpoint — delivered post-approve, not in the request
 
-### 3.4 Relay endpoint — delivered post-enrolment, not in the token
+The relay URL plays no part in the enrolment handshake. After the
+operator clicks Approve, the dashboard issues the cert and
+includes its configured `--relay-url` (if any) in the
+`approved_bundle` (§3.3, §4.2). The viewer reads it from the
+`/api/access/check/{device_pk}` response and persists it
+alongside the cert per §6.
 
-The relay URL is **not** part of the enrolment token. Enrolment
-is local-WiFi-only (§3.2); the relay never sees the
-`(tg_hash, entropy)` pair. Once a viewer has successfully
-claimed a token, the `/api/access/claim` response (§4.2) carries
-the configured relay URL alongside the signed cert and the
-encrypted `(DEK, HK)` bundle. The viewer persists all of these
-together (§6) and uses the relay URL to reconnect from off-LAN
-later (§5.2).
+When `--relay-url` is empty, the `relay_url` field **MUST** be
+omitted from the approve response. The viewer is then LAN-only
+on this deployment.
 
-The relay URL is **operator-configurable** per deployment. The
-dashboard reads it from `--relay-url` at startup (default: empty
-— no relay path advertised, viewers are LAN-only). A future
-deployment SHOULD publish a canonical relay URL for the
-university handoff; the spec deliberately does not name one in
-v0.1.
-
-When `--relay-url` is empty, `/api/access/claim` responses
-**MUST** omit the `relay_url` field. Implementations **MUST NOT**
-invent a placeholder relay URL.
-
-**Rationale.** Pushing the relay into the enrolment token would
-make the relay a co-trusted party for new-device admission. That
-adds an attack surface (anyone who controls or impersonates the
-relay can sit between an off-LAN viewer and the controller during
-the moment cert material is being issued) for no operational
-gain (in practice every viewer enrolling is in the lab, since
-that's where the QR is shown). Doing enrolment locally and using
-the relay *only* as a forwarding plane for cert-authenticated
-sessions keeps the trust boundary at the controller — which is
-where R2-TRUST has it by design (R2-TRUST §7, KeyHolder is the
-sole issuer of certs).
+**Rationale.** Identical to v0.2: keeping the relay out of cert
+issuance makes the relay a pure forwarding plane — it never has
+opportunity to interpose during the moment the KeyHolder is
+signing. The v0.3 simplification removes the last bit of relay
+involvement in enrolment (the v0.2 invite-token QR could have
+been transcribed off-LAN; v0.3 removes the token entirely so no
+such path exists).
 
 ---
 
@@ -355,93 +338,112 @@ They formalise (and supersede) the stubs presently at
 
 | Route | Method | Body | Returns | Auth |
 |---|---|---|---|---|
-| `/api/access/invite` | POST | `{name?: str}` | `{token, qr_png_b64, url_local, words_3?, expires_at}` | KeyHolder-only |
-| `/api/access/claim`  | POST | `{tg_hash: hex, entropy_hex: hex, device_pk: hex, device_name: str}` | `{cert: r2trust-CBOR, encrypted_creds: bytes_b64, tg_pk: hex, relay_url?: str, paired_at}` | none (the token IS the auth) |
+| `/api/access/request` | POST | `{device_pk: hex, name: str}` | `{ok: bool, device_pk: hex}` (202 on accept) | none — rate-limited per source IP |
+| `/api/access/check/{device_pk}` | GET | — | 202 `{status:"pending"}`, 200 `{tg_pk_hex, encrypted_b64, paired_at_ms, relay_url?}`, 410 `{status:"denied"}`, 404 `{error:"no such request"}` | none — the device_pk is the lookup key |
+| `/api/access/pending` | GET | — | `{requests: [{device_pk, name, hint, submitted_at_ms}]}` | KeyHolder-only |
+| `/api/access/approve/{device_pk}` | POST | `{}` | `{ok: bool, device_pk: hex}` | KeyHolder-only |
+| `/api/access/deny/{device_pk}` | POST | `{}` | `{ok: bool, device_pk: hex}` | KeyHolder-only |
 | `/api/access/members` | GET | — | `{members: [{device_pk, name, role, paired_at, last_seen, revoked}]}` | KeyHolder-only |
 | `/api/access/revoke/{device_pk}` | POST | `{}` | `{ok: bool, revoked_at}` | KeyHolder-only |
 
-**No `url_relay` in invite responses, no `relay_url` in invite tokens.**
-The relay URL is **only** delivered as part of the post-enrolment
-claim response (§4.2 step 9). Enrolment is local-WiFi-only by
-design (§3.2, §3.4).
+**v0.3 removes `/api/access/invite` and `/api/access/claim`.**
+Implementations conforming to v0.3 **MUST NOT** expose those
+routes (a stale 404 is the correct response; the routes do not
+return 410-Gone aliases because there is no successor URL to
+point at — the model is genuinely different, not renamed).
 
-The legacy `/api/enrol-init` and `/api/enrol-complete` routes in
-v0.1 **MAY** be deleted (no implementation depends on them) or
-**MAY** be retained as 410-Gone aliases pointing at the new
-routes for one release of forward-compat. The spec does not
-prefer either.
+The legacy `/api/enrol-init` and `/api/enrol-complete` routes
+remain as 501 stubs from earlier phases. They MAY be deleted at
+any time; no implementation depends on them.
 
 The existing `/api/keyholder/tg-pub` (`dashboard/src/main.rs:2754-2783`)
 remains as-is — it returns the TG public key for any caller to
 verify cert chains.
 
-### 4.1 `/api/access/invite`
+### 4.1 `/api/access/request`
 
-The KeyHolder presses "Grant access to a new device" in the Access
-tab; the webapp POSTs to this route. The dashboard:
+The viewer's webapp POSTs to this route from the not-enrolled
+landing page (§8). The dashboard:
 
-1. Generates 16 bytes of CSPRNG entropy.
-2. Computes `tg_hash = first 8 hex chars of SHA-256(TG_PK)`.
-3. Inserts a record per §3.3 with `expires_at = now + 300_000`.
-4. Builds `url_local` from the controller's primary IPv4 on the
-   hotspot interface (the same address sensors connect to on
-   port 21042).
-5. Builds the QR-embedded `r2://join/<tg_hash>/<entropy_hex>?host=<lan_ip>:8080`
-   URL. The QR carries the **LAN address only** — no `?relay=`,
-   per §3.2 and §3.4.
-6. Renders the QR PNG (base64-encoded, ≤ 4 KB for 16-byte +
-   short URL payload).
-7. Returns the JSON envelope. The token itself (raw `tg_hash` +
-   `entropy_hex`) is **NOT** returned as a separate field —
-   it's already embedded in the URL and reachable via the QR.
-   The relay URL is **NOT** returned here either; the operator
-   is inviting a viewer who is in the lab right now, so relay
-   reachability is irrelevant at the invite step.
-
-Implementations **MUST** rate-limit `/api/access/invite` to at
-most one issue per second per source IP to prevent token-flooding
-DoS. Past the rate limit, the route returns 429.
-
-### 4.2 `/api/access/claim`
-
-The viewer's webapp POSTs to this route on first load with a
-`?join=` URL parameter present. The dashboard:
-
-1. Validates that `tg_hash` matches its own TG. If not, returns
-   404.
-2. Looks up the record by `entropy`. If not found, returns 404.
-3. Checks `now < expires_at`. If expired, returns 410.
-4. Checks `claimed_by`:
-   * `None` → first claim. Set `claimed_by = device_pk`,
-     `claimed_at = now`. Proceed.
-   * `Some(other_pk) where other_pk != device_pk` → already
-     consumed by a different device. Returns 409.
-   * `Some(same_pk)` → idempotent re-claim. Proceed with the
-     same response.
-5. Validates `device_name` (1..=64 bytes, charset
+1. Validates `device_pk` is 64 hex chars and decodes to a valid
+   Ed25519 public key. On failure, returns 400.
+2. Validates `name` (1..=64 chars, charset
    `[A-Za-z0-9 ._-]`, no leading/trailing whitespace). On
    failure, returns 400.
-6. Invokes `crates/r2-trust/src/lifecycle.rs:257-313`
-   `process_join_request` with the supplied `device_pk` to
-   issue a `DeviceCertificate` and the encrypted `(DEK, HK)`
-   credentials bundle.
-7. Persists the new member in the KeyHolder's
-   `TrustGroup::members` via `r2-trust/src/persist.rs`.
-8. Broadcasts `r2.dash.access.member_added {device_pk, name,
-   role: "viewer", paired_at}` on `/ws/status` so other connected
-   members see the change without polling.
-9. Returns the JSON envelope, including the configured
-   `relay_url` if `--relay-url` is set (§3.4). The viewer
-   persists the cert, the encrypted creds, **and** the relay URL
-   together per §6 — that bundle is what lets the viewer
-   reconnect off-LAN later (§5.2). If `--relay-url` is unset,
-   the `relay_url` field is omitted from the response and the
-   viewer is permanently LAN-only on this deployment.
+3. Enforces the per-IP rate limit (one new pending request per 5 s).
+   Over the limit returns 429.
+4. Inserts a `Pending` record per §3.3.
+5. Broadcasts `{type:"access", event:"request_pending", device_pk,
+   name, hint}` on `/ws/status` so the operator's Link tab
+   refreshes immediately.
+6. Returns `200 {ok: true, device_pk}`.
 
-The route is **public** — anyone who knows the token can claim
-it. That's the design: the token IS the authentication. If the
-token leaks, the leak window is 5 minutes maximum and the
-operator can revoke immediately.
+The route is **open by design**. Anyone on the LAN can POST a
+request — they just end up in the operator's pending queue,
+where the operator decides. There is no enrolment token to leak.
+
+### 4.2 `/api/access/check/{device_pk}`
+
+The viewer polls this every 2 seconds while the not-enrolled
+landing page shows the "waiting for operator…" state. The
+dashboard returns:
+
+| Status | Body | Meaning |
+|---|---|---|
+| 202 | `{"status": "pending"}` | not yet decided — keep polling |
+| 200 | `{tg_pk_hex, encrypted_b64, paired_at_ms, relay_url?}` | approved — viewer runs the join handshake (§6) |
+| 410 | `{"status": "denied"}` | operator denied — landing page shows the denial state |
+| 404 | `{"error": "no such request"}` | unknown device_pk (or already consumed; the dashboard treats these the same so a viewer that reloads after a successful enrol can detect "already done" and skip re-enrolment) |
+
+Successful (200) consumption **MUST** drop the pending record
+atomically so the second poll sees 404 — this is the spec's
+single-use guarantee. The viewer's local `viewerIdentity` is the
+authoritative copy from that point.
+
+The 200 body includes `relay_url` if `--relay-url` was set when
+the dashboard started, omitted otherwise (§3.4).
+
+### 4.3 `/api/access/pending`
+
+KeyHolder-only. Lists every currently-pending request so the
+operator's Link tab can render the approve/deny row. Each entry
+includes the requester's `device_pk`, `name`, `hint` (IP), and
+`submitted_at_ms`. Items disappear from the list when the
+operator decides (§4.4, §4.5) or when the requester consumes the
+result (§4.2).
+
+### 4.4 `/api/access/approve/{device_pk}`
+
+KeyHolder-only. The dashboard:
+
+1. Looks up the pending request by `device_pk`. If absent,
+   returns 404.
+2. Generates a transient `JoinCode` and runs
+   `r2-trust::TrustGroup::process_join_request` with the
+   requester's `device_pk` and the cached `name`. The cert is
+   signed and the encrypted `(DEK, HK)` bundle is produced.
+3. Caches the `(tg_pk_hex, encrypted_b64, paired_at_ms, relay_url?)`
+   bundle in the same pending record (now in `Approved` state per
+   §3.1) — the viewer's next `/check` poll consumes it.
+4. Adds the new member to the persistent `TrustGroup::members`
+   via `r2-trust/src/persist.rs`.
+5. Broadcasts `{type:"access", event:"request_approved",
+   device_pk}` on `/ws/status` so the operator's Link tab pulls
+   the new row from `/api/access/members`.
+6. Returns `200 {ok: true, device_pk}`.
+
+If the request was already approved (re-click), returns 409.
+If it was denied, returns 409. If `device_pk` decodes invalid,
+returns 400.
+
+### 4.5 `/api/access/deny/{device_pk}`
+
+KeyHolder-only. Looks up the pending request, marks it `Denied`,
+broadcasts `{type:"access", event:"request_denied", device_pk}`
+on `/ws/status`. The next `/check` from the requester returns
+410. The pending record is dropped on that next poll (or
+immediately if the operator preferred to clear it via a future
+"clear denied requests" affordance — out of scope for v0.3).
 
 ### 4.3 `/api/access/members`
 
@@ -483,18 +485,19 @@ returns 400.
 ## 5. Connection paths after enrolment
 
 A viewer holds a `DeviceCertificate` (and optionally the relay
-URL, per §4.2 step 9) after a successful claim. It can reach the
-dashboard in two ways. The spec defines the *behaviour at the
-path boundary*; the wire protocol of each leg lives elsewhere.
+URL, per §4.2) after the operator has approved its request. It
+can reach the dashboard in two ways. The spec defines the
+*behaviour at the path boundary*; the wire protocol of each leg
+lives elsewhere.
 
-**Phase order matters.** Enrolment (§3, §4.1, §4.2) happens
+**Phase order matters.** Enrolment (§3, §4.1–§4.5) happens
 once, on the LAN, while the new viewer's browser is on the
 controller's hotspot. The two paths below are post-enrolment
 *re-connection* paths: a viewer with a cert can use either,
 choosing whichever is reachable. A viewer **without** a cert has
 no business on the relay path — it has nothing to authenticate
 with — and a viewer that needs a cert MUST come back to the LAN
-to claim one.
+to submit a request.
 
 ### 5.1 Same-WiFi (direct)
 
@@ -707,26 +710,39 @@ the operator-facing rename is cosmetic only. Implementations
 
 Below the tab heading, in order:
 
-1. **A button labelled "Link a new device"**. Visible
-   only when the local device is the KeyHolder (the controller's
-   own browser). When clicked, the webapp POSTs to
-   `/api/access/invite` and opens a modal containing:
-   * The QR code, sized at ≥ 256 × 256 CSS pixels.
-   * The `url_local` URL, in a copy-to-clipboard chip.
-   * A "must be on the lab WiFi to enrol" hint near the URL,
-     so an operator doesn't paste the link into a remote chat
-     and wait for nothing to happen. The hint can be unobtrusive
-     (a single line below the URL) since the QR + URL are
-     intended for use in-room.
-   * A 5-minute countdown timer, prominent.
-   * A "Show 3-word code" toggle that reveals `words_3` on
-     demand (§3.2).
-   * A close button that dismisses the modal but does NOT
-     cancel the token — the operator's intent might be "save
-     for later". Tokens expire by §3.3, not by modal close.
+1. **An "Onboard a visitor" affordance**. Visible only when the
+   local device is the KeyHolder. When clicked, the webapp opens
+   a static modal containing two QR codes for the operator to
+   show to the visitor:
+   * **Top QR: WiFi-join** (`WIFI:S:<SSID>;T:WPA;P:<password>;;`
+     format). Only rendered when the dashboard was started with
+     `--wifi-config` pointing at a readable creds file (or
+     NetworkManager exposes them); omitted otherwise.
+   * **Bottom QR: dashboard URL** — a plain
+     `http://<controller_lan_ip>:8080/` URL with **no token and
+     no parameters**. Scanning it opens the not-enrolled landing
+     page; the visitor enrols by typing a name and clicking
+     "Ask to pair" (§4.1).
+   * Neither QR has an expiry; they're operator helpers, not
+     time-limited tokens. The same modal MAY be opened any
+     number of times without state change on the dashboard.
+   * A close button dismisses the modal. There is no countdown.
 
-2. **A list of currently-paired devices**, one card per device:
-   * Device name (operator-chosen at claim time).
+2. **A "Pending requests" panel** (visible only when there is at
+   least one pending request, or always — implementation choice).
+   Polls `/api/access/pending` on Link-tab open and refreshes on
+   each `request_pending` / `request_approved` / `request_denied`
+   `/ws/status` broadcast. Each row shows:
+   * Requester name (chosen at request time).
+   * `device_pk` short form (first 8 hex chars).
+   * Source-IP hint, so the operator can correlate with a
+     physical device when several requests arrive at once.
+   * Two buttons — **Approve** and **Deny**. Single click; the
+     `request_approved` / `request_denied` broadcast removes the
+     row.
+
+3. **A list of currently-paired devices**, one card per device:
+   * Device name (operator-chosen at request time).
    * Role (Controller / Sensor / Viewer), as
      human-readable text — never "KeyHolder", never
      "Member".
@@ -738,25 +754,30 @@ Below the tab heading, in order:
      is rendered with `"this device"` instead of a revoke
      button — the KeyHolder cannot revoke itself (§4.4).
 
-3. **No other elements in v0.1**. Specifically, the operator
+4. **No other elements in v0.3**. Specifically, the operator
    does NOT see TG signing key paths, cert byte-blobs, relay
    debug, R2-TRUST schema versions, or any other internal state.
 
-Non-KeyHolder viewers visiting the Access tab see the device list
-(read-only, no Revoke buttons, no "Grant access" button) and
-their own card marked "this device". The list is the same shape
-per §4.3, just rendered in read-only mode.
+Non-KeyHolder viewers visiting the Link tab see the device list
+(read-only, no Revoke buttons, no Approve/Deny buttons, no
+Onboard affordance) and their own card marked "this device". The
+list is the same shape per §4.3 (members list), just rendered in
+read-only mode.
 
-A viewer that has not yet enrolled (no cert in IndexedDB and no
-`?join=` parameter) **MUST** render a single landing page in
-place of the regular tabs:
+A viewer that has not yet enrolled (no cert in IndexedDB) **MUST**
+render a single landing page in place of the regular tabs:
 
-> *"This device hasn't been paired yet. Open the link or scan
-> the QR code your operator sent you, or paste the 3-word code
-> below."*
+> *"This device hasn't been paired yet. Choose a name the
+> operator will recognise, then ask them to approve it on their
+> Link tab."*
 
-with a paste field that accepts URLs and 3-word codes. On valid
-paste, the webapp synthesises a `?join=` and runs §4.2.
+with a name input and an "Ask to pair" button. On click, the
+webapp generates a device keypair (via WASM), POSTs
+`/api/access/request` (§4.1), and transitions to a "⏳ Waiting
+for the operator to approve <name>…" state. The page polls
+`/api/access/check/{device_pk}` every ~2 seconds; on success
+(200) it runs the join handshake (§6) and transitions to the
+enrolled state.
 
 ---
 
@@ -847,39 +868,51 @@ spec.
 
 A dashboard build conforms to this spec when:
 
-1. The four `/api/access/*` routes (§4) are implemented with the
-   payload shapes shown.
-2. The KeyHolder-only routes refuse non-KeyHolder callers. In
+1. The seven `/api/access/*` routes in §4 (request, check,
+   pending, approve, deny, members, revoke) are implemented with
+   the payload shapes shown.
+2. The routes `/api/access/invite` and `/api/access/claim` are
+   **not** exposed.
+3. The KeyHolder-only routes refuse non-KeyHolder callers. In
    v0.1 where there is no per-route auth check, the dashboard
    MAY rely on the localhost / private-LAN boundary; in v1 with
    cert-handshake on `/ws/raw`, the routes **MUST** also be
    cert-gated.
-3. Tokens are CSPRNG-generated, 5-minute-expiring, single-use,
-   in-memory only (§3.3).
-4. `/api/access/claim` is idempotent for the same `device_pk`
-   within the original window and rejects every other
-   `device_pk` after the first.
-5. `/api/access/members` returns the persisted member list
+4. `/api/access/request` is rate-limited per source IP per §4.1.
+5. `/api/access/check/{device_pk}` returns the approved bundle
+   exactly once: the second poll for the same `device_pk` after
+   a successful 200 MUST return 404.
+6. `/api/access/approve/{device_pk}` runs `process_join_request`
+   synchronously and includes the configured `relay_url` (if any)
+   in the cached approved bundle, per §3.4.
+7. `/api/access/members` returns the persisted member list
    including revoked rows.
-6. `/api/access/revoke` adds to the revocation G-Set, broadcasts
+8. `/api/access/revoke` adds to the revocation G-Set, broadcasts
    `r2.dash.access.revoked`, and tears down the offending
    connection synchronously.
-7. The KeyHolder cannot revoke itself (§4.4).
+9. The KeyHolder cannot revoke itself (§4.4).
 
 ### 11.2 Webapp
 
 A webapp build conforms when:
 
-1. It detects `?join=<token>` on first load and POSTs
-   `/api/access/claim` with the token, a freshly-generated
-   `device_pk`, and an operator-supplied `device_name`.
-2. It persists the cert + key + DEK + HK in IndexedDB under
-   `r2-rocker-access > members > self` (§6).
-3. On subsequent loads without `?join=`, it reads the IndexedDB
-   record and uses it; it does not re-enrol.
-4. It renders the "Access" tab per §8, including the modal,
-   the device list, and the not-enrolled landing page.
-5. It listens for `r2.dash.access.revoked` on `/ws/status` and,
+1. On first load, if no cert exists in IndexedDB, it renders the
+   not-enrolled landing page (§8) and accepts a name + an "Ask
+   to pair" click that POSTs `/api/access/request` with a
+   freshly-generated `device_pk`.
+2. After submitting the request, it polls
+   `/api/access/check/{device_pk}` every ~2 seconds until the
+   response is 200 (approved), 410 (denied), or 404 (lost).
+3. On 200, it runs the join handshake (§6), persists the cert +
+   key + DEK + HK + `relay_url` in IndexedDB under
+   `r2-rocker-access > members > self`, and transitions to the
+   enrolled view.
+4. On subsequent loads with a valid IndexedDB record, it uses
+   the persisted identity and does not re-enrol.
+5. It renders the "Link" tab per §8, including the Onboard
+   modal, the pending-requests panel, the device list, and (when
+   applicable) the not-enrolled landing page.
+6. It listens for `r2.dash.access.revoked` on `/ws/status` and,
    when the revoked `device_pk` matches its own, deletes the
    IndexedDB record and re-renders the not-enrolled landing
    page (§7.3).
@@ -919,18 +952,21 @@ either includes it or marks it explicitly out of scope:
 
 | Notekeeper feature | This spec |
 |---|---|
-| QR code | §3.2 — included. |
-| Shareable URL | §3.2 — included; `url_local` only. The v0.1 draft had a `url_relay` variant; v0.2 (§3.4) removes it — enrolment is LAN-only. |
-| 3-word code | §3.2 — included as optional display. |
-| 5-minute expiry | §3.1 — included, server-side enforced. |
-| Single-use token | §3.3 — included. |
+| QR code carrying enrolment token | REMOVED in v0.3. Earlier drafts had it; v0.3 §3 replaces it with request/approve. The Onboard modal still shows two QRs (WiFi join + plain dashboard URL) but neither carries a token. |
+| Shareable URL with token | REMOVED in v0.3 — see above. |
+| 3-word code | REMOVED in v0.3 — no token, nothing to derive words from. |
+| 5-minute token expiry | REMOVED in v0.3 — no token, no expiry. Pending requests live until the operator decides or the dashboard restarts. |
+| Single-use guarantee | §4.2 — included as "single-use cert delivery": the `/check` response is dropped from the pending record on first successful (200) poll. |
 | Browser keypair generation | §6 — included. |
 | Cert + DEK + HK in localStorage | §6 — moved to IndexedDB. |
-| Relay-mediated **enrolment** | DEFERRED / OUT OF SCOPE. Notekeeper has it; r2-rocker v0.2 explicitly does not (§3.4 *Rationale*). |
+| Operator-initiated invite | REMOVED in v0.3 — replaced by viewer-initiated request + operator approve. |
+| Viewer-initiated request | §4.1 — **new in v0.3**, sole enrolment entry point. |
+| Operator approve/deny buttons | §4.4, §4.5, §8 (2) — **new in v0.3**. |
+| Relay-mediated **enrolment** | DEFERRED / OUT OF SCOPE. Notekeeper has it; r2-rocker v0.2+ explicitly does not (§3.4 *Rationale*). |
 | Relay-mediated **post-enrolment connection** | §5.2 — included; relay wire protocol cross-referenced to R2-TRANSPORT. |
-| Word-code → join-code relay lookup | OUT OF SCOPE — the 3-word code is recovered from the entropy locally, no relay round-trip needed. |
-| Member list view | §8 (2) — included. |
-| Revoke button | §4.4 + §8 (2) — included. |
+| Word-code → join-code relay lookup | OUT OF SCOPE — no word-code in v0.3. |
+| Member list view | §8 (3) — included. |
+| Revoke button | §4.4 + §8 (3) — included. |
 | Revocation broadcast | §7 — INCLUDED; this closes notekeeper's sharp edge. |
 | Persistent invitation records / audit log | OUT OF SCOPE for v0.1 — operator-visible audit trail is a v0.2 concern. |
 | Relay HELLO HMAC | OUT OF SCOPE here — R2-TRANSPORT covers it. |

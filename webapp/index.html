@@ -952,7 +952,7 @@
      R2 jargon. Internal URL paths remain `/api/access/*`. -->
 <div class="devices-main" id="linkMain" hidden>
   <div class="devices-bulk-actions">
-    <button class="btn-bulk-update" id="linkInviteBtn" onclick="openInviteModal()">🔗 Link a new viewer</button>
+    <button class="btn-bulk-update" id="linkOnboardBtn" onclick="openOnboardModal()">🔍 Onboard a visitor</button>
     <button class="btn-bulk-reset"  id="linkRefreshBtn" onclick="loadLinkMembers()">↻ Refresh</button>
   </div>
   <div class="devices-area" id="linkPendingArea" hidden>
@@ -968,53 +968,51 @@
   </div>
 </div>
 
-<!-- Invite modal — opened by "Link a new viewer" -->
-<div class="invite-overlay" id="inviteOverlay" hidden onclick="if(event.target.id==='inviteOverlay') closeInviteModal()">
+<!-- Onboard-a-visitor modal — per SPEC-R2-ROCKER-ACCESS v0.3 §8.
+     Two static QRs (WiFi-join + plain dashboard URL). No token, no
+     countdown. The visitor scans, joins the lab WiFi, opens the
+     dashboard URL, then asks to pair from the not-enrolled landing
+     page. The operator approves on the same Link tab. -->
+<div class="invite-overlay" id="onboardOverlay" hidden onclick="if(event.target.id==='onboardOverlay') closeOnboardModal()">
   <div class="invite-modal">
     <div class="invite-header">
-      <h2>Link a new viewer</h2>
-      <button class="bootstrap-close" onclick="closeInviteModal()">&times;</button>
+      <h2>Onboard a visitor</h2>
+      <button class="bootstrap-close" onclick="closeOnboardModal()">&times;</button>
     </div>
-    <p class="invite-help" id="inviteHelp">
-      Scan <strong>step 1</strong> to join the dashboard's WiFi, then <strong>step 2</strong> to open it. If the phone already knows the WiFi, jump straight to step 2.
+    <p class="invite-help">
+      Show the visitor these QR codes. They scan step 1 to join the lab WiFi, then step 2 to open the dashboard — from there they ask to pair and you approve them on this tab.
     </p>
 
-    <div id="inviteWifiBlock" hidden>
-      <p class="invite-step-label">Step 1: Join the hotspot WiFi <span id="inviteWifiSsidLabel" class="invite-step-side"></span></p>
+    <div id="onboardWifiBlock" hidden>
+      <p class="invite-step-label">Step 1: Join the hotspot WiFi <span id="onboardWifiSsidLabel" class="invite-step-side"></span></p>
       <div class="invite-qr-wrap">
-        <img id="inviteWifiQrImg" alt="WiFi-join QR" />
+        <img id="onboardWifiQrImg" alt="WiFi-join QR" />
       </div>
       <div class="invite-url-group">
         <label>Or type these by hand:</label>
         <div class="invite-url-row">
-          <input id="inviteWifiSsid" readonly />
-          <button onclick="copyInputToClipboard('inviteWifiSsid', this)">Copy</button>
+          <input id="onboardWifiSsid" readonly />
+          <button onclick="copyInputToClipboard('onboardWifiSsid', this)">Copy</button>
         </div>
         <div class="invite-url-row" style="margin-top:6px;">
-          <input id="inviteWifiPsk" type="password" readonly />
-          <button onclick="toggleWifiPskReveal()" id="inviteWifiPskReveal">Show</button>
-          <button onclick="copyInputToClipboard('inviteWifiPsk', this)">Copy</button>
+          <input id="onboardWifiPsk" type="password" readonly />
+          <button onclick="toggleOnboardWifiPskReveal()" id="onboardWifiPskReveal">Show</button>
+          <button onclick="copyInputToClipboard('onboardWifiPsk', this)">Copy</button>
         </div>
       </div>
     </div>
 
-    <p class="invite-step-label" id="inviteStep2Label">Open the dashboard</p>
+    <p class="invite-step-label">Step 2: Open the dashboard</p>
     <div class="invite-qr-wrap">
-      <img id="inviteQrImg" alt="Dashboard-link QR" />
+      <img id="onboardDashQrImg" alt="Dashboard URL QR" />
     </div>
-    <div class="invite-mode-toggle" id="inviteModeToggle" hidden>
-      <button id="inviteModeLocalBtn" class="active" onclick="setInviteMode('local')">In-room</button>
-      <button id="inviteModeRemoteBtn" onclick="setInviteMode('remote')">Anywhere</button>
-    </div>
-    <p class="invite-mode-hint" id="inviteModeHint" hidden></p>
     <div class="invite-url-group">
-      <label id="inviteUrlLabel">Or copy the link manually:</label>
+      <label>Or open this URL on the device:</label>
       <div class="invite-url-row">
-        <input id="inviteUrlActive" readonly />
-        <button onclick="copyInputToClipboard('inviteUrlActive', this)">Copy</button>
+        <input id="onboardDashUrl" readonly />
+        <button onclick="copyInputToClipboard('onboardDashUrl', this)">Copy</button>
       </div>
     </div>
-    <div class="invite-countdown" id="inviteCountdown">Expires in 5:00</div>
   </div>
 </div>
 
@@ -1503,10 +1501,17 @@ async function bootstrapHive() {
   }
   console.log('[hive] r2-wasm loaded:', wasmVersion());
 
+  // Cross-origin cert import. The lab-origin webapp (loaded from
+  // http://<lan_ip>:8080) issues a "Save for off-network use" link
+  // that opens the static-host build with a #bundle=… fragment
+  // carrying the cert + relay_url. The fragment never traverses the
+  // network, so the cert stays client-side. After import we wipe
+  // the fragment so a reload doesn't re-trigger the import path.
+  await tryImportOffNetworkBundle();
+
   // SPEC-R2-ROCKER-ACCESS §8 trailing paragraph + §11.2:
   //   * KeyHolder-on-localhost shortcut → straight through.
-  //   * `?join=` → runs the claim handshake, persists cert, then through.
-  //   * Existing IndexedDB cert → through.
+  //   * Existing IndexedDB cert (incl. one just imported above) → through.
   //   * Otherwise → render the not-enrolled landing page in place of
   //     the regular tabs. The /ws/* connects below are skipped to
   //     avoid a "connected, see live data" view leaking through the
@@ -2601,64 +2606,6 @@ async function renameSensor(addr) {
   }
 }
 
-let _inviteCountdownTimer = null;
-let _currentInvite = null;
-let _inviteMode = 'local';
-
-function setInviteMode(mode) {
-  if (!_currentInvite) return;
-  // If the operator picks Anywhere on an invite that doesn't have a
-  // relay URL (e.g. dashboard launched without --relay-url), silently
-  // fall back to local — the toggle would already be hidden in that
-  // case, but be defensive.
-  if (mode === 'remote' && !_currentInvite.qr_relay) mode = 'local';
-  _inviteMode = mode;
-
-  const localBtn  = document.getElementById('inviteModeLocalBtn');
-  const remoteBtn = document.getElementById('inviteModeRemoteBtn');
-  localBtn.classList.toggle('active',  mode === 'local');
-  remoteBtn.classList.toggle('active', mode === 'remote');
-
-  const qrImg     = document.getElementById('inviteQrImg');
-  const urlInput  = document.getElementById('inviteUrlActive');
-  const urlLabel  = document.getElementById('inviteUrlLabel');
-  const wifiBlock = document.getElementById('inviteWifiBlock');
-  const step2Lbl  = document.getElementById('inviteStep2Label');
-  const help      = document.getElementById('inviteHelp');
-  const hint      = document.getElementById('inviteModeHint');
-
-  if (mode === 'remote') {
-    // Anywhere mode: single QR + cellular-friendly URL. No WiFi
-    // step, since the phone doesn't need to be on the hotspot at all.
-    qrImg.src    = _currentInvite.qr_relay;
-    urlInput.value = _currentInvite.url_relay;
-    urlLabel.textContent = 'Or copy this link (works from anywhere):';
-    wifiBlock.hidden = true;
-    step2Lbl.textContent = 'Scan to open the dashboard';
-    help.innerHTML = "The phone can scan this from anywhere on the internet — no WiFi join needed. Live data flows through the cloud relay.";
-    hint.textContent = 'Works on any internet connection. Slightly higher latency.';
-    hint.hidden = false;
-  } else {
-    // In-room mode: two-step flow — scan WiFi-join QR first, then
-    // the dashboard QR. Hand-typing the PSK off the screen is a
-    // pain (it's a long auto-generated string), so the QR is the
-    // path of least resistance.
-    qrImg.src    = _currentInvite.qr_local;
-    urlInput.value = _currentInvite.url_local;
-    urlLabel.textContent = 'Or copy the link manually:';
-    if (_currentInvite.has_wifi) {
-      wifiBlock.hidden = false;
-      step2Lbl.textContent = 'Step 2: Open the dashboard';
-      help.innerHTML = "Scan <strong>step 1</strong> to join the dashboard's WiFi, then <strong>step 2</strong> to open it. If the phone already knows the WiFi, jump straight to step 2.";
-    } else {
-      wifiBlock.hidden = true;
-      step2Lbl.textContent = 'Open the dashboard';
-      help.innerHTML = "Scan with the new device's camera while it's on the same WiFi as the dashboard.";
-    }
-    hint.textContent = 'Phone must be on the dashboard’s WiFi. Fastest path; no internet needed.';
-    hint.hidden = !_currentInvite.qr_relay;   // hide the hint line entirely when the toggle isn't shown
-  }
-}
 let _isKeyHolder = false; // updated optimistically on each /api/access/* hit
 
 async function loadLinkMembers() {
@@ -2684,11 +2631,11 @@ async function loadLinkMembers() {
       Couldn't load paired devices: ${escapeText(String(err))}
     </div>`;
   }
-  // The "Link a new viewer" button is the operator's invite trigger;
-  // visible only when we're the KeyHolder. /api/access/invite would
+  // The "Onboard a visitor" button is the operator's helper trigger;
+  // visible only when we're the KeyHolder. /api/access/onboard would
   // 403 otherwise, so hiding it just makes the read-only UX clean.
-  const inviteBtn = document.getElementById('linkInviteBtn');
-  if (inviteBtn) inviteBtn.hidden = !_isKeyHolder;
+  const onboardBtn = document.getElementById('linkOnboardBtn');
+  if (onboardBtn) onboardBtn.hidden = !_isKeyHolder;
 }
 
 async function loadPendingRequests() {
@@ -2784,6 +2731,29 @@ function renderLinkMembersList(members, opts) {
     </div>`;
   }
 
+  // Paired viewer (not the KeyHolder on localhost) — show a "this
+  // device" card with the off-network hand-off button. The button
+  // builds a #bundle=… URL pointing at the public HTTPS copy of the
+  // webapp; the user opens it once, and from then on the off-network
+  // origin has the same cert and can reach the dashboard via the
+  // relay from anywhere.
+  if (!hostIsLocal && viewerIdentityPkHex) {
+    const pkShort = `${viewerIdentityPkHex.slice(0, 8)}…${viewerIdentityPkHex.slice(-4)}`;
+    html += `<div class="link-member-card">
+      <div>
+        <div class="name">This device</div>
+        <div class="meta">
+          <span class="pill viewer">viewer</span>
+          Paired with this dashboard. <code>${pkShort}</code>
+        </div>
+        <p class="invite-help" style="margin-top:8px;">
+          Open the off-network URL to use this device when you're away from the lab WiFi. The cert stays on your device — the relay only forwards encrypted frames.
+        </p>
+      </div>
+      <button class="btn-update" onclick="exportOffNetworkAccess()">↗ Save for off-network use</button>
+    </div>`;
+  }
+
   if (opts.forbidden) {
     html += `<div class="card" style="color:#94a3b8; padding:20px;">
       <p>This view is read-only on remote devices in v0.1.</p>
@@ -2854,129 +2824,63 @@ async function revokeMember(device_pk, name) {
   }
 }
 
-// ── Invite modal (Link a new viewer) ──────────────────────────────────
+// ── Onboard-a-visitor modal (SPEC-R2-ROCKER-ACCESS v0.3 §8) ────────────
+//
+// Replaces the v0.2 "Link a new viewer" invite-token flow with a static
+// pair of QRs. There is no token, no expiry, no server-side state — the
+// modal just fetches the two QR payloads on open and renders them. The
+// visitor's enrolment journey now starts on the not-enrolled landing
+// page after they've opened the dashboard URL.
 
-async function openInviteModal() {
+async function openOnboardModal() {
   try {
-    const res = await fetch('/api/access/invite', { method: 'POST' });
+    const res = await fetch('/api/access/onboard');
     if (res.status === 403) {
-      alert('Only the controller (this device) can invite new viewers in this release.');
+      alert('Only the controller (this device) can show onboarding QRs.');
       return;
     }
     if (!res.ok) {
       const body = await res.text();
-      alert(`Couldn't generate an invite: ${body}`);
+      alert(`Couldn't load onboarding QRs: ${body}`);
       return;
     }
-    const inv = await res.json();
-    // The dashboard binds to whatever `--bind` says (default 0.0.0.0),
-    // but a viewer device scanning the QR needs an actually-reachable
-    // host. The operator's browser IS reachable at `location.host` by
-    // definition (it just loaded the page from there), so use that as
-    // the authoritative URL for the same-WiFi path. The QR encodes
-    // its own `r2://` deeplink + a `?relay=` query (when relay is
-    // configured), independent of this.
-    // The server's `resolve_public_origin` already walks NetworkManager
-    // hotspot creds + route-table lookups to pick a viewer-reachable
-    // IP (e.g. 10.42.0.1). Only override with `location.host` if the
-    // server's answer is loopback / unspecified AND the browser's
-    // own host is something better — otherwise we'd substitute
-    // `localhost` when the operator browses to the dashboard from
-    // the controller laptop itself, which a phone on the hotspot
-    // can't reach.
-    const fixedLocal = (() => {
-      const serverHost = (() => {
-        try { return new URL(inv.url_local).host; } catch { return ''; }
-      })();
-      const isBadHost = (h) => {
-        if (!h) return true;
-        const bare = h.replace(/:\d+$/, '');
-        return bare === 'localhost' || bare === '127.0.0.1'
-            || bare === '0.0.0.0'   || bare === '::1'
-            || bare === '[::1]'     || bare === '[::]';
-      };
-      if (!isBadHost(serverHost)) return inv.url_local;
-      if (isBadHost(location.host)) return inv.url_local;
-      return inv.url_local.replace(
-        /^http:\/\/[^/]+/,
-        `${location.protocol}//${location.host}`
-      );
-    })();
-
-    // Stash both QR + URL pairs on a global so the In-room ↔ Anywhere
-    // toggle (setInviteMode) can swap them without re-fetching the
-    // invite. WiFi creds are folded in so In-room re-shows step 1
-    // and Anywhere hides it.
-    _currentInvite = {
-      qr_local:  inv.qr_png_data_url,
-      qr_relay:  inv.qr_relay_png_data_url || null,
-      url_local: fixedLocal,
-      url_relay: inv.url_relay || null,
-      has_wifi:  !!inv.qr_wifi_data_url,
-    };
-
-    // Step-1 WiFi-join QR (present iff the dashboard knows the
-    // hotspot creds — i.e. --wifi-config pointed at a readable
-    // wifi_config.toml, or NetworkManager exposes them). Populated
-    // once here; visibility toggles with mode in setInviteMode.
-    if (inv.qr_wifi_data_url) {
-      document.getElementById('inviteWifiQrImg').src = inv.qr_wifi_data_url;
-      const ssidLabel = document.getElementById('inviteWifiSsidLabel');
-      ssidLabel.textContent = inv.wifi_ssid ? `(${inv.wifi_ssid})` : '';
-      if (inv.wifi_ssid) document.getElementById('inviteWifiSsid').value = inv.wifi_ssid;
-      if (inv.wifi_psk)  {
-        document.getElementById('inviteWifiPsk').value = inv.wifi_psk;
-        document.getElementById('inviteWifiPsk').type = 'password';
-        document.getElementById('inviteWifiPskReveal').textContent = 'Show';
+    const info = await res.json();
+    // Step-1 WiFi-join QR — present iff the dashboard knows the
+    // hotspot creds (`--wifi-config` or NetworkManager exposes them).
+    if (info.wifi_qr_data_url) {
+      document.getElementById('onboardWifiQrImg').src = info.wifi_qr_data_url;
+      const ssidLabel = document.getElementById('onboardWifiSsidLabel');
+      ssidLabel.textContent = info.wifi_ssid ? `(${info.wifi_ssid})` : '';
+      if (info.wifi_ssid) document.getElementById('onboardWifiSsid').value = info.wifi_ssid;
+      if (info.wifi_psk)  {
+        const pskInp = document.getElementById('onboardWifiPsk');
+        const pskBtn = document.getElementById('onboardWifiPskReveal');
+        pskInp.value = info.wifi_psk;
+        pskInp.type = 'password';
+        pskBtn.textContent = 'Show';
       }
+      document.getElementById('onboardWifiBlock').hidden = false;
+    } else {
+      document.getElementById('onboardWifiBlock').hidden = true;
     }
-
-    // Show the In-room ↔ Anywhere switch only when the dashboard
-    // actually has a relay configured. Without it, "Anywhere" has
-    // nothing to point at, so the existing single-QR layout stands.
-    const toggle = document.getElementById('inviteModeToggle');
-    toggle.hidden = !(_currentInvite.qr_relay && _currentInvite.url_relay);
-
-    setInviteMode('local');
-    startInviteCountdown(inv.expires_at_ms);
-    document.getElementById('inviteOverlay').hidden = false;
+    // Step-2 dashboard-URL QR. Always present — even if the operator
+    // started the dashboard without WiFi creds, the visitor can still
+    // type the URL or scan it directly.
+    document.getElementById('onboardDashQrImg').src = info.dashboard_qr_data_url;
+    document.getElementById('onboardDashUrl').value = info.dashboard_url;
+    document.getElementById('onboardOverlay').hidden = false;
   } catch (err) {
-    alert(`Couldn't generate an invite: ${err}`);
+    alert(`Couldn't load onboarding QRs: ${err}`);
   }
 }
 
-function closeInviteModal() {
-  document.getElementById('inviteOverlay').hidden = true;
-  if (_inviteCountdownTimer) {
-    clearInterval(_inviteCountdownTimer);
-    _inviteCountdownTimer = null;
-  }
+function closeOnboardModal() {
+  document.getElementById('onboardOverlay').hidden = true;
 }
 
-function startInviteCountdown(expiresAtMs) {
-  if (_inviteCountdownTimer) clearInterval(_inviteCountdownTimer);
-  const el = document.getElementById('inviteCountdown');
-  const tick = () => {
-    const remaining = Math.max(0, expiresAtMs - Date.now());
-    if (remaining <= 0) {
-      el.textContent = 'Expired — close and try again';
-      el.classList.add('expired');
-      clearInterval(_inviteCountdownTimer);
-      _inviteCountdownTimer = null;
-      return;
-    }
-    const m = Math.floor(remaining / 60_000);
-    const s = Math.floor((remaining % 60_000) / 1000);
-    el.textContent = `Expires in ${m}:${String(s).padStart(2, '0')}`;
-    el.classList.remove('expired');
-  };
-  tick();
-  _inviteCountdownTimer = setInterval(tick, 250);
-}
-
-function toggleWifiPskReveal() {
-  const inp = document.getElementById('inviteWifiPsk');
-  const btn = document.getElementById('inviteWifiPskReveal');
+function toggleOnboardWifiPskReveal() {
+  const inp = document.getElementById('onboardWifiPsk');
+  const btn = document.getElementById('onboardWifiPskReveal');
   const showing = inp.type === 'text';
   inp.type = showing ? 'password' : 'text';
   btn.textContent = showing ? 'Show' : 'Hide';
@@ -3097,6 +3001,12 @@ function b64ToBytes(b64) {
   return out;
 }
 
+function bytesToB64(u8) {
+  let bin = '';
+  for (let i = 0; i < u8.length; i++) bin += String.fromCharCode(u8[i]);
+  return btoa(bin);
+}
+
 /// Parse the `?join=` token + optional `&relay=` URL out of the URL.
 /// Returns `{ tg_hash, entropy_hex, relay }` or null.
 function parseJoinParam() {
@@ -3204,6 +3114,161 @@ async function forgetViewerIdentity() {
   viewerIdentity      = null;
   viewerIdentityPkHex = null;
   await idbDelete(IDB_KEY).catch(() => {});
+  await idbDelete('relay_url').catch(() => {});
+}
+
+// ── Cross-origin cert hand-off ─────────────────────────────────────────
+//
+// The lab-origin webapp (http://<lan_ip>:8080) has the cert in its own
+// IndexedDB after enrolment. A copy of the same webapp loaded from a
+// public HTTPS host (e.g. reality2-ai.github.io/r2-rocker/) lives in a
+// different origin and therefore a different IndexedDB store. To let
+// the same device use the off-network host without re-enrolling, the
+// lab-origin webapp builds a #bundle=… URL that the new origin can
+// import. The fragment never traverses the network, so the cert stays
+// client-side; the operator is the transport.
+
+const OFF_NETWORK_HOST = 'https://reality2-ai.github.io/r2-rocker/';
+
+/// Build a #bundle=… URL pointing at the off-network host that, when
+/// opened, will copy this device's cert + relay_url into the off-network
+/// origin's IndexedDB. Returns null if we have no identity to export.
+function buildOffNetworkBundleUrl(memberBlobBytes, relayUrl) {
+  const bundle = {
+    v: 1,
+    m: bytesToB64(memberBlobBytes),
+    r: relayUrl || null,
+  };
+  const json = JSON.stringify(bundle);
+  // URL-safe base64 of the JSON. Modern browsers cap URLs at ~32k; the
+  // member blob is ~277 bytes b64'd ≈ 370, plus relay_url ≈ 30, so the
+  // fragment is well under 1k — fine for any browser/QR encoder.
+  const b64 = b64encode(json);
+  return `${OFF_NETWORK_HOST}#bundle=${encodeURIComponent(b64)}`;
+}
+
+/// On boot of the off-network copy of the webapp, detect a #bundle=…
+/// hand-off, decode it into IndexedDB, and clear the fragment so a
+/// refresh doesn't re-trigger the import. Idempotent — re-importing
+/// the same bundle is a no-op. Errors are logged but don't block the
+/// regular boot path (the user can re-export from lab-origin if the
+/// bundle is malformed).
+async function tryImportOffNetworkBundle() {
+  if (!location.hash || !location.hash.includes('bundle=')) return;
+  const m = location.hash.match(/bundle=([^&]+)/);
+  if (!m) return;
+  try {
+    const json = b64decode(decodeURIComponent(m[1]));
+    const obj = JSON.parse(json);
+    if (obj.v !== 1 || typeof obj.m !== 'string') {
+      console.warn('[access] off-network bundle: bad shape, ignoring');
+      return;
+    }
+    const blob = b64ToBytes(obj.m);
+    // Validate before persisting — a bundle pointing at a stale TG
+    // would still parse via WasmR2Member.from_bytes but fail
+    // is_valid; we'd rather catch that here than in accessGate.
+    const member = WasmR2Member.from_bytes(new Uint8Array(blob));
+    const nowSecs = BigInt(Math.floor(Date.now() / 1000));
+    if (!member.is_valid(nowSecs)) {
+      console.warn('[access] off-network bundle: cert expired, ignoring');
+      return;
+    }
+    await idbPut(IDB_KEY, new Uint8Array(blob));
+    if (obj.r) {
+      await idbPut('relay_url', obj.r);
+    } else {
+      await idbDelete('relay_url').catch(() => {});
+    }
+    console.log('[access] imported off-network bundle — device now enrolled at this origin');
+  } catch (err) {
+    console.warn('[access] off-network bundle import failed:', err);
+  } finally {
+    // Clear the fragment in any case — a malformed bundle that's left
+    // in the URL just churns on every reload otherwise.
+    if (location.hash) {
+      history.replaceState(null, '', location.pathname + location.search);
+    }
+  }
+}
+
+// Small base64 helpers. We already have b64ToBytes / bytesToB64 for
+// raw bytes; these wrap them for JSON strings, which is what the
+// bundle is encoded as.
+function b64encode(str) {
+  return btoa(unescape(encodeURIComponent(str)));
+}
+function b64decode(b64) {
+  return decodeURIComponent(escape(atob(b64)));
+}
+
+/// Triggered by the "Save for off-network use" button on the Link
+/// tab's "this device" card. Reads the cert + relay_url from local
+/// IndexedDB, builds the #bundle=… URL, and navigates to it. The
+/// off-network host's webapp picks up the fragment and imports.
+///
+/// Same-tab navigation is safer than window.open() here:
+///   1. iOS Safari blocks window.open() unless directly inside the
+///      click handler with no awaits beforehand, and we have awaits.
+///   2. After import the off-network page becomes the user's
+///      enrolled session anyway — opening it in the same tab is the
+///      action they actually want.
+async function exportOffNetworkAccess() {
+  if (!viewerIdentity || !viewerIdentityPkHex) {
+    alert("No cert to save — this device isn't enrolled.");
+    return;
+  }
+  try {
+    const blob = await idbGet(IDB_KEY).catch(() => null);
+    if (!blob) {
+      alert("Cert missing from local storage — try pairing again.");
+      return;
+    }
+    const relayUrl = await idbGet('relay_url').catch(() => null);
+    const url = buildOffNetworkBundleUrl(new Uint8Array(blob), relayUrl);
+    // Confirm before navigating so the user understands what's
+    // happening — otherwise the page jumps to github.io and they
+    // wonder what just happened.
+    const ok = confirm(
+      "Open the off-network site? Your cert will be copied into your browser's storage there, and you'll then be able to use the dashboard from anywhere with internet."
+    );
+    if (!ok) return;
+    location.href = url;
+  } catch (err) {
+    alert(`Couldn't build off-network link: ${err}`);
+  }
+}
+
+/// Ask the dashboard whether our `viewerIdentityPkHex` is still a known
+/// member. Returns true for 200 (enrolled + not revoked), false for
+/// 404 or revoked. Transient errors (network blip, fetch failure)
+/// return true conservatively — better to keep the session up on a
+/// flaky link than tear it down spuriously. The only persistent
+/// 404-style failure that drops the cert is the explicit "no such
+/// member" response.
+///
+/// Skipped entirely when we're loaded over HTTPS — the dashboard
+/// only speaks HTTP in v0.1, so an HTTPS origin (github.io static
+/// host) can never reach /api/access/whoami; the request would 404
+/// against the static host's missing-route handler and spuriously
+/// wipe a freshly-imported cert. The relay-side leg has its own
+/// teardown signal (r2.dash.access.revoked on /ws/status, §7.3).
+async function dashboardKnowsMe() {
+  if (!viewerIdentityPkHex) return false;
+  if (location.protocol !== 'http:') {
+    // Off-network origin — defer the trust check to the relay leg.
+    return true;
+  }
+  try {
+    const res = await fetch(`/api/access/whoami/${encodeURIComponent(viewerIdentityPkHex)}`);
+    if (res.status === 404) return false;
+    if (!res.ok) return true; // transient — keep the session
+    const body = await res.json().catch(() => ({}));
+    return body.enrolled === true && body.revoked !== true;
+  } catch (err) {
+    console.warn('[access] whoami probe failed (network?), keeping session:', err);
+    return true;
+  }
 }
 
 // ── Not-enrolled landing page (SPEC-R2-ROCKER-ACCESS §8 trailing para) ─
@@ -3378,6 +3443,17 @@ function startPendingRequestPoll(pk_hex) {
       const member = wasmCompleteJoin(_pendingDeviceSk, tg_pk, encrypted, nowSecs);
       const blob = member.to_bytes();
       await idbPut(IDB_KEY, new Uint8Array(blob));
+      // Persist relay_url alongside the cert per SPEC-R2-ROCKER-ACCESS
+      // v0.3 §3.4 + §6. Stored under a separate IndexedDB key because
+      // the R2Member binary blob doesn't have a slot for it. Used by
+      // the off-network reconnect path (§5.2) once that lands.
+      if (body.relay_url) {
+        await idbPut('relay_url', body.relay_url);
+      } else {
+        // Belt-and-braces: if a prior approval cached one and this
+        // round didn't, drop the stale value rather than rely on it.
+        await idbDelete('relay_url').catch(() => {});
+      }
       viewerIdentity = member;
       viewerIdentityPkHex = pk_hex;
       // Reload — the regular path will see the IndexedDB cert and
@@ -3452,10 +3528,12 @@ function applyRoleVisibility() {
     'captureMarkBtn',        // Run-control Mark
     'captureStopBtn',        // Run-control Stop
     'dataDeleteAllBtn',      // Data — Delete all across devices
-    'viewLink',              // Whole Link tab — viewers don't need
-                             //   to see who else is paired.
-    'linkInviteBtn',         // Link — Grant access (defensive,
-                             //   the tab itself is hidden too)
+    'linkOnboardBtn',        // Link — Onboard a visitor (controller-only)
+    // NOTE: viewLink is intentionally NOT in this list. Viewers see
+    // the Link tab so they can access the "Save for off-network use"
+    // button on their own "this device" card. The member-list area
+    // renders read-only / forbidden for them; the onboard button
+    // above is still controller-only.
   ];
   for (const id of controllerOnlyIds) {
     const el = document.getElementById(id);
@@ -3610,11 +3688,23 @@ async function accessGate() {
     }
   }
 
-  // Returning enrolled device.
+  // Returning enrolled device. Cross-check with the dashboard: even
+  // when IndexedDB has a structurally-valid cert, the dashboard's
+  // persistent member set may have been wiped or rotated between
+  // sessions, leaving us with a "ghost" cert that lets us into the
+  // UI but doesn't correspond to any known member. /api/access/whoami
+  // resolves the truth — 200 means we're still on file, 404 means
+  // we're stale and need to re-pair.
   if (await loadExistingIdentity()) {
-    isControllerRole = false;
-    applyRoleVisibility();
-    return true;
+    if (await dashboardKnowsMe()) {
+      isControllerRole = false;
+      applyRoleVisibility();
+      return true;
+    }
+    console.warn('[access] cert in IndexedDB but dashboard has no record — wiping and re-prompting');
+    await forgetViewerIdentity();
+    renderNotEnrolledLanding('This device was paired with an earlier dashboard run. Please pair again.');
+    return false;
   }
 
   // KeyHolder shortcut — the controller's own browser, with no token
@@ -4604,13 +4694,13 @@ Object.assign(window, {
   requestDeleteAllFleet,
   // Link tab (SPEC-R2-ROCKER-ACCESS).
   loadLinkMembers,
-  openInviteModal,
-  closeInviteModal,
-  setInviteMode,
+  openOnboardModal,
+  closeOnboardModal,
+  toggleOnboardWifiPskReveal,
   copyInputToClipboard,
   revokeMember,
   landingTryPaste,
-  toggleWifiPskReveal,
+  exportOffNetworkAccess,
   // Request-and-approve flow.
   requestAccess,
   cancelRequest,
