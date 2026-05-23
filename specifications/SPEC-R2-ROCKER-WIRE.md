@@ -128,6 +128,13 @@ multi-sensor receive path on dashboard port 21042.
 | 34 | `r2.dash.cmd.identify` | viewer → controller | Operator action: toggle the sensor's identify LED. Payload `{0: req_id (u32), 1: addr (text), 2: on (bool)}`. Controller queues a `r2.dash.identify_set` frame on the sensor's streaming TCP channel (fire-and-forget); response is "ok" iff the queue accepted. Replaces `POST /api/sensor/{addr}/identify`. |
 | 35 | `r2.dash.cmd.bootstrap` | viewer → controller | Operator action: start (or restart) BLE bootstrap discovery. Payload `{0: req_id (u32)}`. Controller aborts any running bootstrap task, cycles the AP, and spawns a fresh discovery cycle; progress streams via the already-migrated `r2.dash.bootstrap.progress` (row 27). cmd.response confirms the task was scheduled (does NOT await discovery completion). Replaces `POST /api/bootstrap`. |
 | 36 | `r2.dash.cmd.device.alias.set` | viewer → controller | Operator action: set or clear a sensor's friendly alias. Payload `{0: req_id (u32), 1: device_pk (text — 64 lowercase hex chars), 2: name (text — empty string clears the alias)}`. Controller validates `device_pk` length, sanitises `name` (alphanumeric / `-` / `_` / space; capped 64 chars), persists, and emits `r2.dash.device.alias.changed` (row 28). Replaces `POST /api/devices/alias`. |
+| 37 | `r2.dash.cmd.access.members.query` | viewer → controller | KeyHolder query: list approved access members. Payload `{0: req_id}`. Response (row 32) carries key 4 as a CBOR array of member records (text-keyed maps with `device_pk_hex`, `name`, `granted_ts_ms`, …). KeyHolder-only — non-loopback callers get `status: "err"`, `message: "forbidden"`. Replaces `GET /api/access/members`. |
+| 38 | `r2.dash.cmd.access.pending.query` | viewer → controller | KeyHolder query: list pending access requests. Payload `{0: req_id}`. Response carries key 4 as a CBOR array of pending records (text-keyed maps with `device_pk_hex`, `name`, `hint`, `requested_ts_ms`, …). KeyHolder-only. Replaces `GET /api/access/pending`. |
+| 39 | `r2.dash.cmd.access.check` | viewer → controller | Device-side query: poll for a decision on a previously-submitted access request. Payload `{0: req_id, 1: device_pk (text — 64 hex chars)}`. Response key 4 = decision text (`"approved"\|"pending"\|"denied"`); when `"approved"`, key 5 carries the response body as a JSON-string (tg_pk_hex / encrypted_b64 / etc., per ACCESS §6). On `not_found` or `bad_request` the response uses `status: "err"` instead. Replaces `GET /api/access/check/{device_pk}`. |
+| 40 | `r2.dash.cmd.access.approve` | viewer → controller | KeyHolder action: approve a pending access request. Payload `{0: req_id, 1: device_pk}`. Mutates access state, emits `r2.dash.access.event` (row 26) with subtype `"request_approved"`, and pushes a `JOIN_RESPONSE` binary frame onto the relay's outbound channel so off-network viewers receive their bundle without polling (ACCESS §7.1). KeyHolder-only. Replaces `POST /api/access/approve/{device_pk}`. |
+| 41 | `r2.dash.cmd.access.deny` | viewer → controller | KeyHolder action: deny a pending access request. Payload `{0: req_id, 1: device_pk}`. Emits `r2.dash.access.event` subtype `"request_denied"`. KeyHolder-only. Replaces `POST /api/access/deny/{device_pk}`. |
+| 42 | `r2.dash.cmd.access.revoke` | viewer → controller | KeyHolder action: revoke an existing access member. Payload `{0: req_id, 1: device_pk}`. Emits `r2.dash.access.event` subtype `"revoked"`. KeyHolder-only. Replaces `POST /api/access/revoke/{device_pk}`. |
+| 43 | `r2.dash.cmd.access.request` | viewer → controller | Device action: submit a request for access. Payload `{0: req_id, 1: device_pk, 2: name (text), 3: hint (text, optional — defaults to the requester's IP)}`. Emits `r2.dash.access.event` subtype `"request_pending"`. Open to any caller (this is how a new viewer enters the system). Replaces `POST /api/access/request`. |
 
 Implementations MUST treat unknown event hashes as receivable but
 non-actionable — log them and move on; never close the connection over
@@ -164,6 +171,16 @@ replies. The `kind` field (CBOR key 3) identifies the original
 command suffix (e.g. `"capture.start"`, `"access.members"`) so
 a viewer that lost its outstanding-requests table after a
 reload can still classify replies it sees.
+
+**Kind-specific response data.** Commands MAY define
+additional CBOR keys 4+ on the response that carry their
+kind-specific payload. The base shape (keys 0-3) is fixed;
+keys 4+ are interpreted by the consumer based on `kind`. For
+example, `kind: "access.members"` puts a CBOR array of member
+records at key 4; `kind: "access.check"` puts the decision
+text at key 4 and an optional response body (as a JSON-string)
+at key 5. Unknown extra keys MUST be ignored — adding a new
+field on a response is forwards-compatible.
 
 **Failure modes.**
 

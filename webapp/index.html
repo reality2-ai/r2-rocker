@@ -2074,13 +2074,20 @@ function cborEncodeMap(entries) {
 // received that would populate the map (the map is built from
 // inbound traffic).
 const CMD_HASHES = {
-  'capture.start':    0x6d1a1639,
-  'capture.mark':     0xcde3e84e,
-  'capture.stop':     0x3a7d7a93,
-  'reset':            0x2034348e,
-  'identify':         0xe6b434ff,
-  'bootstrap':        0x32cb97d3,
-  'device.alias.set': 0x39cbe30d,
+  'capture.start':         0x6d1a1639,
+  'capture.mark':          0xcde3e84e,
+  'capture.stop':          0x3a7d7a93,
+  'reset':                 0x2034348e,
+  'identify':              0xe6b434ff,
+  'bootstrap':             0x32cb97d3,
+  'device.alias.set':      0x39cbe30d,
+  'access.members.query':  0xd9d510ea,
+  'access.pending.query':  0xca2ef3a6,
+  'access.check':          0xec08004b,
+  'access.approve':        0x7753e6ae,
+  'access.deny':           0xad781a53,
+  'access.revoke':         0xeb2a8467,
+  'access.request':        0x3911a57e,
 };
 const CMD_RESPONSE_HASH = 0x4bf7986c;
 let _nextCmdReqId = 1;
@@ -2156,7 +2163,10 @@ function handleCmdResponse(payload) {
   }
   _pendingCmds.delete(reqId);
   if (status === 'ok') {
-    pending.resolve({ kind, message });
+    // Pass the full payload so callers can read kind-specific
+    // extras (keys 4+ per SPEC-R2-ROCKER-WIRE §2.1) — e.g.
+    // access.members.query's snapshot at key 4.
+    pending.resolve({ kind, message, payload });
   } else {
     pending.reject(new Error(message || `cmd ${kind} failed`));
   }
@@ -2824,23 +2834,24 @@ async function loadLinkMembers() {
   const area = document.getElementById('linkArea');
   if (!area) return;
   try {
-    const res = await fetch('/api/access/members');
-    if (res.status === 403) {
-      _isKeyHolder = false;
-      renderLinkMembersList([], { forbidden: true });
-      // No pending-requests visibility for non-KeyHolder views.
-      document.getElementById('linkPendingArea').hidden = true;
-      return;
-    }
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    // Snapshot rides back in cmd.response key 4 as a JSON-string per
+    // SPEC-R2-ROCKER-WIRE §2.1 ("Kind-specific response data").
+    const out = await sendCmd('access.members.query');
+    const json = out.payload?.['4'] ?? '[]';
+    const list = JSON.parse(json);
     _isKeyHolder = true;
-    const body = await res.json();
-    renderLinkMembersList(body.members ?? [], { forbidden: false });
+    renderLinkMembersList(list, { forbidden: false });
     // KeyHolder also sees pending requests.
     await loadPendingRequests();
   } catch (err) {
+    if (/forbidden/i.test(err.message || '')) {
+      _isKeyHolder = false;
+      renderLinkMembersList([], { forbidden: true });
+      document.getElementById('linkPendingArea').hidden = true;
+      return;
+    }
     area.innerHTML = `<div class="card" style="color:#ef4444; padding:20px;">
-      Couldn't load paired devices: ${escapeText(String(err))}
+      Couldn't load paired devices: ${escapeText(String(err.message || err))}
     </div>`;
   }
   // The "Onboard a visitor" button is the operator's helper trigger;
@@ -2855,10 +2866,8 @@ async function loadPendingRequests() {
   const rows = document.getElementById('linkPendingRows');
   if (!area || !rows) return;
   try {
-    const res = await fetch('/api/access/pending');
-    if (!res.ok) { area.hidden = true; return; }
-    const body = await res.json();
-    const list = body.pending ?? [];
+    const out = await sendCmd('access.pending.query');
+    const list = JSON.parse(out.payload?.['4'] ?? '[]');
     if (list.length === 0) { area.hidden = true; return; }
     rows.innerHTML = list
       .sort((a, b) => (b.requested_at_ms || 0) - (a.requested_at_ms || 0))
@@ -2893,28 +2902,20 @@ function renderPendingRequestRow(r) {
 
 async function approvePending(device_pk, name) {
   try {
-    const res = await fetch(`/api/access/approve/${encodeURIComponent(device_pk)}`, { method: 'POST' });
-    if (!res.ok) {
-      alert(`Approve failed: ${await res.text()}`);
-      return;
-    }
+    await sendCmd('access.approve', [[1, device_pk]]);
     // The list will refresh via /ws/status; reload to be safe.
     loadLinkMembers();
   } catch (err) {
-    alert(`Approve failed: ${err}`);
+    alert(`Approve failed: ${err.message || err}`);
   }
 }
 
 async function denyPending(device_pk) {
   try {
-    const res = await fetch(`/api/access/deny/${encodeURIComponent(device_pk)}`, { method: 'POST' });
-    if (!res.ok) {
-      alert(`Deny failed: ${await res.text()}`);
-      return;
-    }
+    await sendCmd('access.deny', [[1, device_pk]]);
     loadLinkMembers();
   } catch (err) {
-    alert(`Deny failed: ${err}`);
+    alert(`Deny failed: ${err.message || err}`);
   }
 }
 
@@ -3022,12 +3023,7 @@ function renderMemberCard(m) {
 async function revokeMember(device_pk, name) {
   if (!confirm(`Revoke "${name}"? Once revoked, the device will be locked out the next time it tries to connect.`)) return;
   try {
-    const res = await fetch(`/api/access/revoke/${encodeURIComponent(device_pk)}`, { method: 'POST' });
-    if (!res.ok) {
-      const body = await res.text();
-      alert(`Revoke failed: ${body}`);
-      return;
-    }
+    await sendCmd('access.revoke', [[1, device_pk]]);
     // Optimistic refresh — the /ws/status broadcast will also trigger
     // a reload via handleAccessWsEvent below.
     loadLinkMembers();
@@ -3601,19 +3597,16 @@ async function requestAccess() {
       }
       connectRelay(relayUrl);
     } else {
-      // In-room HTTP path. Same ephemeral-keypair → /api/access/request
-      // pattern that was here before the relay was added.
+      // In-room path. Ephemeral keypair → r2.dash.cmd.access.request
+      // over /ws/raw (formerly POST /api/access/request before the cmd
+      // framework). Same shape that was here before the relay leg
+      // was added; only the transport changed.
       const kp = wasmGenerateDeviceKeypair();
       _pendingDeviceSk = new Uint8Array(kp.secret_key);
       _pendingDevicePk = new Uint8Array(kp.public_key);
       const pk_hex = bytesToHex(_pendingDevicePk);
       _pendingRequestPk = pk_hex;
-      const res = await fetch('/api/access/request', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ device_pk: pk_hex, name }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+      await sendCmd('access.request', [[1, pk_hex], [2, name]]);
       document.getElementById('landingRequestForm').hidden = true;
       document.getElementById('landingWaiting').hidden = false;
       document.getElementById('landingWaitingName').textContent = name;
@@ -3637,18 +3630,27 @@ function cancelRequest() {
 function startPendingRequestPoll(pk_hex) {
   stopPendingRequestPoll();
   const tick = async () => {
+    let out;
     try {
-      const res = await fetch(`/api/access/check/${encodeURIComponent(pk_hex)}`);
-      if (res.status === 202) return; // still pending
-      if (res.status === 410) {
-        stopPendingRequestPoll();
-        document.getElementById('landingWaiting').hidden = true;
-        document.getElementById('landingDenied').hidden = false;
-        return;
-      }
-      if (!res.ok) return; // transient — keep polling
-      // Approved — finish enrolment client-side.
-      const body = await res.json();
+      out = await sendCmd('access.check', [[1, pk_hex]]);
+    } catch (err) {
+      // err covers status:"err" (not_found / bad_request) and timeouts.
+      // Both are transient from the polling caller's view — keep going.
+      return;
+    }
+    const decision = out.payload?.['4'];
+    if (decision === 'pending') return;
+    if (decision === 'denied') {
+      stopPendingRequestPoll();
+      document.getElementById('landingWaiting').hidden = true;
+      document.getElementById('landingDenied').hidden = false;
+      return;
+    }
+    if (decision !== 'approved') return; // unknown — keep polling
+    // Approved — finish enrolment client-side. Body rides in key 5
+    // as a JSON-string per SPEC-R2-ROCKER-WIRE §2.1.
+    try {
+      const body = JSON.parse(out.payload['5'] ?? '{}');
       stopPendingRequestPoll();
       const tg_pk = hexToBytes(body.tg_pk_hex);
       const encrypted = b64ToBytes(body.encrypted_b64);
@@ -3673,7 +3675,7 @@ function startPendingRequestPoll(pk_hex) {
       // come up enrolled.
       location.reload();
     } catch (err) {
-      console.warn('[access] poll error:', err);
+      console.warn('[access] approve finalisation failed:', err);
     }
   };
   _pendingRequestPoller = setInterval(tick, 2000);

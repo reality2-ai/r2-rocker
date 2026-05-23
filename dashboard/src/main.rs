@@ -90,6 +90,13 @@ const DASH_CMD_RESET:         u32 = r2_fnv::fnv1a_32(b"r2.dash.cmd.reset");
 const DASH_CMD_IDENTIFY:      u32 = r2_fnv::fnv1a_32(b"r2.dash.cmd.identify");
 const DASH_CMD_BOOTSTRAP:     u32 = r2_fnv::fnv1a_32(b"r2.dash.cmd.bootstrap");
 const DASH_CMD_DEVICE_ALIAS_SET: u32 = r2_fnv::fnv1a_32(b"r2.dash.cmd.device.alias.set");
+const DASH_CMD_ACCESS_MEMBERS_QUERY: u32 = r2_fnv::fnv1a_32(b"r2.dash.cmd.access.members.query");
+const DASH_CMD_ACCESS_PENDING_QUERY: u32 = r2_fnv::fnv1a_32(b"r2.dash.cmd.access.pending.query");
+const DASH_CMD_ACCESS_CHECK:  u32 = r2_fnv::fnv1a_32(b"r2.dash.cmd.access.check");
+const DASH_CMD_ACCESS_APPROVE: u32 = r2_fnv::fnv1a_32(b"r2.dash.cmd.access.approve");
+const DASH_CMD_ACCESS_DENY:   u32 = r2_fnv::fnv1a_32(b"r2.dash.cmd.access.deny");
+const DASH_CMD_ACCESS_REVOKE: u32 = r2_fnv::fnv1a_32(b"r2.dash.cmd.access.revoke");
+const DASH_CMD_ACCESS_REQUEST: u32 = r2_fnv::fnv1a_32(b"r2.dash.cmd.access.request");
 const DASH_CMD_RESPONSE:      u32 = r2_fnv::fnv1a_32(b"r2.dash.cmd.response");
 
 /// Map hash → human-readable name shipped to the browser.
@@ -808,7 +815,7 @@ async fn main() {
         // Phase 5d: raw R2-WIRE frame forwarder for WASM viewers.
         .route("/ws/raw", get({
             let ws_state = state.clone();
-            move |ws| ws_raw_handler(ws, ws_state)
+            move |ws, connect_info| ws_raw_handler(ws, ws_state, connect_info)
         }))
         // Phase 5d: text-JSON status channel — bootstrap progress, hotspot
         // lifecycle, server warnings. WASM viewers open this alongside
@@ -2079,14 +2086,36 @@ fn emit_cmd_response(
     message: Option<&str>,
     kind: &str,
 ) {
-    let mut buf = vec![0u8; 64 + status.len() + kind.len() + message.map(|m| m.len()).unwrap_or(0)];
+    emit_cmd_response_with_extras(state, req_id, status, message, kind, &[]);
+}
+
+/// Variant that appends kind-specific text pairs after the standard
+/// four keys (SPEC §2.1 "Kind-specific response data"). Used by
+/// snapshot/query responses where the payload is one or two JSON-
+/// serialised strings — keeps the CBOR-translation surface small at
+/// the cost of one JSON.parse on the viewer side.
+fn emit_cmd_response_with_extras(
+    state: &Arc<AppState>,
+    req_id: u32,
+    status: &str,
+    message: Option<&str>,
+    kind: &str,
+    extras: &[(u64, &str)],
+) {
+    let extras_bytes: usize = extras.iter().map(|(_, v)| v.len() + 8).sum();
+    let mut buf = vec![0u8; 64 + status.len() + kind.len()
+                       + message.map(|m| m.len()).unwrap_or(0)
+                       + extras_bytes];
     let mut enc = r2_cbor::Encoder::new(&mut buf);
-    let n_keys = 3 + message.is_some() as usize;
+    let n_keys = 3 + message.is_some() as usize + extras.len();
     let _ = enc.map(n_keys);
     let _ = enc.kv(0, &r2_cbor::Value::UInt(req_id as u64));
     let _ = enc.kv(1, &r2_cbor::Value::Text(status));
     if let Some(m) = message { let _ = enc.kv(2, &r2_cbor::Value::Text(m)); }
     let _ = enc.kv(3, &r2_cbor::Value::Text(kind));
+    for (k, v) in extras {
+        let _ = enc.kv(*k, &r2_cbor::Value::Text(v));
+    }
     let used = enc.len();
     buf.truncate(used);
 
@@ -2531,7 +2560,7 @@ mod hex {
 /// unknown event hashes are dropped silently; everything else hits
 /// the shared do_* core and yields a `r2.dash.cmd.response` reply
 /// correlated by `req_id`.
-async fn dispatch_cmd_frame(state: &Arc<AppState>, body: &[u8]) {
+async fn dispatch_cmd_frame(state: &Arc<AppState>, peer_addr: SocketAddr, body: &[u8]) {
     let (event_hash, req_id, payload) = match decode_cmd_frame(body) {
         Some(t) => t,
         None => {
@@ -2607,6 +2636,192 @@ async fn dispatch_cmd_frame(state: &Arc<AppState>, body: &[u8]) {
                 Err(msg) => emit_cmd_response(state, req_id, "err", Some(&msg), "device.alias.set"),
             }
         }
+        // ── Access bundle ──────────────────────────────────────────
+        //
+        // KeyHolder-only ops (members/pending/approve/deny/revoke) use the
+        // same loopback gate as the HTTP /api/access/* handlers (ACCESS
+        // §11.1). request + check are open since they're how a new viewer
+        // enters the system. The cert-handshake variant of this gate lands
+        // with ACCESS v1.0.
+        DASH_CMD_ACCESS_MEMBERS_QUERY => {
+            let handle = match state.access.as_ref() {
+                Some(h) => h.clone(),
+                None => { emit_cmd_response(state, req_id, "err", Some("access not configured"), "access.members.query"); return; }
+            };
+            if !is_keyholder(peer_addr) {
+                emit_cmd_response(state, req_id, "err", Some("forbidden"), "access.members.query");
+                return;
+            }
+            let rows = { handle.lock().await.members() };
+            let json = serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string());
+            emit_cmd_response_with_extras(state, req_id, "ok", None, "access.members.query", &[(4, &json)]);
+        }
+        DASH_CMD_ACCESS_PENDING_QUERY => {
+            let handle = match state.access.as_ref() {
+                Some(h) => h.clone(),
+                None => { emit_cmd_response(state, req_id, "err", Some("access not configured"), "access.pending.query"); return; }
+            };
+            if !is_keyholder(peer_addr) {
+                emit_cmd_response(state, req_id, "err", Some("forbidden"), "access.pending.query");
+                return;
+            }
+            let rows = { handle.lock().await.pending_requests() };
+            let json = serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string());
+            emit_cmd_response_with_extras(state, req_id, "ok", None, "access.pending.query", &[(4, &json)]);
+        }
+        DASH_CMD_ACCESS_CHECK => {
+            let handle = match state.access.as_ref() {
+                Some(h) => h.clone(),
+                None => { emit_cmd_response(state, req_id, "err", Some("access not configured"), "access.check"); return; }
+            };
+            let device_pk = match payload.get("1").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => { emit_cmd_response(state, req_id, "err", Some("missing device_pk (key 1)"), "access.check"); return; }
+            };
+            let outcome = { handle.lock().await.check_request(&device_pk) };
+            use access::CheckOutcome::*;
+            match outcome {
+                Approved(body) => {
+                    let body_json = serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_string());
+                    emit_cmd_response_with_extras(state, req_id, "ok", None, "access.check",
+                        &[(4, "approved"), (5, &body_json)]);
+                }
+                Pending => emit_cmd_response_with_extras(state, req_id, "ok", None, "access.check", &[(4, "pending")]),
+                Denied  => emit_cmd_response_with_extras(state, req_id, "ok", None, "access.check", &[(4, "denied")]),
+                NotFound => emit_cmd_response(state, req_id, "err", Some("no such request"), "access.check"),
+                BadRequest => emit_cmd_response(state, req_id, "err", Some("device_pk must be 64 hex chars"), "access.check"),
+            }
+        }
+        DASH_CMD_ACCESS_APPROVE => {
+            let handle = match state.access.as_ref() {
+                Some(h) => h.clone(),
+                None => { emit_cmd_response(state, req_id, "err", Some("access not configured"), "access.approve"); return; }
+            };
+            if !is_keyholder(peer_addr) {
+                emit_cmd_response(state, req_id, "err", Some("forbidden"), "access.approve");
+                return;
+            }
+            let device_pk = match payload.get("1").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => { emit_cmd_response(state, req_id, "err", Some("missing device_pk (key 1)"), "access.approve"); return; }
+            };
+            let (outcome, response_body) = {
+                let mut access = handle.lock().await;
+                let o = access.approve_request(&device_pk);
+                let body = access.peek_response(&device_pk);
+                (o, body)
+            };
+            use access::ApproveOutcome::*;
+            match outcome {
+                Approved(pk) => {
+                    let pk_hex = hex::encode(&pk[..]);
+                    emit_access_event(state, "request_approved", &pk_hex, None, None);
+                    // Push the JOIN_RESPONSE binary frame onto the relay's
+                    // outbound channel so off-network viewers receive their
+                    // bundle without polling — identical to the HTTP path.
+                    if let (Some(tx), Some(body)) = (state.relay_binary_tx.as_ref(), response_body) {
+                        use base64::Engine as _;
+                        let tg_pk_hex = body.get("tg_pk_hex").and_then(|v| v.as_str());
+                        let enc_b64   = body.get("encrypted_b64").and_then(|v| v.as_str());
+                        if let (Some(tg_pk_hex), Some(enc_b64)) = (tg_pk_hex, enc_b64) {
+                            let tg_pk_vec = hex::decode(tg_pk_hex).unwrap_or_default();
+                            let encrypted = base64::engine::general_purpose::STANDARD
+                                .decode(enc_b64).unwrap_or_default();
+                            if tg_pk_vec.len() == 32 && !encrypted.is_empty() {
+                                let mut tg_pk = [0u8; 32];
+                                tg_pk.copy_from_slice(&tg_pk_vec);
+                                let frame = relay::build_join_response(&pk, &tg_pk, &encrypted);
+                                let _ = tx.send(frame);
+                            } else {
+                                eprintln!("[access] approve: malformed response body, can't build JOIN_RESPONSE");
+                            }
+                        }
+                    }
+                    emit_cmd_response(state, req_id, "ok", None, "access.approve");
+                }
+                NotFound        => emit_cmd_response(state, req_id, "err", Some("no such pending request"), "access.approve"),
+                AlreadyApproved => emit_cmd_response(state, req_id, "err", Some("already approved"), "access.approve"),
+                Denied          => emit_cmd_response(state, req_id, "err", Some("request was already denied"), "access.approve"),
+                BadRequest      => emit_cmd_response(state, req_id, "err", Some("device_pk must be 64 hex chars"), "access.approve"),
+                Failed(e)       => emit_cmd_response(state, req_id, "err", Some(&e), "access.approve"),
+            }
+        }
+        DASH_CMD_ACCESS_DENY => {
+            let handle = match state.access.as_ref() {
+                Some(h) => h.clone(),
+                None => { emit_cmd_response(state, req_id, "err", Some("access not configured"), "access.deny"); return; }
+            };
+            if !is_keyholder(peer_addr) {
+                emit_cmd_response(state, req_id, "err", Some("forbidden"), "access.deny");
+                return;
+            }
+            let device_pk = match payload.get("1").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => { emit_cmd_response(state, req_id, "err", Some("missing device_pk (key 1)"), "access.deny"); return; }
+            };
+            let outcome = { handle.lock().await.deny_request(&device_pk) };
+            use access::DenyOutcome::*;
+            match outcome {
+                Denied(pk) => {
+                    emit_access_event(state, "request_denied", &hex::encode(&pk[..]), None, None);
+                    emit_cmd_response(state, req_id, "ok", None, "access.deny");
+                }
+                NotFound   => emit_cmd_response(state, req_id, "err", Some("no such pending request"), "access.deny"),
+                BadRequest => emit_cmd_response(state, req_id, "err", Some("device_pk must be 64 hex chars"), "access.deny"),
+            }
+        }
+        DASH_CMD_ACCESS_REVOKE => {
+            let handle = match state.access.as_ref() {
+                Some(h) => h.clone(),
+                None => { emit_cmd_response(state, req_id, "err", Some("access not configured"), "access.revoke"); return; }
+            };
+            if !is_keyholder(peer_addr) {
+                emit_cmd_response(state, req_id, "err", Some("forbidden"), "access.revoke");
+                return;
+            }
+            let device_pk = match payload.get("1").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => { emit_cmd_response(state, req_id, "err", Some("missing device_pk (key 1)"), "access.revoke"); return; }
+            };
+            let outcome = { handle.lock().await.revoke(&device_pk) };
+            use access::RevokeOutcome::*;
+            match outcome {
+                Revoked(pk) => {
+                    emit_access_event(state, "revoked", &hex::encode(&pk[..]), None, None);
+                    emit_cmd_response(state, req_id, "ok", None, "access.revoke");
+                }
+                NotFound   => emit_cmd_response(state, req_id, "err", Some("no such member (already revoked, or never paired)"), "access.revoke"),
+                BadRequest => emit_cmd_response(state, req_id, "err", Some("device_pk must be 64 hex chars"), "access.revoke"),
+                Other(e)   => emit_cmd_response(state, req_id, "err", Some(&e), "access.revoke"),
+            }
+        }
+        DASH_CMD_ACCESS_REQUEST => {
+            let handle = match state.access.as_ref() {
+                Some(h) => h.clone(),
+                None => { emit_cmd_response(state, req_id, "err", Some("access not configured"), "access.request"); return; }
+            };
+            let device_pk = match payload.get("1").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => { emit_cmd_response(state, req_id, "err", Some("missing device_pk (key 1)"), "access.request"); return; }
+            };
+            let name = payload.get("2").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            // Default hint to the WS peer's IP if absent — mirrors the
+            // HTTP handler's behaviour, which derives hint from the
+            // request socket.
+            let hint = payload.get("3").and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| peer_addr.ip().to_string());
+            let outcome = { handle.lock().await.submit_request(&device_pk, &name, &hint) };
+            use access::RequestOutcome::*;
+            match outcome {
+                Submitted(pk) => {
+                    let pk_hex = hex::encode(&pk[..]);
+                    emit_access_event(state, "request_pending", &pk_hex, Some(&name), Some(&hint));
+                    emit_cmd_response(state, req_id, "ok", None, "access.request");
+                }
+                BadRequest(msg) => emit_cmd_response(state, req_id, "err", Some(msg), "access.request"),
+            }
+        }
         _ => {
             // Unknown hash — log and drop per WIRE §2 "non-actionable".
             // No response emitted, per §2.1's failure-modes table.
@@ -2618,13 +2833,14 @@ async fn dispatch_cmd_frame(state: &Arc<AppState>, body: &[u8]) {
 async fn ws_raw_handler(
     ws: WebSocketUpgrade,
     state: Arc<AppState>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws_raw(socket, state))
+    ws.on_upgrade(move |socket| handle_ws_raw(socket, state, addr))
 }
 
-async fn handle_ws_raw(mut socket: WebSocket, state: Arc<AppState>) {
+async fn handle_ws_raw(mut socket: WebSocket, state: Arc<AppState>, peer_addr: SocketAddr) {
     let mut rx = state.raw_frame_tx.subscribe();
-    eprintln!("[ws/raw] viewer connected");
+    eprintln!("[ws/raw] viewer connected from {}", peer_addr);
 
     // Replay cached announce frames per peer so a freshly-connected
     // viewer sees `fw_ver` / `device_pk` / `boot_ts_ms` immediately,
@@ -2679,7 +2895,7 @@ async fn handle_ws_raw(mut socket: WebSocket, state: Arc<AppState>) {
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Err(_)) => break,
                     Some(Ok(Message::Binary(bytes))) => {
-                        dispatch_cmd_frame(&state, &bytes).await;
+                        dispatch_cmd_frame(&state, peer_addr, &bytes).await;
                     }
                     _ => {} // text / ping / pong — ignore
                 }
