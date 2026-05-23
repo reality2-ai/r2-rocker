@@ -79,4 +79,5 @@ XIAO ESP32-S3 Plus, or a custom PCB):
 
 A Cargo-workspace consolidation that pulls the shared sources into a
 library crate (with each carrier providing only its `main.rs` + build
-config) is a plausible future cleanup — out of scope for v0.1.
+config) is a plausible future cleanup — out of scope for the current
+release line.

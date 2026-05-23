@@ -1,68 +1,59 @@
 # webapp
 
-The browser-side r2-rocker WebApp — a full R2 hive running in WebAssembly.
+The browser-side r2-rocker viewer — a full R2 hive running in WebAssembly inside the page.
 
-This directory is being built up incrementally as Phase 5d lands (see
-[`plan/PLAN.md`](../plan/PLAN.md)). Currently it contains a smoke-test
-page that confirms the WASM pipeline works end-to-end.
+## What this is
 
-## Status
+`index.html` boots an `R2RockerHive` (a thin wrapper around `crates/r2-wasm`'s `R2Hive`) and registers a `DashboardViewerSentant` (`crates/r2-rocker-viewer-sentant`). The sentant owns peer state, capture state, alias map, LED phases, and access flow; the page renders from sentant state on every `requestAnimationFrame`.
 
-* ✅ `index.html` — smoke test for `r2-wasm` (load, version, FNV-1a hash,
-  encode/decode an R2-WIRE compact frame, generate a device keypair).
-  Confirms the WASM build pipeline is alive.
-* ⏳ Replace the smoke test with the actual viewer (live charts,
-  Devices view, calibration wizard, joint-group editor, sessions).
-* ⏳ Enrolment flow (QR / link / one-time token) per
-  `AI-CONTEXT.md` § "Browser enrolment via QR / link".
-* ⏳ Wire up to a relay-compatible WSS endpoint (initially the onsite
-  controller's; later the r2-relay or our own combined relay+archive).
+UI events (button clicks, form submits) emit `r2.dash.cmd.*` events on the unified `/r2` WebSocket; status broadcasts from the controller arrive on the same socket as binary R2-WIRE frames and are routed through the sentant's event handlers.
+
+Track D ("webapp runs `R2Hive`") and Tracks B+C ("operator plane → R2 events") landed in v0.2.0 — there is no longer any `/api/*` polling or `/ws/status` JSON channel from the webapp's side.
 
 ## Build
 
-The WASM bundle is built from [`../crates/r2-wasm`](../crates/r2-wasm)
-via `wasm-pack`, with `--out-dir` pointing back here so the viewer
-is a self-contained deployable:
+The WASM bundle is built from [`../crates/r2-wasm`](../crates/r2-wasm) via `wasm-pack`, with `--out-dir` pointing back here so the viewer is a self-contained deployable:
 
 ```bash
 wasm-pack build crates/r2-wasm --target web --release --out-dir ../../webapp/pkg
 ```
 
-Output lands at `webapp/pkg/`. The HTML in this directory
-imports from `./pkg/r2_wasm.js`.
+Output lands at `webapp/pkg/`. `index.html` imports from `./pkg/r2_wasm.js`.
 
-## Run the smoke test
+## Run
 
-The page must be served over HTTP (browsers refuse to load WASM from
-`file://` URLs by default). The onsite-controller dashboard mounts
-this directory at the root of its HTTP port, so once the dashboard
-is running it's reachable at:
+The page must be served over HTTP (browsers refuse to load WASM from `file://`). The onsite controller serves this directory at the root of the unified R2 port:
 
 ```
-http://localhost:8080/
+http://localhost:21042/
 ```
 
-For standalone development without the dashboard, any static-file
-server in this directory works:
+For standalone webapp development without a running controller, any static-file server in this directory works (you'll see the not-enrolled landing page; pairing requires a real controller):
 
 ```bash
 python3 -m http.server 8090   # then http://localhost:8090/
 ```
 
-You should see five rows of green ticks: load status, version,
-`fnv1a_32` of `r2.sensor.acceleration`, a round-trip encode/decode of
-a synthetic R2-WIRE frame, and a fresh device keypair.
+## Tabs
 
-## Deployment (eventual)
+| Tab | Purpose |
+|---|---|
+| **Live** | Real-time accelerometer traces per sensor (1 kHz capture, decimated 100× on the wire). |
+| **Devices** | Fleet status: connection state, run state, firmware version, "needs update" dot, OTA push, Reset, Identify. |
+| **Data** | Per-sensor capture file browser — list, download (CSV with device-stamped header), delete, merged-fleet export. |
+| **Capture** | Start / Mark / Stop the calibration capture; markers carry an operator name and dashboard-stamped timestamp. |
+| **Connections** | Bootstrap log + scan-quiet timer; "Connect Sensors" button emits `r2.dash.cmd.bootstrap`. |
+| **Link** | Access management — onboard a visitor (QR), pending requests, paired devices, revoke. KeyHolder-only Approve/Deny buttons. |
 
-Per `plan/PLAN.md` Phase 5d, this directory ships the static viewer
-bundle to **two hosts** — byte-identical:
+The "Link" tab is the operator-visible name for ACCESS — the spec, code, and event family keep the canonical `access` name (per ACCESS §8).
+
+## Deployment
+
+The bundle ships byte-identical to two hosts:
 
 | Host | Role |
 |---|---|
-| GitHub Pages | Public/internet WebApp host for remote viewers |
-| Onsite controller | Same bundle on the local hotspot for closed-network deployments — no internet required |
+| **Onsite controller** (`:21042/`) | Served from the dashboard process for closed-network LAN deployments — no internet required. |
+| **GitHub Pages** (`reality2-ai.github.io/r2-rocker/`) | Public/internet host for off-network viewers using the relay path (ACCESS §5.2). |
 
-Browser scans a QR (or follows a shared link) from the onsite
-dashboard's Enrol-Device UI; the same WebApp opens and auto-enrols
-the browser into the trust group.
+A viewer enrols by typing a name and clicking "Ask to pair" — the webapp emits `r2.dash.cmd.access.request`, the KeyHolder approves on their Link tab, and the approved bundle (cert + key + DEK + HK + relay URL) is persisted in IndexedDB. Subsequent loads pick up the cert silently.
