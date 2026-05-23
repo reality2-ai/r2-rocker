@@ -2216,16 +2216,25 @@ bootstrapHive();
 
 function handleEvent(msg) {
   totalEvents++;
-  const sensor = msg.source_addr ? getOrCreateSensor(msg.source_addr) : null;
 
   // Operator-plane response — correlated to an in-flight sendCmd()
   // promise. Per SPEC-R2-ROCKER-WIRE §2.1, /ws/raw is broadcast so
   // every viewer receives every reply; sendCmd's req_id map ignores
-  // replies for req_ids it didn't issue.
+  // replies for req_ids it didn't issue. Handled before any per-
+  // sensor lookup since the response's src is "dash", not a sensor.
   if (msg.event === 'r2.dash.cmd.response' && msg.payload) {
     handleCmdResponse(msg.payload);
     return;
   }
+
+  // Only sensor-originated events create per-sensor cards. The
+  // controller-synthesised dash.* / peer.* events carry src like
+  // "dash" or a target addr that doesn't correspond to a streaming
+  // sensor; treating their src as a sensor key would spawn phantom
+  // blank cards in the Live + Devices tabs.
+  const sensor = (msg.source_addr && msg.event && msg.event.startsWith('r2.sensor.'))
+    ? getOrCreateSensor(msg.source_addr)
+    : null;
 
   switch (msg.event) {
     case 'r2.sensor.acceleration':
