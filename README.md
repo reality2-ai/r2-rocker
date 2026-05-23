@@ -7,6 +7,40 @@ failure before it becomes obvious.
 
 ![r2-rocker dashboard — Live tab during a two-sensor run](docs/screenshots/dashboard-live.png)
 
+## Reading order
+
+If you're new and want to understand the whole thing:
+
+1. This README.
+2. [`PROCESS.md`](PROCESS.md) — five rules for how we work on this project.
+3. [`plan/PLAN.md`](plan/PLAN.md) — what we're building, in what order, and why.
+4. [`specifications/HARDWARE-WIRING.md`](specifications/HARDWARE-WIRING.md) — physical sensor build (pinouts, photos).
+5. [`specifications/SECRETS-POLICY.md`](specifications/SECRETS-POLICY.md) — before you touch any keys.
+6. The latest entry in [`conversation/`](conversation/) — the most recent thinking, in raw form.
+
+For AI assistants helping with the project: read
+[`AI-CONTEXT.md`](AI-CONTEXT.md) first; it's a curated entry point.
+
+The full normative specs are under [`specifications/`](specifications/):
+
+- `SPEC-R2-ROCKER-SYSTEM.md` — the system as a whole.
+- `SPEC-R2-ROCKER-WIRE.md` — the message format on the wire.
+- `SPEC-R2-ROCKER-SENSOR.md` — what the sensor firmware does.
+- `SPEC-R2-ROCKER-SENTANTS.md` — the **sentant + plugin catalog**
+  that makes up the sensor firmware (one row per building block,
+  with the events it consumes / produces). The intended workflow
+  is to compose the firmware from these descriptions — re-use a
+  sentant in another ESP32 sensor build by porting the file and
+  declaring its plugin dependencies.
+- `SPEC-R2-ROCKER-DASHBOARD.md` — what the controller does.
+- `SPEC-R2-ROCKER-TIMESYNC.md` — the time-sync hybrid model.
+- `SPEC-R2-ROCKER-SENSOR-HEALTH.md`,
+  `SPEC-R2-ROCKER-SENSOR-REMOTE-RESET.md`,
+  `SPEC-R2-ROCKER-SENSOR-LIVE-LOGS.md` — sensor-side feature specs.
+- `SPEC-R2-ROCKER-BRIDGE.md` — how the production and viewing trust
+  groups talk to each other.
+- `HARDWARE-WIRING.md`, `SECRETS-POLICY.md` — operational specs.
+
 ## What it does
 
 Small battery-powered sensors clip onto the points you want to
@@ -675,40 +709,6 @@ README:
 - **Hive** — a single device running a set of sentants. Each sensor
   is a hive; the controller is a hive; each browser viewer is a
   hive.
-
-## Reading order
-
-If you're new and want to understand the whole thing:
-
-1. This README.
-2. [`PROCESS.md`](PROCESS.md) — five rules for how we work on this project.
-3. [`plan/PLAN.md`](plan/PLAN.md) — what we're building, in what order, and why.
-4. [`specifications/HARDWARE-WIRING.md`](specifications/HARDWARE-WIRING.md) — physical sensor build (pinouts, photos).
-5. [`specifications/SECRETS-POLICY.md`](specifications/SECRETS-POLICY.md) — before you touch any keys.
-6. The latest entry in [`conversation/`](conversation/) — the most recent thinking, in raw form.
-
-For AI assistants helping with the project: read
-[`AI-CONTEXT.md`](AI-CONTEXT.md) first; it's a curated entry point.
-
-The full normative specs are under [`specifications/`](specifications/):
-
-- `SPEC-R2-ROCKER-SYSTEM.md` — the system as a whole.
-- `SPEC-R2-ROCKER-WIRE.md` — the message format on the wire.
-- `SPEC-R2-ROCKER-SENSOR.md` — what the sensor firmware does.
-- `SPEC-R2-ROCKER-SENTANTS.md` — the **sentant + plugin catalog**
-  that makes up the sensor firmware (one row per building block,
-  with the events it consumes / produces). The intended workflow
-  is to compose the firmware from these descriptions — re-use a
-  sentant in another ESP32 sensor build by porting the file and
-  declaring its plugin dependencies.
-- `SPEC-R2-ROCKER-DASHBOARD.md` — what the controller does.
-- `SPEC-R2-ROCKER-TIMESYNC.md` — the time-sync hybrid model.
-- `SPEC-R2-ROCKER-SENSOR-HEALTH.md`,
-  `SPEC-R2-ROCKER-SENSOR-REMOTE-RESET.md`,
-  `SPEC-R2-ROCKER-SENSOR-LIVE-LOGS.md` — sensor-side feature specs.
-- `SPEC-R2-ROCKER-BRIDGE.md` — how the production and viewing trust
-  groups talk to each other.
-- `HARDWARE-WIRING.md`, `SECRETS-POLICY.md` — operational specs.
 
 ## License
 
