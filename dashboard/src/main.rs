@@ -1521,21 +1521,6 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
                         let frame = frame_buf[2..2 + frame_len].to_vec();
                         frame_buf.drain(..2 + frame_len);
 
-                        // Phase 5d: broadcast the raw frame to any connected
-                        // WASM viewers BEFORE we decimate, so they get the
-                        // full stream and decimate themselves if they want
-                        // (the WASM hive owns its own throttling). The
-                        // legacy JSON path below still decimates per
-                        // ACCEL_DECIMATION.
-                        let _ = read_state.raw_frame_tx.send(RawFrame {
-                            src: addr.to_string(),
-                            ts_ms: std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_millis() as u64)
-                                .unwrap_or(0),
-                            frame: frame.clone(),
-                        });
-
                         // R2-WIRE compact frame (SPEC-R2-ROCKER-WIRE §1.4):
                         // byte 0:    version|msg_type|flags
                         // byte 1:    ttl|k
@@ -1551,6 +1536,40 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
                         } else {
                             None
                         };
+
+                        // SPEC-R2-ROCKER-DASHBOARD §5.2 — server-side
+                        // acceleration decimation. Originally only applied
+                        // to the legacy /ws/status JSON path; left /ws/raw
+                        // running at the full firmware rate (100 Hz × N
+                        // sensors) on the assumption the WASM hive could
+                        // self-throttle. Pi5 deployment proved otherwise —
+                        // the WebSocket + browser-side per-frame work
+                        // saturated. Decimating at the source for both
+                        // transports keeps the live wire at the spec's
+                        // ~10 Hz/peer; full fidelity remains on the SD
+                        // ring (+ `/api/data/*` retrieval). Task #68.
+                        let is_accel = event_hash == Some(ACCELERATION);
+                        let emit_live = if is_accel {
+                            let due = accel_n == 0;
+                            accel_n = (accel_n + 1) % ACCEL_DECIMATION;
+                            due
+                        } else {
+                            true
+                        };
+
+                        // /ws/raw viewers — Phase 5d. Push every
+                        // non-acceleration event verbatim, and one in
+                        // ACCEL_DECIMATION acceleration frames.
+                        if emit_live {
+                            let _ = read_state.raw_frame_tx.send(RawFrame {
+                                src: addr.to_string(),
+                                ts_ms: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis() as u64)
+                                    .unwrap_or(0),
+                                frame: frame.clone(),
+                            });
+                        }
 
                         // SPEC-R2-ROCKER-WIRE §4.1 — observe ACCELERATION frames
                         // to track max_seq_seen for periodic r2.dash.ack
@@ -1737,23 +1756,14 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
                                 }
                             }
 
-                            // Decimate live acceleration before broadcasting
-                            // and before logging — high-rate events (100 Hz)
-                            // would otherwise overrun the browser's render
-                            // budget AND spam the console.
-                            let is_accel = event.event == "r2.sensor.acceleration";
-                            let emit_live = if is_accel {
-                                let due = accel_n == 0;
-                                accel_n = (accel_n + 1) % ACCEL_DECIMATION;
-                                due
-                            } else {
-                                true
-                            };
+                            // Acceleration decimation already decided at the
+                            // top of the frame-loop (see `emit_live`) — same
+                            // gate covers /ws/raw + /ws/status so a viewer
+                            // sees consistent per-peer rates regardless of
+                            // transport. Per-frame logging removed long ago;
+                            // frames are observable via /ws/raw (binary) or
+                            // /ws/status (legacy JSON).
                             if emit_live {
-                                // Per-frame logging removed — at 10 Hz live + 0.5 Hz status
-                                // it filled the log faster than anyone could read it. Frames
-                                // are still observable via /ws/raw (binary) or /ws (legacy
-                                // JSON). Keep stderr for connection-lifecycle events only.
                                 let _ = read_state.event_tx.send(event);
                             }
                         }

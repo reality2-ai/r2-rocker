@@ -362,12 +362,24 @@ binary envelope wrapping one verbatim R2-WIRE frame from one sensor:
 * `frame` is the unmodified R2-WIRE compact frame as defined in
   `SPEC-R2-ROCKER-WIRE` §3 — header + signed CBOR payload.
 
-Frames are forwarded **without decode, decimation, or filtering** at the
-server. The browser's vendored `r2-wasm` performs decode, signature
-verification, and rate decimation per `SPEC-R2-ROCKER-WIRE` §4.1.
+Frames are forwarded **without decode, signature verification, or
+filtering** at the server, with one exception: acceleration
+(`r2.sensor.acceleration`) is **decimated by `ACCEL_DECIMATION`**
+(currently 10) before broadcast — only every 10th sample per peer
+reaches `/ws/raw`. The same gate applies to `/ws/status`'s JSON path
+so viewers see consistent per-peer rates regardless of transport.
+The browser's vendored `r2-wasm` performs decode + signature
+verification on the frames it does receive. Full fidelity remains on
+the SD ring (`/api/data/*` retrieval). The decimation became
+server-side after Pi5 deployment saturated WebSocket + browser
+processing at the full 100 Hz × N-sensors firmware rate.
 
-Browser → server: messages on `/ws/raw` are dropped silently in v0.1
-(out-of-band control will move to `/ws/status` or a dedicated channel).
+Browser → server: viewer hives emit `r2.dash.cmd.*` events on
+`/ws/raw` per SPEC-R2-ROCKER-WIRE §2.1 (operator-plane request /
+response framework). Frames are bare R2-WIRE compact bodies (12-byte
+header + CBOR payload — no length prefix; WebSocket provides the
+message boundary). Unknown event hashes are logged and dropped per
+WIRE §2's "non-actionable" rule.
 
 ### 5.3 `/ws/status` — text JSON status channel
 
