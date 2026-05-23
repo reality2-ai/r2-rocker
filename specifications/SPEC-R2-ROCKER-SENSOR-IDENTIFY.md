@@ -39,8 +39,9 @@ In scope:
 * A 60-second sensor-side watchdog: if no `identify_set off`
   arrives within 60 s of `identify_set on`, the sensor MUST revert
   to its prior LED state.
-* A new dashboard HTTP endpoint `POST /api/sensor/{addr}/identify`
-  that forwards the command to the sensor on its streaming socket.
+* A new operator-plane cmd event `r2.dash.cmd.identify` on `/r2`
+  (WIRE row 34) that the controller forwards to the sensor on its
+  streaming socket as `r2.dash.identify_set`.
 * A toggle button on each Devices-tab device card that turns
   Identify on/off, with a matching dashboard-side 60-second
   auto-revert.
@@ -159,33 +160,32 @@ from the dashboard if needed.
 
 ## 4. Dashboard
 
-### 4.1 HTTP endpoint
+### 4.1 Operator-plane event
 
-`POST /api/sensor/{addr}/identify`
+`r2.dash.cmd.identify` (WIRE row 34) on `/r2`.
 
-Body:
+Payload (CBOR map):
 
-```json
-{ "on": true | false }
+```
+{ 0: req_id (u32), 1: addr (text — `ip` or `ip:port`), 2: on (bool) }
 ```
 
 `addr` MAY be `ip` or `ip:port`; the streaming-socket port is used
-regardless. The dashboard finds the matching peer by IP.
+regardless. The controller finds the matching peer by IP and queues
+a `r2.dash.identify_set` frame on the sensor's streaming TCP
+channel (fire-and-forget).
 
-Response: JSON
-
-```json
-{ "ok": true, "on": true }
-```
-
-Errors return HTTP 404 (no such peer) or 502 (peer queue closed),
-with `{ "ok": false, "error": "..." }`.
+Response: `r2.dash.cmd.response` correlated by `req_id` carrying
+`status: "ok"` iff the streaming-socket queue accepted the frame;
+`status: "err"` with a `message` (e.g. `"no such peer"`,
+`"peer queue closed"`) otherwise.
 
 ### 4.2 Dashboard-side auto-revert
 
-The dashboard SHOULD set a 60-second timer when the operator
-clicks Identify on, and automatically POST `on: false` when it
-elapses. This is belt-and-braces alongside the sensor-side
+The dashboard (or the viewer sentant in the webapp) SHOULD set a
+60-second timer when the operator clicks Identify on, and
+automatically emit `r2.dash.cmd.identify` with `{2: false}` when
+it elapses. This is belt-and-braces alongside the sensor-side
 watchdog (§3.2): if the dashboard restarts mid-window the
 sensor-side watchdog still fires; if the sensor drops the off
 command the dashboard re-sends one when the operator clicks again.
@@ -204,10 +204,11 @@ toggle:
 
 Click behaviour:
 
-* Click while idle: button switches to active, POST `{on: true}`
-  in the background, 60-second auto-off timer starts.
-* Click while active: button switches to idle, POST
-  `{on: false}`, auto-off timer cleared.
+* Click while idle: button switches to active, emit
+  `r2.dash.cmd.identify {2: true}` in the background, 60-second
+  auto-off timer starts.
+* Click while active: button switches to idle, emit
+  `r2.dash.cmd.identify {2: false}`, auto-off timer cleared.
 
 The button MUST be hidden on viewer-role builds (same gating as
 Update Firmware and Reset Sensor — Identify changes physical

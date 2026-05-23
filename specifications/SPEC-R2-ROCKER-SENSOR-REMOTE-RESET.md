@@ -109,23 +109,28 @@ v0.2 adds the explicit gate.)
 
 ## 3. Dashboard
 
-### 3.1 HTTP endpoint
+### 3.1 Operator-plane event
 
-`POST /api/sensor/{addr}/reset`
+`r2.dash.cmd.reset` (WIRE row 33) on `/r2`.
 
-Body: none.
+Payload (CBOR map):
 
-`addr` MAY be `ip` or `ip:port` (the streaming-socket port is stripped;
-21044 is always used).
-
-Response: JSON
-
-```json
-{ "ok": true|false, "status_byte": 0x00, "message": "..." }
+```
+{ 0: req_id (u32), 1: addr (text — `ip` or `ip:port`) }
 ```
 
-Mirrors `POST /api/ota/{addr}` JSON shape. Errors return HTTP 502 with
-`{"ok": false, "error": "..."}`.
+`addr` MAY be `ip` or `ip:port` (the streaming-socket port is
+stripped; the dedicated reset port 21044 is always used).
+
+The controller opens a TCP connection to `<ip>:21044` and drives
+the `r2-esp::reset_tcp` protocol (request byte → status byte →
+optional message). Round-trip up to 8 s.
+
+Response: `r2.dash.cmd.response` correlated by `req_id`. On success
+the response carries `status: "ok"` and a `message` summarising the
+sensor's reply (typically `"reset acknowledged"`). On failure the
+response carries `status: "err"` and the failure cause (e.g.
+`"connect timeout"`, `"peer refused"`, `"unexpected status_byte"`).
 
 ### 3.2 WebSocket broadcast
 
