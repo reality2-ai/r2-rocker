@@ -989,13 +989,12 @@ async fn run_unified_listener(
             } else {
                 // Raw R2-WIRE TCP — sensor connection. TCP keepalive
                 // catches zombie connections within ~60 s rather than
-                // waiting for the 2-hour OS default. Same shape as the
-                // old run_event_listener applied.
+                // waiting for the 2-hour OS default. Borrow the FD via
+                // socket2::SockRef so we don't have to convert tokio →
+                // std → tokio (that round-trip plus the preceding peek
+                // was causing sensors to cycle every ~20 s).
                 eprintln!("[events] sensor connected: {}", addr);
-                let stream = match apply_tcp_keepalive(stream) {
-                    Some(s) => s,
-                    None => return,
-                };
+                apply_tcp_keepalive(&stream);
                 handle_sensor_connection(stream, addr, state_for_conn).await;
             }
         });
@@ -1003,19 +1002,18 @@ async fn run_unified_listener(
 }
 
 /// Apply 15 s/5 s TCP keepalive to a freshly-accepted sensor socket.
-/// Lifted out of the former run_event_listener so the unified accept
-/// loop can call it after protocol-detect.
-fn apply_tcp_keepalive(stream: tokio::net::TcpStream) -> Option<tokio::net::TcpStream> {
-    let std_stream = stream.into_std().ok()?;
-    let sock = socket2::Socket::from(std_stream);
+/// Uses `socket2::SockRef` to set the sockopts on the borrowed FD —
+/// avoids the `tokio → std → tokio` FD round-trip that the pre-v0.2
+/// code did (sensor connections began cycling every ~20 s when the
+/// round-trip was paired with a `stream.peek(...)` call earlier in
+/// the accept handler — bench-confirmed 2026-05-23).
+fn apply_tcp_keepalive(stream: &tokio::net::TcpStream) {
+    let sock = socket2::SockRef::from(stream);
     sock.set_keepalive(true).ok();
     let ka = socket2::TcpKeepalive::new()
         .with_time(std::time::Duration::from_secs(15))
         .with_interval(std::time::Duration::from_secs(5));
     sock.set_tcp_keepalive(&ka).ok();
-    let std_stream: std::net::TcpStream = sock.into();
-    std_stream.set_nonblocking(true).ok();
-    tokio::net::TcpStream::from_std(std_stream).ok()
 }
 
 /// Shared bootstrap core. Aborts any running discovery task, clears
