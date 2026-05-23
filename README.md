@@ -290,7 +290,7 @@ cd ../../..
 #    root of the same HTTP port — no separate webapp server needed.
 cargo run --release -p r2-dashboard
 
-# 5. Open http://localhost:8080/ in your browser.
+# 5. Open http://localhost:21042/ in your browser.
 # 6. Click "Connect Sensors" and watch the LEDs.
 ```
 
@@ -415,9 +415,9 @@ wasm-pack build crates/r2-wasm --target web --release \
 
 Output lands at `webapp/pkg/`. The HTML in `webapp/index.html`
 imports `./pkg/r2_wasm.js`. There is no separate dev server — open
-the dashboard's HTTP port (`http://localhost:8080/`) and you have
-the freshly-rebuilt viewer. Hard-refresh the browser (or bump the
-service worker cache key) if a stale cached version sticks.
+the dashboard's unified R2 port (`http://localhost:21042/`) and you
+have the freshly-rebuilt viewer. Hard-refresh the browser (or bump
+the service worker cache key) if a stale cached version sticks.
 
 ## Under the hood
 
@@ -429,30 +429,59 @@ threads talk, what hits the network in what shape.
 
 ### End-to-end data path
 
+Since v0.2.0 the dashboard listens on a **single port** — `21042`,
+the canonical R2-WIRE events port per `r2-specifications/specs/r2-core/
+R2-WIRE.md` §13.5 — and dispatches each accepted connection by
+peeking the first byte: zero high-byte of a u16 length prefix →
+raw sensor TCP; ASCII uppercase letter → HTTP/WebSocket. The same
+port serves browsers and sensors without collision.
+
 ```
   ADXL355
     │  SPI @ 5 MHz
     ▼
-  firmware sender thread ──── on every sample (10 Hz) ────────┐
+  firmware sender thread ──── on every sample (100 Hz) ───────┐
     │                                                          │
     │  R2-WIRE frame                                           │  Ring::append
     │  (12-byte header + CBOR payload)                         ▼
     │                                              /sdcard/logNNNN.csv
     ▼                                              (durable backstop,
-  TCP 21042 ──────► dashboard sender-handler        ACK-driven freeing)
+  TCP 21042 (raw)                                  ACK-driven freeing)
+    │
+    ▼
+  dashboard accept-loop  ──── peek first byte ────► route
                           │
-                          ├──► state.peers map (per-peer tx channel)
+                          ├── 0x00 → handle_sensor_connection
+                          │                │
+                          │                ├──► state.peers (per-peer tx)
+                          │                │
+                          │                └──► raw_frame_tx ─► /r2
+                          │                                  ▲ (10:1 decimated
+                          │                                  │  for acceleration)
                           │
-                          └──► ws_broadcast_tx ─► /ws/raw  (binary frames)
-                                              └─► /ws/logs (per-sensor tail)
+                          └── 'G'/'P'/… → hyper + axum
+                                          │
+                                          ├──► / (static webapp)
+                                          ├──► WS /r2  ── R2-WIRE,
+                                          │              bi-directional:
+                                          │              sensor frames out,
+                                          │              r2.dash.cmd.* in
+                                          ├──► WS /ws/logs/{addr} (text)
+                                          └──► /api/{ota,firmware,data,...}
+                                                (plugin transports —
+                                                 not R2 events)
                                                        │
                                                        ▼
-                                                browser tab (WASM + JS)
+                                                browser tab
+                                                  R2RockerHive
+                                                  + DashboardViewerSentant
                                                        │
                                                        ├─► Chart.js charts
                                                        ├─► Devices card grid
                                                        └─► capture state →
                                                            Start/Mark/Stop UI
+                                                            (each click →
+                                                             r2.dash.cmd.* on /r2)
 ```
 
 Why each hop exists:
@@ -463,12 +492,23 @@ Why each hop exists:
   sample lands on the card *before* it goes out on the wire, so a
   network blip doesn't lose data. The dashboard's `r2.dash.ack`
   back-channel frees old SD segments as records are acknowledged.
-* **TCP 21042 → ws_broadcast → /ws/raw** keeps the dashboard a
-  thin proxy: the heavy decode work (CBOR → JSON, schema mapping)
-  happens in the browser's WASM bundle.
+* **Single port 21042 + peek-based dispatch** unifies what used to
+  be two separate listeners (sensor TCP + browser HTTP on different
+  ports). R2-WIRE §13.5 says both raw-TCP R2-WIRE and WebSocket
+  R2-WIRE belong on the same canonical port; the peek selects per-
+  connection without affecting framing.
+* **/r2 carries every R2-WIRE event in both directions**: sensor-
+  emitted events forwarded outbound to viewers; viewer-emitted
+  operator commands (`r2.dash.cmd.capture.{start,mark,stop}`,
+  `cmd.reset`, `cmd.identify`, `cmd.bootstrap`, `cmd.device.alias.set`,
+  `cmd.access.*`) inbound. The legacy `/ws/status` text-JSON channel
+  + ~14 `/api/*` operator routes that existed pre-v0.2 are gone.
+* **Acceleration is decimated 10:1** before `raw_frame_tx` broadcast
+  so the live wire stays around 10 Hz / sensor — the SD ring keeps
+  the full 100 Hz fidelity. Pi5 deployments depend on this.
 * **Per-sensor /ws/logs** opens an on-demand `nc`-equivalent to the
   sensor's `log_tcp` listener — used by the "Logs" toggle on each
-  device card.
+  device card. Non-R2-WIRE plugin transport.
 
 ### Capture state machine (SPEC-R2-ROCKER-CAPTURE)
 

@@ -149,28 +149,75 @@ Project is **self-contained** — no path deps on `../r2-core`. R2 protocol
 crates will be vendored into `crates/` when they're needed (Phase 4+
 onwards). Don't add `path = "../../r2-core"` style references.
 
-## Current state (2026-05-18, evening)
+## Current state (2026-05-24)
 
-**Phase 5 pairing-over-relay in progress — partial:** off-network
-viewers can load the webapp from `https://reality2.ai/r2-rocker/`
-(GitHub Pages, workflow deploys `webapp/` on push to `main`); the
-"Anywhere" QR encodes a relay URL; the page renders the "Pair this
-device" landing instead of the full dashboard. **Open bug:** the
-phone's `access.request` (now sent as a binary `R2C\x01`-magic
-control frame, since r2-relay drops text frames it doesn't
-recognise) is **not yet reaching the controller's Link tab**.
-Diagnostic logging is in `dashboard/src/relay.rs` (`bin ctrl in:`
-/ `bin in: not ctrl`) — next session should pair from a freshly
-hard-refreshed phone and watch the dashboard log to confirm
-whether the frame arrives (cached webapp on the phone is the most
-likely cause). Same binary-envelope work covers `access.response`
-in the reverse direction.
+**Released v0.2.0** (tag + GitHub release with `r2-rocker-firmware-
+0.2.0-{devkitc,xiao}.bin` attached). Architectural milestone
+landed across the day's session — bench-validated end-to-end:
+
+* **Operator plane fully on R2-WIRE.** Every operator-action the
+  webapp used to POST to `/api/*` (capture / reset / identify /
+  bootstrap / alias / 5 access actions + 2 list reads) now rides as
+  a `r2.dash.cmd.*` event on `/r2`. Status notifications
+  (`peer.disconnected`, `dash.ota.progress`, `dash.reset.progress`,
+  `dash.capture.progress`, `dash.access.event`, `dash.bootstrap.progress`,
+  `dash.device.alias.changed`) likewise. Legacy `/ws/status` channel
+  + ~14 orphaned `/api/*` operator routes retired.
+* **Single port for all R2-WIRE.** Dashboard listener unified on
+  port **21042** with peek-based protocol detection (R2-WIRE §13.5);
+  same socket carries raw R2-WIRE TCP from sensors AND HTTP/`/r2`
+  WebSocket from browsers. WS path renamed `/ws/raw` → `/r2`
+  (R2-INTERNET §5).
+* **Sensors are formal TG members** (Track A): every sensor now
+  carries a KeyHolder-signed `DeviceCertificate` (147 bytes,
+  NVS-persisted); dashboard verifies announce signatures under the
+  TG public key — `sig=ValidWithCert` in the logs.
+* **Webapp runs an `R2RockerHive`** (Track D) with a
+  `DashboardViewerSentant`. Every `/r2` event flows through the
+  sentant's per-sensor state in parallel with the JS UI handlers.
+
+**Operator-facing polish landed alongside:**
+* Capture file downloads stamp the device alias (or IP fallback)
+  into both the **filename** (`<stem>__<dev>.csv`) and the **CSV
+  column headers** (`seq,ts_ms,<dev>_x,<dev>_y,<dev>_z`) so a
+  stack of single-sensor exports stays distinguishable.
+* Acceleration decimated 10:1 **server-side before `/r2`** —
+  Pi5 deployments no longer drown when the firmware streams at
+  100 Hz × N sensors.
+* BLE bootstrap loop's `get_active_sensor_ips` filters loopback so
+  the operator's own browser WS isn't mistaken for a "streaming
+  sensor" (a regression from the port unification, caught + fixed).
+* Sensor TCP reads stable through accept (`socket2::SockRef` sets
+  keepalive on the borrowed FD instead of doing a `tokio → std →
+  tokio` round-trip that corrupted the connection after the
+  protocol-detect peek).
+
+**Architectural rule recorded (binding):** every byte that crosses
+a hive boundary belongs to either an R2 event on R2-WIRE, or a
+named plugin protocol owned by a (possibly nominal — spec-only)
+sentant. Sentants are FSMs; the spec form is `state × incoming
+event → state' × {emitted_events, plugin_actions}`. Implementations
+may be raw tasks / listeners / HTTP routes — they just need to be
+expressible as the sentant FSM the spec declares.
+
+**Open bug carried (2026-05-18, untouched by today's work):**
+Phase 5 pairing-over-relay. Off-network viewers can load the webapp
+from `https://reality2.ai/r2-rocker/` (GitHub Pages); the "Anywhere"
+QR encodes a relay URL; the page renders the "Pair this device"
+landing. The phone's `access.request` (sent as a binary
+`R2C\x01`-magic control frame, since r2-relay drops unrecognised
+text frames) is **not yet reaching the controller's Link tab**.
+Diagnostic logging in `dashboard/src/relay.rs` is in place; cached
+webapp on the phone is the most likely cause. In-room pairing is
+the working baseline.
 
 In-room path remains the working baseline: invite modal has an
 In-room ↔ Anywhere toggle below the dashboard QR; In-room shows
-both the WiFi-join QR and the dashboard QR; viewer pairs over
-LAN HTTP `/api/access/request` + operator approves on the Link
-tab. Tested working end-to-end.
+both the WiFi-join QR and the dashboard QR; viewer pairs by
+emitting a `r2.dash.cmd.access.request` event on `/r2` (since
+v0.2 — pre-v0.2 was a POST `/api/access/request`), operator
+approves on the Link tab (which fires `r2.dash.cmd.access.approve`).
+Tested working end-to-end.
 
 **Earlier state preserved (2026-05-08):** Wireless end-to-end demo
 alive on real hardware. ESP32-S3 sensor (still ADXL-simulated;
@@ -189,7 +236,7 @@ entire bench sessions. Same chip MAC `1c:db:d4:41:28:3c`.
 | `specifications/SECRETS-POLICY.md` | ✅ |
 | `specifications/SPEC-R2-ROCKER-{WIRE,SENSOR,DASHBOARD,SYSTEM}.md` | ✅ updated through Phase 6 + 9-light |
 | `specifications/SPEC-R2-ROCKER-BRIDGE.md` | ✅ NEW — first R2 entanglement implementation (R2-TRUST §7), two-TG topology lock-in |
-| `specifications/SPEC-R2-ROCKER-ACCESS.md` | ✅ NEW (2026-05-18) — Phase 5 Trust-Group access model in spec form: QR / link / 3-word-code viewer enrolment, `/api/access/{invite,claim,members,revoke}` routes, KeyHolder-only invitations + revocations, offline revocation guaranteed, IndexedDB cert persistence in the webapp. Implementation slice is the follow-on plan. |
+| `specifications/SPEC-R2-ROCKER-ACCESS.md` | ✅ — Phase 5 Trust-Group access model in spec form: QR / link viewer enrolment, KeyHolder-only invitations + revocations, offline revocation guaranteed, IndexedDB cert persistence in the webapp. Operator routes migrated to `r2.dash.cmd.access.*` events on `/r2` at v0.2 (Tracks B+C). |
 | `PROCESS.md`, `README.md`, `.gitignore` | ✅ README rewritten 2026-05-08 for total-beginner audience |
 | `plan/PLAN.md` | ✅ updated through Phase 6, 9-light, 9-fwreg |
 | `conversation/` | ✅ accumulating per-session |
@@ -198,8 +245,8 @@ entire bench sessions. Same chip MAC `1c:db:d4:41:28:3c`.
 | `tools/setup-hotspot.sh`, `tools/setup-firmware.sh` | ✅ |
 | `tools/build-firmware.sh` | ✅ NEW — builds + saves OTA-ready .bin + archives versioned copy under `firmware/esp32-s3/releases/` |
 | `crates/r2-{fnv,cbor,wire,core,bootstrap,trust,transport,route,engine,wasm,esp}/` | ✅ all vendored from r2-core. r2-esp + r2-wasm exclude from host workspace (xtensa- and wasm-only respectively) |
-| `dashboard/` | ✅ + `/ws/raw` (binary), `/ws/status` (text JSON), `/v/` (WASM viewer), `/api/ota/{addr}`, `/api/bootstrap`, peer_disconnected push, 5 s read timeout, sig-verify announce, announce-replay-on-/ws/raw-connect |
-| `webapp/` | ✅ Live + Devices tabs, virtual LEDs (sidebar dot + device card LED) sync to physical via `r2.sensor.status`, OTA file picker, calm-tech UI strings |
+| `dashboard/` | ✅ v0.2.0 — single listener on port 21042 with peek-based protocol detection (R2-WIRE §13.5): raw R2-WIRE TCP from sensors, plus HTTP/`/r2` WebSocket for browsers on the same socket. Operator plane fully on R2-WIRE (`r2.dash.cmd.*` inbound, `r2.dash.*.progress` + sensor events outbound, all on `/r2`). Sensors verified with cert chain under TG public key (Track A — `sig=ValidWithCert`). Legacy `/ws/status` + ~14 operator `/api/*` routes retired in v0.2 cleanup. Remaining `/api/*` are plugin transports (`/api/ota/{addr}` for the multi-MB OTA blob, `/api/data/*` for capture-file fetch, `/api/firmware/*`, `/api/devices/aliases` GET, `/api/access/{onboard,whoami}` operator helpers, `/api/keyholder/tg-pub`, `/api/version`). `/ws/logs/{addr}` text proxy unchanged. |
+| `webapp/` | ✅ Runs an `R2RockerHive` (Track D) with a `DashboardViewerSentant` (`crates/r2-wasm/src/rocker_viewer.rs`, spec at `SPEC-R2-ROCKER-VIEWER-SENTANT.md`). Every `/r2` event flows through both the JS UI dispatchers and the sentant's per-sensor state + `event_count`. Operator clicks fire `r2.dash.cmd.*` events back on the same socket. Live + Devices + Link tabs, virtual LEDs sync to physical via `r2.sensor.status`, OTA file picker, calm-tech UI strings. |
 | `firmware/esp32-s3/` | ✅ Phase 5a/5L/6/9-light. WS2812 LED FSM, BLE bootstrap (R2-BEACON + L2CAP `#wifi_offer` + UDP presence), persistent RBID, OTA receive listener, ERROR-on-init-fault top-level trap, mark_app_valid gated on first frame round-trip per §12.2 |
 | `firmware/esp32-s3/releases/` | ✅ NEW — versioned archive of OTA-pushed firmware images |
 | `trust_keys/tg_pub.bin` + `tg_cert.bin` | ✅ generated; priv off-tree at `~/.config/r2-rocker/tg_signer/` |
@@ -281,7 +328,7 @@ ensemble; the firmware can stay AOT-compiled.
   | Host | Role | Why this host |
   |---|---|---|
   | GitHub Pages (or any static CDN) | Serves the `webapp/` bundle (HTML + JS + .wasm). Updated via `git push`. | Static hosting for the **remote** path. Public, cacheable, no execution, no plaintext, no secrets. |
-  | Onsite controller | Hosts its own copy of the same `webapp/` bundle on its HTTP server (e.g. `http://10.42.0.1:8080/`). Plus: sensor TCP listener + relay-compatible WSS forwarder + TG KeyHolder cert issuance + local data archive (Phase 5f). | Lets onsite browsers get the WebApp **without internet** — open a tablet on the hotspot, browse to the controller's IP, scan the QR from the same dashboard's "Enrol device" UI, join TG. Closed-network deployments work end-to-end. |
+  | Onsite controller | Hosts its own copy of the same `webapp/` bundle on its unified R2 port (e.g. `http://10.42.0.1:21042/` — same port as the raw-TCP sensor listener post-v0.2 unification per R2-WIRE §13.5). Plus: relay-compatible WSS forwarder + TG KeyHolder cert issuance + local data archive (Phase 5f). | Lets onsite browsers get the WebApp **without internet** — open a tablet on the hotspot, browse to the controller's IP, scan the QR from the same dashboard's "Enrol device" UI, join TG. Closed-network deployments work end-to-end. |
   | r2-relay (e.g. $5 VPS) | Forwards TG-encrypted frames between members over WSS. Sees no plaintext. | Public-internet rendezvous so remote browsers can reach the controller across NAT. Skipped when everything's onsite on the hotspot. |
 
   Both bundles are byte-identical (same `cargo build --target wasm32`
@@ -451,10 +498,10 @@ model in production today.
   by exactly one byte (the symptom we hit was `0x0d01f776` instead
   of `0x01f77656`).
 * **`r2.sensor.announce` only fires on TCP (re)connect.** A viewer
-  that connects to `/ws/raw` mid-session misses the announce and
+  that connects to `/r2` mid-session misses the announce and
   therefore `fw_ver`, `device_pk`, `boot_ts_ms` — device card stays
   showing `—`. Fix is server-side: cache the most-recent announce
-  raw frame per peer, replay on every new `/ws/raw` connect (done in
+  raw frame per peer, replay on every new `/r2` connect (done in
   the dashboard's `handle_ws_raw`).
 * **TCP keepalive isn't fast enough** for "sensor reset → dashboard
   notices" UX. Linux's default takes ~60 s. We added a 5 s read-
