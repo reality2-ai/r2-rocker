@@ -1495,7 +1495,7 @@ const KNOWN_EVENT_NAMES = [
   'r2.sensor.capture.state',
   // Controller-synthesised status events (SPEC-R2-ROCKER-WIRE §2,
   // rows 22-28). Per-name JS handlers don't yet exist for most of
-  // these in v0.1 — the legacy /ws/status JSON channel drives the
+  // these in v0.1 — the R2-WIRE events on /r2 drives the
   // UI for them. They're listed here so the sentant subscription
   // path (rockerHive.send_event) gets the friendly name resolved
   // and inbound event_count is accurate.
@@ -2183,7 +2183,7 @@ function handleEvent(msg) {
     return;
   }
 
-  // Controller-synthesised events — formerly carried on /ws/status
+  // Controller-synthesised events — formerly carried on /r2
   // as type=bootstrap / peer_disconnected / ota / reset / capture /
   // access / device_alias JSON. Now ride r2.dash.*.progress events
   // on /r2 per SPEC-R2-ROCKER-WIRE §2 rows 22-28. Each dispatcher
@@ -2790,7 +2790,7 @@ async function requestDeleteAllFleet() {
 // Operator-assigned device aliases — keyed by device_pk hex (the
 // sensor's Ed25519 public key as announced in r2.sensor.announce).
 // Persisted on the controller; fetched on dashboard load + kept
-// up-to-date via /ws/status `device_alias` events. Wins over the
+// up-to-date via r2.dash.device.alias.changed on /r2. Wins over the
 // hostname the sensor self-reports.
 let _deviceAliases = {};
 
@@ -2928,7 +2928,7 @@ function renderPendingRequestRow(r) {
 async function approvePending(device_pk, name) {
   try {
     await sendCmd('access.approve', [[1, device_pk]]);
-    // The list will refresh via /ws/status; reload to be safe.
+    // The list will refresh via r2.dash.access.event; reload to be safe.
     loadLinkMembers();
   } catch (err) {
     alert(`Approve failed: ${err.message || err}`);
@@ -3049,7 +3049,7 @@ async function revokeMember(device_pk, name) {
   if (!confirm(`Revoke "${name}"? Once revoked, the device will be locked out the next time it tries to connect.`)) return;
   try {
     await sendCmd('access.revoke', [[1, device_pk]]);
-    // Optimistic refresh — the /ws/status broadcast will also trigger
+    // Optimistic refresh — the r2.dash.access.event broadcast will also trigger
     // a reload via handleAccessWsEvent below.
     loadLinkMembers();
   } catch (err) {
@@ -3133,7 +3133,7 @@ async function copyInputToClipboard(inputId, btn) {
   }
 }
 
-/// Called from the /ws/status message dispatcher — keeps the Link tab
+/// Called from the /r2 message dispatcher — keeps the Link tab
 /// in sync when a member is added (claim) or revoked, without polling.
 /// Also handles the spec §7.3 self-revoke case: if a revoked event
 /// matches our own device_pk, wipe local identity + force the
@@ -3486,7 +3486,7 @@ async function exportOffNetworkAccess() {
 /// host) can never reach /api/access/whoami; the request would 404
 /// against the static host's missing-route handler and spuriously
 /// wipe a freshly-imported cert. The relay-side leg has its own
-/// teardown signal (r2.dash.access.revoked on /ws/status, §7.3).
+/// teardown signal (r2.dash.access.event subtype=revoked, §7.3).
 async function dashboardKnowsMe() {
   if (!viewerIdentityPkHex) return false;
   if (location.protocol !== 'http:') {
@@ -4699,7 +4699,7 @@ function updateDevicesSummary(peers) {
   }
 }
 
-// OTA progress events from /ws/status (dashboard's /api/ota/{addr} handler
+// OTA progress events from r2.dash.ota.progress on /r2 (dashboard's /api/ota/{addr} handler
 // broadcasts these). Reuses the Connection Log panel as a generic
 // "activity feed" so the operator sees phase transitions live without
 // needing to read browser console.

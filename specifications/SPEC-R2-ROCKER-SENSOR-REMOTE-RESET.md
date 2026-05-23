@@ -129,7 +129,7 @@ Mirrors `POST /api/ota/{addr}` JSON shape. Errors return HTTP 502 with
 
 ### 3.2 WebSocket broadcast
 
-The dashboard MUST broadcast on `/ws/status`:
+The dashboard MUST emit `r2.dash.reset.progress` on /r2 (SPEC-R2-ROCKER-WIRE row 24):
 
 ```json
 { "type": "reset", "phase": "requested|applied|error", "target": "10.42.0.103:21044", "message": "..." }

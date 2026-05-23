@@ -30,7 +30,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 use tokio::sync::{broadcast, Mutex, RwLock};
 
 // ── r2-rocker event hashes ────────────────────────────────────────────────
@@ -55,7 +55,7 @@ const SENSOR_ANNOUNCE:     u32 = r2_fnv::fnv1a_32(b"r2.sensor.announce");
 const PEER_DISCONNECTED:   u32 = r2_fnv::fnv1a_32(b"r2.peer.disconnected");
 
 // Tracks B+C operator-plane status notifications. These wrap the
-// legacy `/ws/status` JSON messages of the same names (preserved
+// R2-WIRE events on /r2 (formerly /ws/status JSON messages of the same names — removed v0.2; preserved
 // for one release for backward compat with un-upgraded browsers).
 // Each event is a CBOR map with small integer keys; the per-event
 // shape is documented at the encode helper. Hash names align with
@@ -667,11 +667,8 @@ struct AppState {
     raw_frame_tx: broadcast::Sender<RawFrame>,
     /// Connected sensor peers (for sending commands back)
     peers: RwLock<HashMap<SocketAddr, SensorPeer>>,
-    /// Broadcast channel for raw JSON strings (used for bootstrap events → WS)
-    ws_broadcast_tx: broadcast::Sender<String>,
     /// Bootstrap state
     bootstrap_running: Arc<AtomicBool>,
-    bootstrap_log: Arc<Mutex<Vec<String>>>,
     /// Handle to the running bootstrap task — aborted on re-press
     bootstrap_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Cached snapshot of the latest available firmware (GitHub
@@ -738,7 +735,6 @@ async fn main() {
 
     let (event_tx, _) = broadcast::channel::<DashboardEvent>(256);
     let (raw_frame_tx, _) = broadcast::channel::<RawFrame>(1024);
-    let (ws_broadcast_tx, _) = broadcast::channel::<String>(256);
     // Relay outbound-binary channel for JOIN_RESPONSE frames
     // (notekeeper wire format `[0xFF, 0x02, ...]`). Only allocated
     // when --relay-url is set so the access handlers can branch on
@@ -772,9 +768,7 @@ async fn main() {
         event_tx: event_tx.clone(),
         raw_frame_tx: raw_frame_tx.clone(),
         peers: RwLock::new(HashMap::new()),
-        ws_broadcast_tx,
         bootstrap_running: Arc::new(AtomicBool::new(false)),
-        bootstrap_log: Arc::new(Mutex::new(Vec::new())),
         bootstrap_task: Mutex::new(None),
         firmware_cache: Mutex::new(None),
         access: access_handle.clone(),
@@ -809,7 +803,7 @@ async fn main() {
     // HTTP server with WASM viewer + WebSocket + bootstrap API.
     // The legacy `/` HTML dashboard and `/ws` bidirectional channel were
     // removed once the WASM viewer at the repo's webapp/ became feature-
-    // complete. The WASM viewer consumes /r2 + /ws/status instead.
+    // complete. The WASM viewer consumes /r2 only (since v0.2).
     let mut app = Router::new()
         // R2-WIRE frame channel for browser-side hives. Path
         // `/r2` is the spec-conformant convention per R2-INTERNET
@@ -821,13 +815,6 @@ async fn main() {
             let ws_state = state.clone();
             move |ws, connect_info| ws_raw_handler(ws, ws_state, connect_info)
         }))
-        // Phase 5d: text-JSON status channel — bootstrap progress, hotspot
-        // lifecycle, server warnings. WASM viewers open this alongside
-        // /r2 (per SPEC-R2-ROCKER-DASHBOARD §5.3).
-        .route("/ws/status", get({
-            let ws_state = state.clone();
-            move |ws| ws_status_handler(ws, ws_state)
-        }))
         // Per-sensor live log tail. Opens a TCP connection to the sensor's
         // log_tcp listener (port 21046) and pipes lines back as WS text
         // frames. Used by the per-card "↓ Logs" panel in the webapp.
@@ -835,21 +822,6 @@ async fn main() {
         // Phase 5d: TG public key + KeyHolder enrolment endpoints.
         .route("/api/keyholder/tg-pub", get(tg_pub_handler))
         // SPEC-R2-ROCKER-ACCESS §4 — viewer enrolment lifecycle.
-        // KeyHolder-only routes (invite, members, revoke) are gated by
-        // a localhost check in v0.1 per §11.1 (2); claim is public
-        // because the token IS the auth.
-        .route("/api/access/members", get(access_members_handler))
-        .route("/api/access/revoke/{device_pk}", post(access_revoke_handler))
-        // Request → approve flow (v0.1.1, the "calm-tech" enrolment
-        // path): phone POSTs /request when it lands on the dashboard
-        // without a cert. Operator's Link tab shows pending rows
-        // with Approve/Deny. Phone polls /check until it gets the
-        // signed cert bundle back.
-        .route("/api/access/request",     post(access_request_handler))
-        .route("/api/access/check/{device_pk}", get(access_check_handler))
-        .route("/api/access/pending",     get(access_pending_handler))
-        .route("/api/access/approve/{device_pk}", post(access_approve_handler))
-        .route("/api/access/deny/{device_pk}",    post(access_deny_handler))
         // ACCESS v0.3 §8 — operator-only helper that returns the
         // pair of QR payloads for the "Onboard a visitor" modal.
         .route("/api/access/onboard",     get(access_onboard_handler))
@@ -861,27 +833,17 @@ async fn main() {
         // marked DEPRECATED in SPEC-R2-ROCKER-DASHBOARD §5.1.
         .route("/api/enrol-init", post(enrol_init_handler))
         .route("/api/enrol-complete", post(enrol_complete_handler))
-        .route("/api/bootstrap", post(bootstrap_handler))
-        .route("/api/bootstrap/status", get(bootstrap_status_handler))
         // Phase 9-light: stream a firmware .bin to a sensor's OTA listener.
+        // Not migrated to a cmd event because the body is a multi-MB
+        // binary; per-frame WS is the wrong shape. Progress events DO
+        // ride R2-WIRE (r2.dash.ota.progress, SPEC-WIRE row 23).
         .route("/api/ota/{addr}", post(ota_push_handler))
-        // SPEC-R2-ROCKER-SENSOR-REMOTE-RESET: push a CMD_RESET to a sensor's
-        // reset listener (TCP 21044). Triggers esp_restart() on the sensor.
-        .route("/api/sensor/{addr}/reset", post(reset_push_handler))
-        .route("/api/sensor/{addr}/identify", post(identify_handler))
         // Firmware availability: returns the latest release per
         // carrier (GitHub Releases primary, local releases/ dir
         // fallback). 5-minute cache. Webapp diffs against each peer's
         // announce fw_ver for the "needs update" dot.
         .route("/api/firmware/available", get(firmware_available_handler))
         .route("/api/firmware/{carrier}/binary", get(firmware_binary_handler))
-        // SPEC-R2-ROCKER-CAPTURE — named experimental captures.
-        // Start triggers an immediate sync_pulse round (per §7.1) +
-        // capture.start fan-out; Mark fans out capture.mark with the
-        // dashboard's chosen ts_ms; Stop fans out capture.stop.
-        .route("/api/capture/start", post(capture_start_handler))
-        .route("/api/capture/mark",  post(capture_mark_handler))
-        .route("/api/capture/stop",  post(capture_stop_handler))
         // SPEC-R2-ROCKER-CAPTURE — capture-file listing / fetch / delete.
         // Each route opens a fresh TCP connection to <addr>:21047 on
         // the sensor and proxies the data_tcp wire protocol.
@@ -892,10 +854,26 @@ async fn main() {
         // Operator-assigned device aliases. Persisted to
         // ~/.config/r2-rocker/device_aliases.json. Read by every
         // dashboard browser session on load + applied on top of the
-        // sensor's self-reported hostname.
+        // sensor's self-reported hostname. The POST form (`/alias`)
+        // was migrated to r2.dash.cmd.device.alias.set in Track C;
+        // only the bulk-fetch GET stays.
         .route("/api/devices/aliases",         get(device_aliases_get_handler))
-        .route("/api/devices/alias",           post(device_alias_set_handler))
         .route("/api/version", get(version_handler));
+        // v0.2 cleanup: the following legacy /api/* routes were
+        // dropped now that their cmd-event equivalents on /r2 have
+        // been bench-validated (capture / reset / identify /
+        // bootstrap / device.alias.set / 5 access actions + 2 reads).
+        // Webapp no longer calls any of them. Removed handlers:
+        //   POST /api/capture/{start,mark,stop}
+        //   POST /api/sensor/{addr}/reset
+        //   POST /api/sensor/{addr}/identify
+        //   POST /api/bootstrap   +  GET /api/bootstrap/status
+        //   POST /api/devices/alias
+        //   GET  /api/access/members
+        //   GET  /api/access/pending
+        //   POST /api/access/{approve,deny,revoke}/{device_pk}
+        //   POST /api/access/request
+        //   GET  /api/access/check/{device_pk}
 
     // Serve the WASM viewer (webapp/) as the dashboard root if the
     // directory exists. Same-origin with the dashboard's WS endpoints
@@ -1059,11 +1037,7 @@ async fn do_bootstrap(state: &Arc<AppState>) {
 
     state.bootstrap_running.store(true, Ordering::SeqCst);
 
-    // Clear previous log and broadcast a reset event so the browser clears its panel
-    {
-        let mut log = state.bootstrap_log.lock().await;
-        log.clear();
-    }
+    // Reset event so the browser clears its log panel.
     emit_bootstrap_reset(state);
 
     let config = BootstrapConfig {
@@ -1090,35 +1064,15 @@ async fn do_bootstrap(state: &Arc<AppState>) {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<BootstrapEvent>(64);
     let state_for_relay = state.clone();
-    let log_store = state.bootstrap_log.clone();
     let running_flag = state.bootstrap_running.clone();
 
-    // Spawn the event relay task
+    // Spawn the event relay task — forwards each BootstrapEvent from
+    // r2_bootstrap's progress channel out to viewers as an R2-WIRE
+    // `r2.dash.bootstrap.progress` event on /r2 (SPEC-WIRE row 27).
     tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
-            // Build WS message — preserved for the legacy /ws/status
-            // JSON path (one release for backward compat).
-            let ws_msg = serde_json::json!({
-                "type": "bootstrap",
-                "event": &event,
-            });
-            let json_str = serde_json::to_string(&ws_msg).unwrap_or_default();
-
-            // Append to log
-            {
-                let mut log = log_store.lock().await;
-                log.push(json_str.clone());
-            }
-
-            // Two broadcasts: the legacy /ws/status JSON path carries
-            // the serde-tagged structured form (kept while /ws/status
-            // is still alive — to be dropped at v0.2). The R2-WIRE
-            // path carries the same fields under named CBOR keys
-            // per SPEC row 27 — that's our forward channel.
-            let _ = state_for_relay.ws_broadcast_tx.send(json_str);
             emit_bootstrap_progress(&state_for_relay, &event);
         }
-
         running_flag.store(false, Ordering::SeqCst);
     });
 
@@ -1130,15 +1084,6 @@ async fn do_bootstrap(state: &Arc<AppState>) {
         // Drop tx to signal the relay task to finish
     });
     *state.bootstrap_task.lock().await = Some(bootstrap_handle);
-}
-
-/// `POST /api/bootstrap` — legacy HTTP entry.
-async fn bootstrap_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    do_bootstrap(&state).await;
-    (
-        axum::http::StatusCode::OK,
-        Json(serde_json::json!({ "status": "started" })),
-    )
 }
 
 /// POST /api/ota/{addr} — Phase 9-light, push a firmware binary to a sensor's
@@ -1333,30 +1278,6 @@ async fn do_reset(state: &Arc<AppState>, addr: &str) -> Result<(u8, String), Str
     }
 }
 
-/// `POST /api/sensor/{addr}/reset` — legacy HTTP entry.
-async fn reset_push_handler(
-    State(state): State<Arc<AppState>>,
-    Path(addr): Path<String>,
-) -> impl IntoResponse {
-    match do_reset(&state, &addr).await {
-        Ok((status_byte, msg)) => {
-            let ok = status_byte == 0x00;
-            (
-                axum::http::StatusCode::OK,
-                Json(serde_json::json!({
-                    "ok": ok,
-                    "status_byte": status_byte,
-                    "message": msg,
-                })),
-            )
-        }
-        Err(msg) => (
-            axum::http::StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"ok": false, "error": msg})),
-        ),
-    }
-}
-
 /// POST /api/sensor/{addr}/identify  body `{on: bool}` — toggle the
 /// operator-identify overlay (solid white LED) on the named sensor.
 /// Used to pick a specific board out of a busy rack for a battery
@@ -1389,26 +1310,6 @@ async fn do_identify(state: &Arc<AppState>, addr: &str, on: bool) -> Result<(), 
     Ok(())
 }
 
-/// `POST /api/sensor/{addr}/identify` — legacy HTTP entry.
-async fn identify_handler(
-    State(state): State<Arc<AppState>>,
-    Path(addr): Path<String>,
-    Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    let on = body.get("on").and_then(|v| v.as_bool()).unwrap_or(false);
-    match do_identify(&state, &addr, on).await {
-        Ok(()) => (axum::http::StatusCode::OK, Json(serde_json::json!({"ok": true, "on": on}))),
-        Err(msg) => {
-            let status = if msg == "no such connected peer" {
-                axum::http::StatusCode::NOT_FOUND
-            } else {
-                axum::http::StatusCode::BAD_GATEWAY
-            };
-            (status, Json(serde_json::json!({"ok": false, "error": msg})))
-        }
-    }
-}
-
 /// Drives the reset protocol from `r2-esp::reset_tcp`:
 ///   CMD_RESET(1) → status(1) + len_le(2) + message
 async fn push_reset(target: SocketAddr) -> std::io::Result<(u8, String)> {
@@ -1432,16 +1333,6 @@ async fn push_reset(target: SocketAddr) -> std::io::Result<(u8, String)> {
         stream.read_exact(&mut msg).await?;
     }
     Ok((status, String::from_utf8_lossy(&msg).into_owned()))
-}
-
-/// GET /api/bootstrap/status — return bootstrap state
-async fn bootstrap_status_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let running = state.bootstrap_running.load(Ordering::SeqCst);
-    let log = state.bootstrap_log.lock().await;
-    Json(serde_json::json!({
-        "running": running,
-        "log": *log,
-    }))
 }
 
 // run_event_listener was a separate TCP listener on port 21042 for
@@ -1599,7 +1490,7 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
 
                         // SPEC-R2-ROCKER-DASHBOARD §5.2 — server-side
                         // acceleration decimation. Originally only applied
-                        // to the legacy /ws/status JSON path; left /r2
+                        // to the legacy /ws/status path (since removed v0.2); left /r2
                         // running at the full firmware rate (100 Hz × N
                         // sensors) on the assumption the WASM hive could
                         // self-throttle. Pi5 deployment proved otherwise —
@@ -1818,11 +1709,11 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
 
                             // Acceleration decimation already decided at the
                             // top of the frame-loop (see `emit_live`) — same
-                            // gate covers /r2 + /ws/status so a viewer
+                            // gate covers /r2 so a viewer
                             // sees consistent per-peer rates regardless of
                             // transport. Per-frame logging removed long ago;
                             // frames are observable via /r2 (binary) or
-                            // /ws/status (legacy JSON).
+                            // R2-WIRE event on /r2.
                             if emit_live {
                                 let _ = read_state.event_tx.send(event);
                             }
@@ -1903,7 +1794,7 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
         peers.remove(&addr);
     }
     eprintln!("[events] sensor disconnected: {}", addr);
-    // Tracks B+C — start the migration from /ws/status JSON to R2-WIRE
+    // Tracks B+C — start the migration from the now-removed /ws/status JSON to R2-WIRE
     // events. The first event picked is `r2.peer.disconnected` because
     // (a) it's purely synthesised by the controller (no sensor side to
     // touch), (b) its payload is tiny, and (c) BRIDGE §3.1 already
@@ -1935,41 +1826,22 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
         ts_ms: now_ms,
         frame,
     });
-    // Legacy JSON broadcast — preserved during the transition. Drop
-    // in the next release once the webapp has switched to reading
-    // from the sentant snapshot.
-    let msg = serde_json::json!({
-        "type": "peer_disconnected",
-        "addr": addr_str,
-    }).to_string();
-    let _ = state.ws_broadcast_tx.send(msg);
 }
 
 /// Broadcast a target-scoped progress notification to viewers — the
-/// shared shape behind OTA / reset / capture status events. Tracks
-/// B+C migration. Legacy JSON kept one release.
+/// shared shape behind OTA / reset status events. SPEC-R2-ROCKER-WIRE
+/// rows 23 (ota.progress) and 24 (reset.progress).
 ///
 /// CBOR payload: `{0: target (text), 1: phase (text),
 ///                 2: size (uint, optional), 3: message (text, optional)}`.
 fn emit_target_progress(
     state: &Arc<AppState>,
     event_hash: u32,
-    legacy_json_type: &str,
     phase: &str,
     target: &str,
     size: Option<usize>,
     message: Option<&str>,
 ) {
-    // Legacy JSON (preserved one release for old browsers).
-    let mut json = serde_json::json!({
-        "type": legacy_json_type,
-        "phase": phase,
-        "target": target,
-    });
-    if let Some(s) = size { json["size"] = serde_json::json!(s); }
-    if let Some(m) = message { json["message"] = serde_json::json!(m); }
-    let _ = state.ws_broadcast_tx.send(json.to_string());
-
     // R2-WIRE event on /r2 — picked up by the rocker viewer hive.
     let mut buf = vec![0u8; 64 + target.len() + phase.len() + message.map(|m| m.len()).unwrap_or(0)];
     let mut enc = r2_cbor::Encoder::new(&mut buf);
@@ -2001,7 +1873,7 @@ fn emit_ota_progress(
     size: Option<usize>,
     message: Option<&str>,
 ) {
-    emit_target_progress(state, DASH_OTA_PROGRESS, "ota", phase, target, size, message);
+    emit_target_progress(state, DASH_OTA_PROGRESS, phase, target, size, message);
 }
 
 fn emit_reset_progress(
@@ -2010,7 +1882,7 @@ fn emit_reset_progress(
     target: &str,
     message: Option<&str>,
 ) {
-    emit_target_progress(state, DASH_RESET_PROGRESS, "reset", phase, target, None, message);
+    emit_target_progress(state, DASH_RESET_PROGRESS, phase, target, None, message);
 }
 
 /// Capture-state progress event (fleet-scoped, not per-sensor like the
@@ -2025,17 +1897,6 @@ fn emit_capture_progress(
     prefix: Option<&str>,
     ts_ms: Option<i64>,
 ) {
-    // Legacy JSON.
-    let mut json = serde_json::json!({
-        "type": "capture",
-        "phase": phase,
-        "peers": peers,
-    });
-    if let Some(n) = name { json["name"] = serde_json::json!(n); }
-    if let Some(p) = prefix { json["prefix"] = serde_json::json!(p); }
-    if let Some(t) = ts_ms { json["ts_ms"] = serde_json::json!(t); }
-    let _ = state.ws_broadcast_tx.send(json.to_string());
-
     // R2-WIRE event.
     let mut buf = vec![0u8; 64 + phase.len() + name.map(|s| s.len()).unwrap_or(0) + prefix.map(|s| s.len()).unwrap_or(0)];
     let mut enc = r2_cbor::Encoder::new(&mut buf);
@@ -2073,16 +1934,6 @@ fn emit_access_event(
     name: Option<&str>,
     hint: Option<&str>,
 ) {
-    // Legacy JSON.
-    let mut json = serde_json::json!({
-        "type": "access",
-        "event": subtype,
-        "device_pk": device_pk,
-    });
-    if let Some(n) = name { json["name"] = serde_json::json!(n); }
-    if let Some(h) = hint { json["hint"] = serde_json::json!(h); }
-    let _ = state.ws_broadcast_tx.send(json.to_string());
-
     let mut buf = vec![0u8; 64 + subtype.len() + device_pk.len()
         + name.map(|s| s.len()).unwrap_or(0)
         + hint.map(|s| s.len()).unwrap_or(0)];
@@ -2111,12 +1962,6 @@ fn emit_access_event(
 /// Device-alias change broadcast. CBOR payload:
 ///   `{0: device_pk (text), 1: name (text)}` — empty name means alias cleared.
 fn emit_device_alias_changed(state: &Arc<AppState>, device_pk: &str, name: &str) {
-    let _ = state.ws_broadcast_tx.send(serde_json::json!({
-        "type": "device_alias",
-        "device_pk": device_pk,
-        "name": name,
-    }).to_string());
-
     let mut buf = vec![0u8; 32 + device_pk.len() + name.len()];
     let mut enc = r2_cbor::Encoder::new(&mut buf);
     let _ = enc.map(2);
@@ -2282,13 +2127,6 @@ fn emit_bootstrap_progress(state: &Arc<AppState>, event: &BootstrapEvent) {
 /// dashboard-side, not from r2_bootstrap. Payload `{0: "Reset"}`; the
 /// webapp matches on kind and clears its log panel + sensor cards.
 fn emit_bootstrap_reset(state: &Arc<AppState>) {
-    // Legacy JSON for /ws/status — webapp's handleBootstrapEvent
-    // matches `'Reset' in msg.event` for this case. Kept here as long
-    // as /ws/status is alive; the R2-WIRE path is the canonical one
-    // going forward (handleEvent on r2.dash.bootstrap.progress).
-    let legacy = serde_json::json!({ "type": "bootstrap", "event": { "Reset": null } });
-    let _ = state.ws_broadcast_tx.send(legacy.to_string());
-
     let mut buf = [0u8; 16];
     let used = {
         let mut enc = r2_cbor::Encoder::new(&mut buf);
@@ -2949,7 +2787,7 @@ async fn ws_raw_handler(
 
 async fn handle_ws_raw(mut socket: WebSocket, state: Arc<AppState>, peer_addr: SocketAddr) {
     let mut rx = state.raw_frame_tx.subscribe();
-    eprintln!("[ws/raw] viewer connected from {}", peer_addr);
+    eprintln!("[r2 ws] viewer connected from {}", peer_addr);
 
     // Replay cached announce frames per peer so a freshly-connected
     // viewer sees `fw_ver` / `device_pk` / `boot_ts_ms` immediately,
@@ -3041,60 +2879,7 @@ async fn handle_ws_raw(mut socket: WebSocket, state: Arc<AppState>, peer_addr: S
             }
         }
     }
-    eprintln!("[ws/raw] viewer disconnected");
-}
-
-/// `/ws/status` — text JSON status channel for the WASM viewer.
-///
-/// Carries non-frame events: bootstrap progress (BLE scan / `#wifi_offer`
-/// send / sensor online / completion), hotspot lifecycle, server warnings.
-/// Frame data is on `/r2` (binary). Per SPEC-R2-ROCKER-DASHBOARD §5.3.
-async fn ws_status_handler(
-    ws: WebSocketUpgrade,
-    state: Arc<AppState>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws_status(socket, state))
-}
-
-async fn handle_ws_status(mut socket: WebSocket, state: Arc<AppState>) {
-    eprintln!("[ws/status] viewer connected");
-
-    // Replay the persisted bootstrap log so a late-joining viewer sees
-    // the in-flight discovery progress immediately, rather than waiting
-    // for the next event.
-    {
-        let log = state.bootstrap_log.lock().await;
-        for entry in log.iter() {
-            if socket.send(Message::Text(entry.clone().into())).await.is_err() {
-                return;
-            }
-        }
-    }
-
-    let mut rx = state.ws_broadcast_tx.subscribe();
-    loop {
-        tokio::select! {
-            inbound = socket.recv() => {
-                match inbound {
-                    Some(Ok(Message::Close(_))) | None => break,
-                    Some(Err(_)) => break,
-                    _ => {} // browser → server reserved for future use
-                }
-            }
-            msg = rx.recv() => {
-                match msg {
-                    Ok(text) => {
-                        if socket.send(Message::Text(text.into())).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        }
-    }
-    eprintln!("[ws/status] viewer disconnected");
+    eprintln!("[r2 ws] viewer disconnected");
 }
 
 /// `/ws/logs/{addr}` — per-sensor live log tail.
@@ -3498,18 +3283,6 @@ mod firmware_snapshot_tests {
 
 // ── SPEC-R2-ROCKER-CAPTURE handlers ───────────────────────────────────
 
-#[derive(serde::Deserialize)]
-struct CaptureMarkBody {
-    name: String,
-    /// Optional pre-formatted local-time stem like `"2026-05-18_13-35-00"`.
-    /// The webapp builds this with `Intl.DateTimeFormat` so the operator
-    /// sees the file dated in their local timezone (the dashboard avoids
-    /// the localtime/TZ rabbit hole by trusting the browser). Firmware
-    /// uses `<prefix>-<name>.csv`; if absent, falls back to ts_ms-padded.
-    #[serde(default)]
-    prefix: Option<String>,
-}
-
 /// Fan a frame out to every connected peer's tx channel. Returns the
 /// count of peers reached. Failures (channel full / closed) are
 /// logged but do not abort the fan-out — fleet ops are best-effort.
@@ -3589,44 +3362,6 @@ async fn do_capture_stop(state: &Arc<AppState>) -> usize {
     let sent = fan_out_dash_frame(state, DASH_CAPTURE_STOP, 0x0003, payload).await;
     emit_capture_progress(state, "stop", sent, None, None, None);
     sent
-}
-
-/// `POST /api/capture/start` — legacy HTTP entry. Calls into
-/// `do_capture_start` so behaviour is identical to the
-/// `r2.dash.cmd.capture.start` event path.
-async fn capture_start_handler(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    let sent = do_capture_start(&state).await;
-    (axum::http::StatusCode::OK, Json(serde_json::json!({"ok": true, "peers": sent})))
-}
-
-/// `POST /api/capture/mark {name}` — legacy HTTP entry.
-async fn capture_mark_handler(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<CaptureMarkBody>,
-) -> impl IntoResponse {
-    match do_capture_mark(&state, &body.name, body.prefix.as_deref()).await {
-        Ok((sent, ts_ms)) => (axum::http::StatusCode::OK, Json(serde_json::json!({
-            "ok": true,
-            "ts_ms": ts_ms,
-            "name": body.name,
-            "prefix": body.prefix,
-            "peers": sent,
-        }))),
-        Err(msg) => (axum::http::StatusCode::BAD_REQUEST, Json(serde_json::json!({
-            "ok": false,
-            "error": msg,
-        }))),
-    }
-}
-
-/// `POST /api/capture/stop` — legacy HTTP entry.
-async fn capture_stop_handler(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    let sent = do_capture_stop(&state).await;
-    (axum::http::StatusCode::OK, Json(serde_json::json!({"ok": true, "peers": sent})))
 }
 
 fn is_valid_capture_name(n: &str) -> bool {
@@ -4113,20 +3848,6 @@ async fn do_device_alias_set(
     Ok(final_name)
 }
 
-/// `POST /api/devices/alias` — legacy HTTP entry.
-async fn device_alias_set_handler(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    let device_pk = body.get("device_pk").and_then(|v| v.as_str()).unwrap_or("");
-    let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("");
-    match do_device_alias_set(&state, device_pk, name).await {
-        Ok(_) => (axum::http::StatusCode::OK, Json(serde_json::json!({"ok": true}))),
-        Err(msg) => (axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": msg}))),
-    }
-}
-
 fn parse_row_ts_ms(row: &[u8]) -> Option<i64> {
     if row.len() < 26 { return None; }
     // bytes 11..25 carry ts_ms (right-aligned). Trim ASCII spaces, parse.
@@ -4302,276 +4023,6 @@ async fn access_onboard_handler(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e})),
         ).into_response(),
-    }
-}
-
-async fn access_members_handler(
-    State(state): State<Arc<AppState>>,
-    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
-) -> impl IntoResponse {
-    let handle = match require_access(&state).await {
-        Ok(h) => h,
-        Err(r) => return r,
-    };
-    if !is_keyholder(addr) {
-        return (
-            axum::http::StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "only the KeyHolder (localhost) may list members in v0.1"})),
-        ).into_response();
-    }
-    let access = handle.lock().await;
-    let rows = access.members();
-    (axum::http::StatusCode::OK, Json(serde_json::json!({"members": rows}))).into_response()
-}
-
-async fn access_revoke_handler(
-    State(state): State<Arc<AppState>>,
-    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
-    Path(device_pk): Path<String>,
-) -> impl IntoResponse {
-    let handle = match require_access(&state).await {
-        Ok(h) => h,
-        Err(r) => return r,
-    };
-    if !is_keyholder(addr) {
-        return (
-            axum::http::StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "only the KeyHolder (localhost) may revoke members in v0.1"})),
-        ).into_response();
-    }
-    let outcome = {
-        let mut access = handle.lock().await;
-        access.revoke(&device_pk)
-    };
-    use access::RevokeOutcome::*;
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-    match outcome {
-        Revoked(pk) => {
-            // §7.2 — broadcast on /ws/status so any currently-connected
-            // viewer can react. §7.4 server-side TCP teardown for the
-            // revoked peer's connections is implementation-side work
-            // that lands with the v1 cert-handshake variant; for v0.1
-            // the broadcast + future-connection-rejection is the
-            // operative guarantee.
-            emit_access_event(&state, "revoked", &hex::encode(&pk[..]), None, None);
-            (axum::http::StatusCode::OK, Json(serde_json::json!({
-                "ok": true,
-                "revoked_at_ms": now_ms,
-            }))).into_response()
-        }
-        NotFound => (
-            axum::http::StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "no such member (already revoked, or never paired)"})),
-        ).into_response(),
-        BadRequest => (
-            axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "device_pk must be 64 hex chars"})),
-        ).into_response(),
-        Other(e) => (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        ).into_response(),
-    }
-}
-
-// ── Request → approve enrolment handlers ──────────────────────────────
-
-#[derive(serde::Deserialize)]
-struct RequestBody { device_pk: String, name: String }
-
-async fn access_request_handler(
-    State(state): State<Arc<AppState>>,
-    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
-    Json(body): Json<RequestBody>,
-) -> impl IntoResponse {
-    let handle = match require_access(&state).await {
-        Ok(h) => h,
-        Err(r) => return r,
-    };
-    let hint = format!("{}", addr.ip());
-    let outcome = {
-        let mut access = handle.lock().await;
-        access.submit_request(&body.device_pk, &body.name, &hint)
-    };
-    use access::RequestOutcome::*;
-    match outcome {
-        Submitted(pk) => {
-            // Operator-side notification — picked up by the Link tab's
-            // /ws/status hook to show the pending row.
-            emit_access_event(&state, "request_pending", &hex::encode(&pk[..]), Some(&body.name), Some(&hint));
-            (axum::http::StatusCode::OK, Json(serde_json::json!({
-                "ok": true,
-                "device_pk": hex::encode(&pk[..]),
-            }))).into_response()
-        }
-        BadRequest(msg) => (
-            axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": msg})),
-        ).into_response(),
-    }
-}
-
-async fn access_check_handler(
-    State(state): State<Arc<AppState>>,
-    Path(device_pk): Path<String>,
-) -> impl IntoResponse {
-    let handle = match require_access(&state).await {
-        Ok(h) => h,
-        Err(r) => return r,
-    };
-    let outcome = {
-        let mut access = handle.lock().await;
-        access.check_request(&device_pk)
-    };
-    use access::CheckOutcome::*;
-    match outcome {
-        Approved(body) => (axum::http::StatusCode::OK, Json(body)).into_response(),
-        Pending => (
-            axum::http::StatusCode::ACCEPTED,  // 202 — keep polling
-            Json(serde_json::json!({"status": "pending"})),
-        ).into_response(),
-        Denied => (
-            axum::http::StatusCode::GONE,
-            Json(serde_json::json!({"status": "denied"})),
-        ).into_response(),
-        NotFound => (
-            axum::http::StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "no such request"})),
-        ).into_response(),
-        BadRequest => (
-            axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "device_pk must be 64 hex chars"})),
-        ).into_response(),
-    }
-}
-
-async fn access_pending_handler(
-    State(state): State<Arc<AppState>>,
-    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
-) -> impl IntoResponse {
-    let handle = match require_access(&state).await {
-        Ok(h) => h,
-        Err(r) => return r,
-    };
-    if !is_keyholder(addr) {
-        return (axum::http::StatusCode::FORBIDDEN, Json(serde_json::json!({
-            "error": "only the KeyHolder (localhost) may list pending requests in v0.1",
-        }))).into_response();
-    }
-    let access = handle.lock().await;
-    (axum::http::StatusCode::OK, Json(serde_json::json!({
-        "pending": access.pending_requests(),
-    }))).into_response()
-}
-
-async fn access_approve_handler(
-    State(state): State<Arc<AppState>>,
-    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
-    Path(device_pk): Path<String>,
-) -> impl IntoResponse {
-    let handle = match require_access(&state).await {
-        Ok(h) => h,
-        Err(r) => return r,
-    };
-    if !is_keyholder(addr) {
-        return (axum::http::StatusCode::FORBIDDEN, Json(serde_json::json!({
-            "error": "only the KeyHolder (localhost) may approve requests in v0.1",
-        }))).into_response();
-    }
-    let (outcome, response_body) = {
-        let mut access = handle.lock().await;
-        let o = access.approve_request(&device_pk);
-        // Snapshot the cached response body so we can publish it via
-        // the relay too — relay-side viewers don't poll /check, they
-        // wait for an access.response text frame.
-        let body = access.peek_response(&device_pk);
-        (o, body)
-    };
-    use access::ApproveOutcome::*;
-    match outcome {
-        Approved(pk) => {
-            let pk_hex = hex::encode(&pk[..]);
-            // Operator-side: the row disappears from "pending". The
-            // device polling /check will pick up the bundle next.
-            emit_access_event(&state, "request_approved", &pk_hex, None, None);
-            // Relay-side: build a notekeeper-format JOIN_RESPONSE
-            // binary frame and push it onto the relay's outbound
-            // channel. Off-network viewers receive it as a raw
-            // binary frame over the relay (r2-relay only forwards
-            // binary peer-to-peer) — no polling needed.
-            //
-            // Frame: [0xFF, 0x02, devicePk(32), tgPk(32), encrypted]
-            if let (Some(tx), Some(body)) = (state.relay_binary_tx.as_ref(), response_body) {
-                use base64::Engine as _;
-                let tg_pk_hex = body.get("tg_pk_hex").and_then(|v| v.as_str());
-                let enc_b64   = body.get("encrypted_b64").and_then(|v| v.as_str());
-                if let (Some(tg_pk_hex), Some(enc_b64)) = (tg_pk_hex, enc_b64) {
-                    let tg_pk_vec = hex::decode(tg_pk_hex).unwrap_or_default();
-                    let encrypted = base64::engine::general_purpose::STANDARD
-                        .decode(enc_b64).unwrap_or_default();
-                    if tg_pk_vec.len() == 32 && !encrypted.is_empty() {
-                        let mut tg_pk = [0u8; 32];
-                        tg_pk.copy_from_slice(&tg_pk_vec);
-                        let frame = relay::build_join_response(&pk, &tg_pk, &encrypted);
-                        let _ = tx.send(frame);
-                    } else {
-                        eprintln!("[access] approve: malformed response body, can't build JOIN_RESPONSE");
-                    }
-                }
-            }
-            (axum::http::StatusCode::OK, Json(serde_json::json!({
-                "ok": true,
-                "device_pk": pk_hex,
-            }))).into_response()
-        }
-        NotFound => (axum::http::StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "no such pending request"}))).into_response(),
-        AlreadyApproved => (axum::http::StatusCode::CONFLICT,
-            Json(serde_json::json!({"error": "already approved"}))).into_response(),
-        Denied => (axum::http::StatusCode::CONFLICT,
-            Json(serde_json::json!({"error": "request was already denied"}))).into_response(),
-        BadRequest => (axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "device_pk must be 64 hex chars"}))).into_response(),
-        Failed(e) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e}))).into_response(),
-    }
-}
-
-async fn access_deny_handler(
-    State(state): State<Arc<AppState>>,
-    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
-    Path(device_pk): Path<String>,
-) -> impl IntoResponse {
-    let handle = match require_access(&state).await {
-        Ok(h) => h,
-        Err(r) => return r,
-    };
-    if !is_keyholder(addr) {
-        return (axum::http::StatusCode::FORBIDDEN, Json(serde_json::json!({
-            "error": "only the KeyHolder (localhost) may deny requests in v0.1",
-        }))).into_response();
-    }
-    let outcome = {
-        let mut access = handle.lock().await;
-        access.deny_request(&device_pk)
-    };
-    use access::DenyOutcome::*;
-    match outcome {
-        Denied(pk) => {
-            let pk_hex = hex::encode(&pk[..]);
-            emit_access_event(&state, "request_denied", &pk_hex, None, None);
-            (axum::http::StatusCode::OK, Json(serde_json::json!({
-                "ok": true,
-                "device_pk": pk_hex,
-            }))).into_response()
-        }
-        NotFound => (axum::http::StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "no such pending request"}))).into_response(),
-        BadRequest => (axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "device_pk must be 64 hex chars"}))).into_response(),
     }
 }
 

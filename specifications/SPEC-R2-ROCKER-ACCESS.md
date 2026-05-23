@@ -270,7 +270,7 @@ A request progresses through these states:
 | `Consumed` | viewer's `/check` returns the approved bundle | n/a — record dropped |
 | `Revoked` | KeyHolder POSTs `/api/access/revoke/{device_pk}` (§4.4) | YES — G-Set CRDT in [[r2-trust/revocation.rs]] |
 
-Each state transition broadcasts an event on `/ws/status` so the
+Each state transition emits `r2.dash.access.event` on `/r2` so the
 operator's Link tab can refresh without polling.
 
 ### 3.2 Request payload
@@ -385,7 +385,7 @@ landing page (§8). The dashboard:
    Over the limit returns 429.
 4. Inserts a `Pending` record per §3.3.
 5. Broadcasts `{type:"access", event:"request_pending", device_pk,
-   name, hint}` on `/ws/status` so the operator's Link tab
+   name, hint}` (as r2.dash.access.event on /r2) so the operator's Link tab
    refreshes immediately.
 6. Returns `200 {ok: true, device_pk}`.
 
@@ -439,7 +439,7 @@ KeyHolder-only. The dashboard:
 4. Adds the new member to the persistent `TrustGroup::members`
    via `r2-trust/src/persist.rs`.
 5. Broadcasts `{type:"access", event:"request_approved",
-   device_pk}` on `/ws/status` so the operator's Link tab pulls
+   device_pk}` (as r2.dash.access.event on /r2) so the operator's Link tab pulls
    the new row from `/api/access/members`.
 6. Returns `200 {ok: true, device_pk}`.
 
@@ -451,7 +451,7 @@ returns 400.
 
 KeyHolder-only. Looks up the pending request, marks it `Denied`,
 broadcasts `{type:"access", event:"request_denied", device_pk}`
-on `/ws/status`. The next `/check` from the requester returns
+as r2.dash.access.event on /r2. The next r2.dash.cmd.access.check from the requester returns
 410. The pending record is dropped on that next poll (or
 immediately if the operator preferred to clear it via a future
 "clear denied requests" affordance — out of scope for v0.3).
@@ -467,7 +467,7 @@ audit trail is reachable.
 `last_seen` is the wall-clock timestamp of the most recent
 authenticated frame from that member. For sensors this is the
 last R2-WIRE frame on port 21042; for viewers it's the last
-`/r2` or `/ws/status` keep-alive. If a member has never
+`/r2` keep-alive. If a member has never
 been seen since the dashboard process started, `last_seen` is
 `null`.
 
@@ -475,8 +475,8 @@ been seen since the dashboard process started, `last_seen` is
 
 KeyHolder-only. Adds `device_pk` to the revocation G-Set per
 `crates/r2-trust/src/revocation.rs`, persists, broadcasts
-`r2.dash.access.revoked {device_pk, revoked_at}` on `/ws/status`,
-and tears down any open `/r2` or `/ws/status` connection
+`r2.dash.access.event` subtype `"revoked"` (with `device_pk`) on `/r2`,
+and tears down any open `/r2` connection
 from that `device_pk` immediately (§7).
 
 The route **MUST** succeed regardless of whether the target
@@ -647,7 +647,7 @@ adds `device_pk` to the revocation G-Set
 ### 7.2 Broadcast to currently-connected members
 
 The dashboard broadcasts
-`r2.dash.access.revoked {device_pk, revoked_at}` on `/ws/status`
+`r2.dash.access.event` subtype `"revoked"` on `/r2`
 to all currently-connected viewers. Every viewer **MUST** check
 whether the announced `device_pk` matches its own.
 
@@ -655,7 +655,7 @@ whether the announced `device_pk` matches its own.
 
 If a viewer is the revoked party, it **MUST**:
 
-* Close any open `/r2` and `/ws/status` connections.
+* Close any open `/r2` connection.
 * Delete the IndexedDB record per §6.
 * Render the "not-enrolled" landing page (manual paste-a-link
   fallback, no resumed session).
@@ -699,7 +699,7 @@ window (the dashboard's check is against the persisted set, not
 just connections seen during the current process lifetime).
 
 The sharp edge `r2-notekeeper` carries — that revocation is local
-only — is **closed** by §7.2's `/ws/status` broadcast and the
+only — is **closed** by §7.2's r2.dash.access.event broadcast and the
 dashboard-side connection teardown in §7.4. Implementations
 **MUST NOT** rely on the revoked viewer voluntarily wiping its
 state.
@@ -743,7 +743,7 @@ Below the tab heading, in order:
    least one pending request, or always — implementation choice).
    Polls `/api/access/pending` on Link-tab open and refreshes on
    each `request_pending` / `request_approved` / `request_denied`
-   `/ws/status` broadcast. Each row shows:
+   r2.dash.access.event broadcast on /r2. Each row shows:
    * Requester name (chosen at request time).
    * `device_pk` short form (first 8 hex chars).
    * Source-IP hint, so the operator can correlate with a
@@ -923,7 +923,7 @@ A webapp build conforms when:
 5. It renders the "Link" tab per §8, including the Onboard
    modal, the pending-requests panel, the device list, and (when
    applicable) the not-enrolled landing page.
-6. It listens for `r2.dash.access.revoked` on `/ws/status` and,
+6. It listens for `r2.dash.access.event` subtype=revoked on `/r2` and,
    when the revoked `device_pk` matches its own, deletes the
    IndexedDB record and re-renders the not-enrolled landing
    page (§7.3).
@@ -991,7 +991,7 @@ follow-on plan to `sleepy-snuggling-tome.md`. It is expected to
 contain, at minimum:
 
 * `dashboard/src/main.rs` — four new routes, in-memory token
-  table, `/ws/status` broadcast hooks, revocation teardown.
+  table, r2.dash.access.event broadcast hooks, revocation teardown.
 * `webapp/index.html` — "Access" tab + invite modal + device
   list + not-enrolled landing page; IndexedDB layer; `?join=`
   handler.

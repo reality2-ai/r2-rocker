@@ -345,25 +345,24 @@ whichever occurs first (per WIRE §4.1).
 | `/api/calibration/:pk/compute` | POST | Compute R from stored g_A/g_B |
 | `/api/stream/:pk/start` | POST `{rate_hz, range}` | Forward to sensor |
 | `/api/stream/:pk/stop` | POST | Forward to sensor |
-| `/api/bootstrap` | POST | Trigger BLE discovery + bootstrap loop (§6); re-press cancels and restarts |
-| `/api/bootstrap/status` | GET | `{running: bool, log: [...]}` snapshot |
-| `/api/ota` | POST `{pk, url, sha256}` | Trigger OTA (§13) |
-| `/api/reset/:pk` | POST `{factory: bool}` | Forward to sensor |
-| `/api/capture/start` | POST `{}` | Issue an immediate sync_pulse round (per SPEC-R2-ROCKER-CAPTURE §7.1), then fan out `r2.dash.capture.start` to every connected peer. |
-| `/api/capture/mark` | POST `{name: str, prefix?: str}` | Fan out `r2.dash.capture.mark` to every connected peer with the dashboard's chosen `ts_ms` plus the webapp-supplied local-time filename `prefix` (charset `[0-9_-]`, ≤ 32 bytes). One pair, shared across the fleet so filenames match. |
-| `/api/capture/stop` | POST `{}` | Fan out `r2.dash.capture.stop`. |
+| `/api/ota/{addr}` | POST `<firmware .bin bytes>` | Phase 9-light OTA push — multi-MB binary upload. Deliberately not migrated to a cmd event since per-frame WS is the wrong shape; progress streams on `r2.dash.ota.progress` (WIRE row 23). |
+| `/api/firmware/available` | GET | Latest release per carrier (GitHub Releases primary, local `releases/` fallback). 5-min cache. |
+| `/api/firmware/{carrier}/binary` | GET | Stream the cached firmware blob for OTA selection. |
 | `/api/data/{addr}/list` | GET | Open a TCP connection to `<addr>:21047` and issue `LIST`. Returns a JSON-mapped CBOR response of `[{name, size, mtime}]`. |
 | `/api/data/{addr}/file/{name}` | GET, DELETE | `GET` opens TCP 21047, prepends a `seq,ts_ms,x,y,z\n` header, and streams the raw fixed-width rows. `DELETE` issues `DEL`. |
 | `/api/data/{addr}/all` | DELETE | `DEL_ALL` against the named sensor. |
 | `/api/data/merged` | GET `?file=<basename>` | Wide-format merge across the fleet: header is `ts_ms` followed by three columns per sensor (`<ip>_x, <ip>_y, <ip>_z`, IP dots → underscores, sensors in sorted-IP order). One row per unique `ts_ms`, ascending; cells are blank where that sensor has no sample at that `ts_ms`. |
-| `/api/access/invite` | POST `{name?: str}` | KeyHolder-only. Mint a single-use, 5-minute-expiring enrolment token; return QR PNG + `url_local` + optional `url_relay` + optional `words_3`. See SPEC-R2-ROCKER-ACCESS §4.1. |
-| `/api/access/claim` | POST `{tg_hash, entropy_hex, device_pk, device_name}` | Public — the token IS the auth. Consumes the token, issues a `DeviceCertificate` + encrypted `(DEK, HK)` credential bundle, broadcasts `r2.dash.access.member_added` on `/ws/status`. Idempotent for the same `device_pk` within the window. See SPEC-R2-ROCKER-ACCESS §4.2. |
-| `/api/access/members` | GET | KeyHolder-only. Returns the full member list (including revoked rows) with role / paired-at / last-seen. See SPEC-R2-ROCKER-ACCESS §4.3. |
-| `/api/access/revoke/{device_pk}` | POST | KeyHolder-only. Adds to revocation G-Set, broadcasts `r2.dash.access.revoked` on `/ws/status`, tears down the offending connection. **Succeeds regardless of whether the target is online.** See SPEC-R2-ROCKER-ACCESS §4.4 + §7.6. |
-| `/api/enrol-init` | POST | **DEPRECATED** — replaced by `/api/access/invite`. v0.1 stub returns 501. |
-| `/api/enrol-complete` | POST | **DEPRECATED** — replaced by `/api/access/claim`. v0.1 stub returns 501. |
-| `/r2` | WebSocket | **Binary** R2-WIRE frames forwarded verbatim from sensors (canonical Phase-5d transport). v0.1 anonymous per the additive auth model in SPEC-R2-ROCKER-ACCESS §5.1; v1 target is a cert-handshake variant. |
-| `/ws/status` | WebSocket | **Text JSON** status events: bootstrap progress, hotspot up/down, server-side errors, and the `r2.dash.access.{member_added, revoked}` events from SPEC-R2-ROCKER-ACCESS §4.2 + §7.2. |
+| `/api/devices/aliases` | GET | Bulk-fetch the operator-assigned alias map on webapp boot. Per-sensor mutations ride `r2.dash.cmd.device.alias.set` on `/r2`. |
+| `/api/version` | GET | `{name, version, git_sha, built}` introspection. |
+| `/api/keyholder/tg-pub` | GET | TG public key bytes for QR-code generation. |
+| `/api/access/onboard` | GET | KeyHolder-only operator UI helper — pair of QR payloads for the "Onboard a visitor" modal (ACCESS v0.3 §8). |
+| `/api/access/whoami/{device_pk}` | GET | Self-heal — a paired viewer calls this on every load to confirm membership; 404 → stale cert → webapp wipes IndexedDB. |
+| `/api/enrol-init`, `/api/enrol-complete` | POST | v0.1 stubs returning 501; reserved for a future enrolment-token flow. |
+| `/r2` | WebSocket | **Binary** R2-WIRE frames in both directions: sensor-emitted events forwarded verbatim outbound, viewer-emitted operator commands inbound (WIRE §2.1). Per R2-WIRE §13.5, R2-WIRE events ride port 21042 — `/r2` is the WebSocket path on that port (R2-INTERNET §5). v0.1 anonymous per the additive auth model in SPEC-R2-ROCKER-ACCESS §5.1; v1 target is a cert-handshake variant. |
+| `/ws/logs/{addr}` | WebSocket | **Text** per-sensor live log tail — proxies a TCP connection on the sensor's log port (21046) and pipes lines back as WS text frames. Non-R2-WIRE rocker plugin transport. |
+
+Routes that existed pre-v0.2 and were retired in v0.2 (every operator-
+plane action migrated to a `r2.dash.cmd.*` event on `/r2`): see §5.3.
 
 Auth: v0.1 has no auth — the dashboard is bound to localhost-or-LAN
 on a private hotspot. Future versions SHOULD add a session cookie or
@@ -391,7 +390,7 @@ Frames are forwarded **without decode, signature verification, or
 filtering** at the server, with one exception: acceleration
 (`r2.sensor.acceleration`) is **decimated by `ACCEL_DECIMATION`**
 (currently 10) before broadcast — only every 10th sample per peer
-reaches `/r2`. The same gate applies to `/ws/status`'s JSON path
+reaches `/r2`. The same gate previously applied to the now-removed `/ws/status` JSON path
 so viewers see consistent per-peer rates regardless of transport.
 The browser's vendored `r2-wasm` performs decode + signature
 verification on the frames it does receive. Full fidelity remains on
@@ -406,39 +405,35 @@ header + CBOR payload — no length prefix; WebSocket provides the
 message boundary). Unknown event hashes are logged and dropped per
 WIRE §2's "non-actionable" rule.
 
-### 5.3 `/ws/status` — text JSON status channel
+### 5.3 Removed legacy endpoints
 
-Status events that are **not** R2-WIRE frames — primarily the bootstrap
-loop's progress, plus server-side conditions the operator should see.
-Each WS message is a UTF-8 JSON object of the form `{type: "...", ...}`:
+The pre-v0.2 dashboard exposed several transitional channels that have
+since been retired:
 
-| Type | Payload | Description |
-|---|---|---|
-| `bootstrap` | `{event: <BootstrapEvent>}` | One step in the discovery loop; payload mirrors `r2_bootstrap::BootstrapEvent` serialised as `{kind, data}` (Log / SensorFound / SensorConnected / Done / Error), plus the synthetic `{Reset: null}` shape emitted by the dashboard on operator-triggered restart. See §6.5. |
-| `hotspot` | `{state: "up" \| "down" \| "creating", ssid?: str}` | NetworkManager hotspot lifecycle |
-| `server_error` | `{level: "warn"\|"error", message: str}` | Operator-visible server condition |
+* `GET /` (server-decoded SPA bundle, embedded HTML) — pre-Phase-5d.
+  Replaced by the static WASM viewer served at `/`.
+* `GET /ws` (bidirectional JSON WebSocket where the server decoded
+  R2-WIRE frames) — pre-Phase-5d. Replaced by `/r2`.
+* `GET /ws/status` (text JSON status channel — bootstrap progress,
+  peer disconnects, OTA / reset / capture / access / device-alias
+  events) — pre-v0.2. Every event it carried is now an R2-WIRE event
+  on `/r2`: see SPEC-R2-ROCKER-WIRE §2 rows 22-28 + 32. The webapp
+  consumes these directly through its rocker viewer hive.
+* `POST /api/capture/{start,mark,stop}` — replaced by
+  `r2.dash.cmd.capture.{start,mark,stop}` on `/r2` (WIRE rows 29-31).
+* `POST /api/sensor/{addr}/reset` — replaced by `r2.dash.cmd.reset`
+  (row 33).
+* `POST /api/sensor/{addr}/identify` — replaced by
+  `r2.dash.cmd.identify` (row 34).
+* `POST /api/bootstrap` + `GET /api/bootstrap/status` — replaced by
+  `r2.dash.cmd.bootstrap` (row 35); progress streams on
+  `r2.dash.bootstrap.progress` (row 27).
+* `POST /api/devices/alias` — replaced by
+  `r2.dash.cmd.device.alias.set` (row 36).
+* The seven `/api/access/*` operator routes — replaced by the
+  `r2.dash.cmd.access.*` set (rows 37-43).
 
-Browser → server messages on `/ws/status` are reserved for future
-use (subscribe / viewport_hint per §5.4); v0.1 ignores them.
-
-### 5.4 Browser → server messages
-
-The browser does not currently send messages on `/r2` or `/ws/status`.
-Future versions will use `/ws/status` for:
-
-| Type | Payload | Description |
-|---|---|---|
-| `subscribe` | `{peers: [...] \| "all"}` | Filter pushes |
-| `viewport_hint` | `{visible_peers: [...]}` | Server prioritises these |
-
-### 5.5 Removed legacy endpoints
-
-The pre-Phase-5d dashboard exposed two transitional channels — `GET /`
-(server-decoded SPA bundle, embedded HTML) and `GET /ws` (bidirectional
-JSON WebSocket where the server decoded R2-WIRE frames). Both were
-removed once the WASM viewer reached parity. New consumers MUST use
-`/r2` + `/ws/status` (defined above) and connect to the WASM viewer
-served at `/`.
+New consumers MUST use `/r2` and the static WASM viewer at `/`.
 
 ---
 
@@ -450,7 +445,7 @@ Bootstrap runs on demand: the user clicks "Connect Sensors" in the UI,
 hitting `POST /api/bootstrap`. The dashboard shall NOT auto-discover on
 start; discovery is operator-controlled. Re-pressing the button while a
 bootstrap loop is active SHALL cancel the in-flight task and start a
-fresh one (a `Reset` `bootstrap` event is emitted on `/ws/status` to
+fresh one (a `Reset` event is emitted as `r2.dash.bootstrap.progress` on `/r2` to
 signal this to viewers).
 
 ### 6.2 WiFi hotspot
@@ -516,7 +511,7 @@ demo's lesson; each sensor filters by its own RBID).
 
 ### 6.5 Bootstrap log
 
-Every bootstrap step emits a `bootstrap` event on `/ws/status` (per §5.3)
+Every bootstrap step emits a `r2.dash.bootstrap.progress` event on `/r2` (WIRE row 27)
 so the operator can watch progress. The event's inner `event` field
 serialises `r2_bootstrap::BootstrapEvent` as `{kind: <variant>, data: <payload>}`:
 
@@ -836,7 +831,7 @@ in the Devices view. v0.2 implementation:
   existing per-sensor `POST /api/ota/{addr}` route — the dashboard has
   no fleet-level endpoint. Failure of one peer does not abort the
   others; each peer's error is logged client-side and shown via the
-  existing OTA `/ws/status` event stream.
+  existing OTA `r2.dash.ota.progress` event stream on `/r2`.
 * Concurrency is uncapped for the v0.1 fleet size (≤ ~4 sensors). If
   the fleet grows the webapp SHOULD cap concurrency at 2 to keep the
   hotspot uplink from saturating; the original spec's "sequential by

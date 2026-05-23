@@ -388,15 +388,16 @@ async fn handle_join_request(
     };
     use crate::access::RequestOutcome;
     if let RequestOutcome::Submitted(pk) = outcome {
-        // Mirror what the HTTP handler does — broadcast on /ws/status
-        // so the controller's Link tab shows the new pending row.
-        let _ = state.ws_broadcast_tx.send(serde_json::json!({
-            "type": "access",
-            "event": "request_pending",
-            "device_pk": hex::encode(&pk[..]),
-            "name": name,
-            "hint": "via relay",
-        }).to_string());
+        // Mirror what the cmd dispatcher does — emit r2.dash.access.event
+        // on /r2 so the controller's Link tab shows the new pending row
+        // (SPEC-R2-ROCKER-WIRE row 26, post-v0.2 — /ws/status is gone).
+        crate::emit_access_event(
+            state,
+            "request_pending",
+            &hex::encode(&pk[..]),
+            Some(&name),
+            Some("via relay"),
+        );
     } else {
         eprintln!("[relay] JOIN_REQUEST submit_request outcome was not Submitted: {:?}", outcome);
     }
