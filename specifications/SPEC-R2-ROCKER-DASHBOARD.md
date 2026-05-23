@@ -442,11 +442,11 @@ New consumers MUST use `/r2` and the static WASM viewer at `/`.
 ### 6.1 Trigger
 
 Bootstrap runs on demand: the user clicks "Connect Sensors" in the UI,
-hitting `POST /api/bootstrap`. The dashboard shall NOT auto-discover on
-start; discovery is operator-controlled. Re-pressing the button while a
-bootstrap loop is active SHALL cancel the in-flight task and start a
-fresh one (a `Reset` event is emitted as `r2.dash.bootstrap.progress` on `/r2` to
-signal this to viewers).
+which emits `r2.dash.cmd.bootstrap` on `/r2` (WIRE row 35). The dashboard
+shall NOT auto-discover on start; discovery is operator-controlled. Re-
+pressing the button while a bootstrap loop is active SHALL cancel the
+in-flight task and start a fresh one (a `Reset` event is emitted as
+`r2.dash.bootstrap.progress` on `/r2` to signal this to viewers).
 
 ### 6.2 WiFi hotspot
 
@@ -801,8 +801,10 @@ yellow / green state has a textual or iconographic counterpart.
 
 ### 13.1 Trigger
 
-Operator submits `POST /api/ota {pk, url, sha256}`. The dashboard
-shall:
+Operator submits a firmware push via `POST /api/ota/{addr}` with the
+binary as the request body (the one operator-plane HTTP route that
+survived v0.2 — multi-MB binary uploads are the wrong shape for per-
+frame WS, per §5.1). The dashboard shall:
 
 1. Verify the host serving `url` is reachable (HEAD request, 5 s
    timeout).
@@ -837,9 +839,10 @@ in the Devices view. v0.2 implementation:
   hotspot uplink from saturating; the original spec's "sequential by
   default, rolling parallel later" guidance still applies in spirit.
 
-Fleet-wide reset works the same way via `POST /api/sensor/{addr}/reset`:
-"Reset All Sensors" button on the Devices view, confirmation dialog,
-`Promise.allSettled` over peers.
+Fleet-wide reset works the same way but rides as `r2.dash.cmd.reset`
+events on `/r2` (WIRE row 33): "Reset All Sensors" button on the
+Devices view, confirmation dialog, `Promise.allSettled` over per-peer
+`sendCmd("r2.dash.cmd.reset", {1: addr})` calls.
 
 ### 13.3 Firmware availability + "needs update" dot
 

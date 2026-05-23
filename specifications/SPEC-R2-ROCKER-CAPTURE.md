@@ -340,15 +340,26 @@ The dashboard **SHALL** generate the `ts_ms` value once on
 when sending `r2.dash.capture.mark`. This guarantees the same
 filename across the fleet for one capture session.
 
-### 7.3 HTTP routes
+### 7.3 Operator-plane events and HTTP routes
 
-Per SPEC-R2-ROCKER-DASHBOARD §5.1 (this spec adds):
+The capture lifecycle (start / mark / stop) is operator-initiated
+and rides as R2-WIRE cmd events on `/r2` per WIRE §2.1; the per-
+sensor data export uses HTTP GET helpers mounted by the dashboard
+(see SPEC-R2-ROCKER-DASHBOARD §5.1).
+
+**Operator-plane cmd events** (viewer → controller on `/r2`,
+correlated by `req_id` in CBOR key 0; see WIRE rows 29–31):
+
+| Event | Payload | Effect |
+|---|---|---|
+| `r2.dash.cmd.capture.start` | `{0: req_id (u32)}` | Controller emits a sync_pulse to align fleet clocks, then fans out row-17 `r2.dash.capture.start` to every connected sensor. Response confirms scheduling. |
+| `r2.dash.cmd.capture.mark`  | `{0: req_id, 1: name (text), 2: prefix (text, optional)}` | Controller stamps an authoritative `ts_ms`, derives the canonical filename `<ts16>-<name>.csv` (with optional `prefix`), and fans out row-18 `r2.dash.capture.mark` to every sensor. |
+| `r2.dash.cmd.capture.stop`  | `{0: req_id}` | Controller fans out row-19 `r2.dash.capture.stop` to close the active capture file on every sensor. |
+
+**Data-export HTTP routes** (per SPEC-R2-ROCKER-DASHBOARD §5.1):
 
 | Route | Method | Body | Purpose |
 |---|---|---|---|
-| `/api/capture/start` | POST | `{}` | Fan out sync_pulse + `r2.dash.capture.start` |
-| `/api/capture/mark`  | POST | `{name: str, prefix?: str}` | Fan out `r2.dash.capture.mark` with the dashboard's chosen `ts_ms` and (when supplied) the webapp's local-time filename `prefix` |
-| `/api/capture/stop`  | POST | `{}` | Fan out `r2.dash.capture.stop` |
 | `/api/data/{addr}/list` | GET | — | `data_tcp` `LIST` to one sensor; returns the JSON-mapped CBOR response. |
 | `/api/data/{addr}/file/{name}` | GET | — | `data_tcp` `GET`; prepends a `seq,ts_ms,<dev>_x,<dev>_y,<dev>_z\n` header line where `<dev>` is the operator-assigned alias (or IP-with-underscores fallback), then streams the raw fixed-width rows. The Content-Disposition filename becomes `<original-stem>__<dev>.csv`. The on-disk file itself has no header and no device suffix — the dashboard splices both on for the browser download so multi-sensor exports stay distinguishable in a directory listing and when concatenated in pandas. |
 | `/api/data/{addr}/file/{name}` | DELETE | — | `data_tcp` `DEL`. |

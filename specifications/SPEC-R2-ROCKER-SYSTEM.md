@@ -80,12 +80,12 @@ The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHALL**, **SHOULD**,
 │  │ ESP32-S3 +   │ ◄── L2CAP ───────  │   - dashboard process  │  │
 │  │ ADXL355 +    │ ──── WiFi ───────► │   - TG signer (key off-tree)│  │
 │  │ microSD +    │ ──── TCP ────────► │   - WiFi hotspot AP    │   │
-│  │ LiPo         │ ◄── ACK ──────     │   - HTTP :8080         │   │
-│  └──────────────┘                    │   - TCP :21042         │   │
+│  │ LiPo         │ ◄── ACK ──────     │   - R2 port :21042     │   │
+│  └──────────────┘                    │     (HTTP + WS + raw)  │   │
 │                                      │   - state on disk      │   │
 │  ┌──────────────┐                    └──────────┬─────────────┘   │
 │  │ Sensor #2    │ ─── (same flow) ───►         │                   │
-│  └──────────────┘                              │ HTTP+WS           │
+│  └──────────────┘                              │ HTTP+WS (:21042)  │
 │         …                                      ▼                   │
 │  ┌──────────────┐                    ┌──────────────┐              │
 │  │ Sensor #N    │                    │ Browser UI   │              │
@@ -188,14 +188,16 @@ On a fresh deployment site:
 
 1. Operator boots the dashboard host. The dashboard process auto-starts
    via systemd (or is launched manually).
-2. The dashboard binds :8080, :21042, brings up the WiFi hotspot, and
-   becomes operational. State directory is empty (no peers yet).
+2. The dashboard binds the unified R2 port :21042 (HTTP + WS + raw
+   R2-WIRE multiplexed via peek-based protocol detection per WIRE
+   §13.5), brings up the WiFi hotspot, and becomes operational. State
+   directory is empty (no peers yet).
 3. Operator powers on each sensor. Each sensor:
    * Self-tests (`SPEC-R2-ROCKER-SENSOR` §2).
    * Generates a device key on first boot, persists it.
    * Begins BLE advertising R2-BEACON.
 4. Operator opens the browser UI at the dashboard's hotspot IP
-   (typically `http://10.42.0.1:8080`).
+   (typically `http://10.42.0.1:21042`).
 5. Operator clicks **Discover**; the dashboard runs the bootstrap
    engine (`SPEC-R2-ROCKER-DASHBOARD` §6).
 6. Each sensor receives `#wifi_offer`, joins the hotspot, opens TCP to
