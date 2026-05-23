@@ -81,7 +81,7 @@ RFC 2119 terms apply.
 ## 3. Subscriptions
 
 The viewer sentant subscribes to the sensor-event family the
-dashboard publishes on `/ws/raw`. Event hashes are FNV-1a-32 of
+dashboard publishes on `/r2`. Event hashes are FNV-1a-32 of
 the dotted names per SPEC-R2-ROCKER-WIRE §2.
 
 | Event | Direction (to hive) | Purpose for the sentant |
@@ -202,7 +202,7 @@ design call" note.
 A rocker webapp build conforms when:
 
 1. `bootstrapHive()` constructs an `R2RockerHive` after WASM init.
-2. Every R2-WIRE event arriving via `/ws/raw` (and, for off-network
+2. Every R2-WIRE event arriving via `/r2` (and, for off-network
    loads, via the relay leg) is forwarded into the hive via
    `send_event(event_hash, payload)`.
 3. The sentant's class hash matches §2; its subscriptions list

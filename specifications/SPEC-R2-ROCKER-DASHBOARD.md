@@ -245,7 +245,7 @@ loop peek-dispatches each connection:
 
 * First byte in `[A-Z]` (0x41-0x5A) → HTTP request line. The
   connection is driven by hyper with the axum router as its service;
-  WebSocket upgrade requests (`/ws/raw`, `/ws/logs/{addr}`) are
+  WebSocket upgrade requests (`/r2`, `/ws/logs/{addr}`) are
   handled inline via `serve_connection.with_upgrades()`. The bulk of
   this section's §4.x subsections describe that path (HTTP routes,
   WebSocket message shape, etc.).
@@ -362,14 +362,14 @@ whichever occurs first (per WIRE §4.1).
 | `/api/access/revoke/{device_pk}` | POST | KeyHolder-only. Adds to revocation G-Set, broadcasts `r2.dash.access.revoked` on `/ws/status`, tears down the offending connection. **Succeeds regardless of whether the target is online.** See SPEC-R2-ROCKER-ACCESS §4.4 + §7.6. |
 | `/api/enrol-init` | POST | **DEPRECATED** — replaced by `/api/access/invite`. v0.1 stub returns 501. |
 | `/api/enrol-complete` | POST | **DEPRECATED** — replaced by `/api/access/claim`. v0.1 stub returns 501. |
-| `/ws/raw` | WebSocket | **Binary** R2-WIRE frames forwarded verbatim from sensors (canonical Phase-5d transport). v0.1 anonymous per the additive auth model in SPEC-R2-ROCKER-ACCESS §5.1; v1 target is a cert-handshake variant. |
+| `/r2` | WebSocket | **Binary** R2-WIRE frames forwarded verbatim from sensors (canonical Phase-5d transport). v0.1 anonymous per the additive auth model in SPEC-R2-ROCKER-ACCESS §5.1; v1 target is a cert-handshake variant. |
 | `/ws/status` | WebSocket | **Text JSON** status events: bootstrap progress, hotspot up/down, server-side errors, and the `r2.dash.access.{member_added, revoked}` events from SPEC-R2-ROCKER-ACCESS §4.2 + §7.2. |
 
 Auth: v0.1 has no auth — the dashboard is bound to localhost-or-LAN
 on a private hotspot. Future versions SHOULD add a session cookie or
 token if exposed beyond the lab network.
 
-### 5.2 `/ws/raw` — binary frame transport
+### 5.2 `/r2` — binary frame transport
 
 The canonical Phase-5d browser data path. Each WS message is a single
 binary envelope wrapping one verbatim R2-WIRE frame from one sensor:
@@ -391,7 +391,7 @@ Frames are forwarded **without decode, signature verification, or
 filtering** at the server, with one exception: acceleration
 (`r2.sensor.acceleration`) is **decimated by `ACCEL_DECIMATION`**
 (currently 10) before broadcast — only every 10th sample per peer
-reaches `/ws/raw`. The same gate applies to `/ws/status`'s JSON path
+reaches `/r2`. The same gate applies to `/ws/status`'s JSON path
 so viewers see consistent per-peer rates regardless of transport.
 The browser's vendored `r2-wasm` performs decode + signature
 verification on the frames it does receive. Full fidelity remains on
@@ -400,7 +400,7 @@ server-side after Pi5 deployment saturated WebSocket + browser
 processing at the full 100 Hz × N-sensors firmware rate.
 
 Browser → server: viewer hives emit `r2.dash.cmd.*` events on
-`/ws/raw` per SPEC-R2-ROCKER-WIRE §2.1 (operator-plane request /
+`/r2` per SPEC-R2-ROCKER-WIRE §2.1 (operator-plane request /
 response framework). Frames are bare R2-WIRE compact bodies (12-byte
 header + CBOR payload — no length prefix; WebSocket provides the
 message boundary). Unknown event hashes are logged and dropped per
@@ -423,7 +423,7 @@ use (subscribe / viewport_hint per §5.4); v0.1 ignores them.
 
 ### 5.4 Browser → server messages
 
-The browser does not currently send messages on `/ws/raw` or `/ws/status`.
+The browser does not currently send messages on `/r2` or `/ws/status`.
 Future versions will use `/ws/status` for:
 
 | Type | Payload | Description |
@@ -437,7 +437,7 @@ The pre-Phase-5d dashboard exposed two transitional channels — `GET /`
 (server-decoded SPA bundle, embedded HTML) and `GET /ws` (bidirectional
 JSON WebSocket where the server decoded R2-WIRE frames). Both were
 removed once the WASM viewer reached parity. New consumers MUST use
-`/ws/raw` + `/ws/status` (defined above) and connect to the WASM viewer
+`/r2` + `/ws/status` (defined above) and connect to the WASM viewer
 served at `/`.
 
 ---

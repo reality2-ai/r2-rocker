@@ -80,7 +80,7 @@ const SENSOR_CAPTURE_STATE:   u32 = r2_fnv::fnv1a_32(b"r2.sensor.capture.state")
 
 // Track C operator-plane events (viewer → controller). Per
 // SPEC-R2-ROCKER-WIRE §2.1, viewer hives send these inbound on
-// /ws/raw; the dashboard validates and fans the corresponding
+// /r2; the dashboard validates and fans the corresponding
 // downstream `r2.dash.<action>` to all sensors, then emits a
 // `r2.dash.cmd.response` correlated by `req_id`.
 const DASH_CMD_CAPTURE_START: u32 = r2_fnv::fnv1a_32(b"r2.dash.cmd.capture.start");
@@ -289,7 +289,7 @@ struct SensorPeer {
     /// re-parse the cached CBOR frame.
     device_pk: Option<String>,
     /// Most-recent `r2.sensor.announce` raw R2-WIRE frame bytes,
-    /// cached so a freshly-connected /ws/raw viewer can be replayed
+    /// cached so a freshly-connected /r2 viewer can be replayed
     /// the announce — otherwise it never sees `fw_ver`, `device_pk`,
     /// or `boot_ts_ms` because the announce only fires on TCP
     /// (re)connect, which already happened before the viewer arrived.
@@ -298,7 +298,7 @@ struct SensorPeer {
     /// same reason: capture.state only fires on transitions
     /// (start/mark/stop), so a viewer that hard-refreshes mid-recording
     /// would see the Run-Control buttons reset to the IDLE defaults.
-    /// Replaying the cached state on /ws/raw open re-syncs the UI
+    /// Replaying the cached state on /r2 open re-syncs the UI
     /// without needing a round-trip to the sensor.
     last_capture_state: Option<Vec<u8>>,
     /// Per-peer time-sync state per SPEC-R2-ROCKER-TIMESYNC §3.
@@ -367,7 +367,7 @@ fn build_dash_frame(event_hash: u32, msg_id: u16, payload: &[u8]) -> Vec<u8> {
 
 /// Build a bare R2-WIRE compact body (no leading TCP length prefix).
 /// Suitable for storing in `RawFrame.frame` — the envelope's own
-/// `frame_len` field provides framing for /ws/raw consumers, and the
+/// `frame_len` field provides framing for /r2 consumers, and the
 /// webapp's `decode_compact_frame` reads from byte 0 of this body
 /// (version/type/flags). Putting a TCP-style length prefix here
 /// corrupts the decode: the first two bytes would be parsed as the
@@ -643,7 +643,7 @@ fn append_timesync_log(addr: SocketAddr, delta_ms: i64, reason: &str, cumulative
 
 /// One R2-WIRE frame as it arrived on the TCP listener, plus metadata
 /// needed by the WASM viewer to know which peer it came from. This is
-/// the message shape pushed on the `/ws/raw` WebSocket — the WASM hive
+/// the message shape pushed on the `/r2` WebSocket — the WASM hive
 /// in the browser parses the envelope, then hands the inner frame to
 /// `decode_compact_frame()`.
 #[derive(Clone)]
@@ -809,16 +809,21 @@ async fn main() {
     // HTTP server with WASM viewer + WebSocket + bootstrap API.
     // The legacy `/` HTML dashboard and `/ws` bidirectional channel were
     // removed once the WASM viewer at the repo's webapp/ became feature-
-    // complete. The WASM viewer consumes /ws/raw + /ws/status instead.
+    // complete. The WASM viewer consumes /r2 + /ws/status instead.
     let mut app = Router::new()
-        // Phase 5d: raw R2-WIRE frame forwarder for WASM viewers.
-        .route("/ws/raw", get({
+        // R2-WIRE frame channel for browser-side hives. Path
+        // `/r2` is the spec-conformant convention per R2-INTERNET
+        // §5 ("wss://relay.reality2.ai/r2", "wss://localhost:4005/r2").
+        // The relay we talk to upstream uses the same path —
+        // a viewer connecting through the relay vs directly to the
+        // dashboard sees the same WS URL shape.
+        .route("/r2", get({
             let ws_state = state.clone();
             move |ws, connect_info| ws_raw_handler(ws, ws_state, connect_info)
         }))
         // Phase 5d: text-JSON status channel — bootstrap progress, hotspot
         // lifecycle, server warnings. WASM viewers open this alongside
-        // /ws/raw (per SPEC-R2-ROCKER-DASHBOARD §5.3).
+        // /r2 (per SPEC-R2-ROCKER-DASHBOARD §5.3).
         .route("/ws/status", get({
             let ws_state = state.clone();
             move |ws| ws_status_handler(ws, ws_state)
@@ -1594,7 +1599,7 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
 
                         // SPEC-R2-ROCKER-DASHBOARD §5.2 — server-side
                         // acceleration decimation. Originally only applied
-                        // to the legacy /ws/status JSON path; left /ws/raw
+                        // to the legacy /ws/status JSON path; left /r2
                         // running at the full firmware rate (100 Hz × N
                         // sensors) on the assumption the WASM hive could
                         // self-throttle. Pi5 deployment proved otherwise —
@@ -1612,7 +1617,7 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
                             true
                         };
 
-                        // /ws/raw viewers — Phase 5d. Push every
+                        // /r2 viewers — Phase 5d. Push every
                         // non-acceleration event verbatim, and one in
                         // ACCEL_DECIMATION acceleration frames.
                         if emit_live {
@@ -1770,7 +1775,7 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
                             }
 
                             // Cache the announce frame bytes per peer so a
-                            // /ws/raw viewer that connects later can be
+                            // /r2 viewer that connects later can be
                             // replayed — otherwise it misses `fw_ver` /
                             // `device_pk` / `boot_ts_ms` until the next
                             // sensor reboot.
@@ -1813,10 +1818,10 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
 
                             // Acceleration decimation already decided at the
                             // top of the frame-loop (see `emit_live`) — same
-                            // gate covers /ws/raw + /ws/status so a viewer
+                            // gate covers /r2 + /ws/status so a viewer
                             // sees consistent per-peer rates regardless of
                             // transport. Per-frame logging removed long ago;
-                            // frames are observable via /ws/raw (binary) or
+                            // frames are observable via /r2 (binary) or
                             // /ws/status (legacy JSON).
                             if emit_live {
                                 let _ = read_state.event_tx.send(event);
@@ -1906,8 +1911,8 @@ async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Ar
     // a wire break.
     //
     // The frame goes out via raw_frame_tx (same channel as the
-    // sensor-originated frames on /ws/raw); the webapp's rocker hive
-    // already forwards every /ws/raw event into the
+    // sensor-originated frames on /r2); the webapp's rocker hive
+    // already forwards every /r2 event into the
     // DashboardViewerSentant, so this slot lands in the sentant
     // automatically. The legacy JSON message on /ws/status stays for
     // one release so the existing JS handler (which clears the
@@ -1965,7 +1970,7 @@ fn emit_target_progress(
     if let Some(m) = message { json["message"] = serde_json::json!(m); }
     let _ = state.ws_broadcast_tx.send(json.to_string());
 
-    // R2-WIRE event on /ws/raw — picked up by the rocker viewer hive.
+    // R2-WIRE event on /r2 — picked up by the rocker viewer hive.
     let mut buf = vec![0u8; 64 + target.len() + phase.len() + message.map(|m| m.len()).unwrap_or(0)];
     let mut enc = r2_cbor::Encoder::new(&mut buf);
     let n_keys = 2 + size.is_some() as usize + message.is_some() as usize;
@@ -2196,12 +2201,12 @@ fn emit_cmd_response_with_extras(
     });
 }
 
-/// Decode an inbound operator-command frame received on /ws/raw.
+/// Decode an inbound operator-command frame received on /r2.
 /// Returns `(event_hash, req_id, payload_json)` on success.
 ///
 /// The frame body is the bare R2-WIRE compact shape (12-byte header +
 /// CBOR payload) — viewers SHOULD send the same shape that
-/// `build_dash_frame_body` produces; the /ws/raw envelope does not
+/// `build_dash_frame_body` produces; the /r2 envelope does not
 /// apply to viewer-emitted frames because the WebSocket layer already
 /// provides message boundaries.
 fn decode_cmd_frame(body: &[u8]) -> Option<(u32, u32, serde_json::Value)> {
@@ -2638,7 +2643,7 @@ mod hex {
 
 // ── Phase 5d — endpoints for the WASM viewer ──────────────────────────────
 
-/// `/ws/raw` — push raw R2-WIRE frame bytes to a connected WASM viewer.
+/// `/r2` — push raw R2-WIRE frame bytes to a connected WASM viewer.
 ///
 /// Each WS binary message is one frame, wrapped in a small TLV envelope:
 ///
@@ -2655,7 +2660,7 @@ mod hex {
 /// ~49 days, matches the firmware's ts_ms field width). Frame is the
 /// raw R2-WIRE compact frame: header + payload, no transport prefix.
 /// Dispatch a viewer-emitted operator-command frame received on
-/// /ws/raw. Per SPEC-R2-ROCKER-WIRE §2.1, malformed frames and
+/// /r2. Per SPEC-R2-ROCKER-WIRE §2.1, malformed frames and
 /// unknown event hashes are dropped silently; everything else hits
 /// the shared do_* core and yields a `r2.dash.cmd.response` reply
 /// correlated by `req_id`.
@@ -2663,11 +2668,11 @@ async fn dispatch_cmd_frame(state: &Arc<AppState>, peer_addr: SocketAddr, body: 
     let (event_hash, req_id, payload) = match decode_cmd_frame(body) {
         Some(t) => t,
         None => {
-            eprintln!("[ws/raw inbound] malformed frame (len={}) — ignoring", body.len());
+            eprintln!("[r2 inbound] malformed frame (len={}) — ignoring", body.len());
             return;
         }
     };
-    eprintln!("[ws/raw inbound] event_hash=0x{:08x} req_id={} from {}",
+    eprintln!("[r2 inbound] event_hash=0x{:08x} req_id={} from {}",
               event_hash, req_id, peer_addr);
     match event_hash {
         DASH_CMD_CAPTURE_START => {
@@ -2726,11 +2731,11 @@ async fn dispatch_cmd_frame(state: &Arc<AppState>, peer_addr: SocketAddr, body: 
             }
         }
         DASH_CMD_BOOTSTRAP => {
-            eprintln!("[ws/raw cmd] bootstrap: calling do_bootstrap req_id={}", req_id);
+            eprintln!("[r2 cmd] bootstrap: calling do_bootstrap req_id={}", req_id);
             do_bootstrap(state).await;
-            eprintln!("[ws/raw cmd] bootstrap: do_bootstrap returned, emitting response req_id={}", req_id);
+            eprintln!("[r2 cmd] bootstrap: do_bootstrap returned, emitting response req_id={}", req_id);
             emit_cmd_response(state, req_id, "ok", Some("started"), "bootstrap");
-            eprintln!("[ws/raw cmd] bootstrap: response emitted req_id={}", req_id);
+            eprintln!("[r2 cmd] bootstrap: response emitted req_id={}", req_id);
         }
         DASH_CMD_DEVICE_ALIAS_SET => {
             let device_pk = payload.get("1").and_then(|v| v.as_str()).unwrap_or("");
@@ -2929,7 +2934,7 @@ async fn dispatch_cmd_frame(state: &Arc<AppState>, peer_addr: SocketAddr, body: 
         _ => {
             // Unknown hash — log and drop per WIRE §2 "non-actionable".
             // No response emitted, per §2.1's failure-modes table.
-            eprintln!("[ws/raw inbound] unknown event hash 0x{:08x} — ignoring", event_hash);
+            eprintln!("[r2 inbound] unknown event hash 0x{:08x} — ignoring", event_hash);
         }
     }
 }
@@ -3014,13 +3019,13 @@ async fn handle_ws_raw(mut socket: WebSocket, state: Arc<AppState>, peer_addr: S
                         if rf.frame.len() >= 8 {
                             let h = u32::from_be_bytes([rf.frame[4], rf.frame[5], rf.frame[6], rf.frame[7]]);
                             if h != ACCELERATION {
-                                eprintln!("[ws/raw outbound] event_hash=0x{:08x} src={} to {}",
+                                eprintln!("[r2 outbound] event_hash=0x{:08x} src={} to {}",
                                           h, rf.src, peer_addr);
                             }
                         }
                         let envelope = encode_raw_frame_envelope(&rf);
                         if socket.send(Message::Binary(envelope.into())).await.is_err() {
-                            eprintln!("[ws/raw outbound] socket.send FAILED for {} — viewer gone", peer_addr);
+                            eprintln!("[r2 outbound] socket.send FAILED for {} — viewer gone", peer_addr);
                             break;
                         }
                     }
@@ -3028,7 +3033,7 @@ async fn handle_ws_raw(mut socket: WebSocket, state: Arc<AppState>, peer_addr: S
                     // is preferred over backfill on the live wire (the
                     // SD ring is the durability layer).
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        eprintln!("[ws/raw outbound] viewer {} LAGGED by {} frames", peer_addr, n);
+                        eprintln!("[r2 outbound] viewer {} LAGGED by {} frames", peer_addr, n);
                         continue;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
@@ -3043,7 +3048,7 @@ async fn handle_ws_raw(mut socket: WebSocket, state: Arc<AppState>, peer_addr: S
 ///
 /// Carries non-frame events: bootstrap progress (BLE scan / `#wifi_offer`
 /// send / sensor online / completion), hotspot lifecycle, server warnings.
-/// Frame data is on `/ws/raw` (binary). Per SPEC-R2-ROCKER-DASHBOARD §5.3.
+/// Frame data is on `/r2` (binary). Per SPEC-R2-ROCKER-DASHBOARD §5.3.
 async fn ws_status_handler(
     ws: WebSocketUpgrade,
     state: Arc<AppState>,
@@ -3526,10 +3531,10 @@ async fn fan_out_dash_frame(
     sent
 }
 
-// ── Capture core logic (shared by HTTP + /ws/raw operator events) ────
+// ── Capture core logic (shared by HTTP + /r2 operator events) ────
 //
 // Per SPEC-R2-ROCKER-WIRE §2.1, the legacy POST /api/capture/* routes
-// and the new `r2.dash.cmd.capture.*` events on /ws/raw produce
+// and the new `r2.dash.cmd.capture.*` events on /r2 produce
 // identical side-effects. Extracting the core into `do_capture_*`
 // keeps both call sites in lockstep and makes the migration a pure
 // wire-shape swap.

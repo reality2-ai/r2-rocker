@@ -123,7 +123,7 @@ multi-sensor receive path on dashboard port 21042.
 | 29 | `r2.dash.cmd.capture.start` | viewer → controller | Operator action: begin capture. Payload `{0: req_id (u32), 1: prefix (text, optional)}`. Controller validates, then fans out row-17 `r2.dash.capture.start` to all sensors. Replaces `POST /api/capture/start`. |
 | 30 | `r2.dash.cmd.capture.mark`  | viewer → controller | Operator action: name a calibration point. Payload `{0: req_id (u32), 1: name (text)}`. Controller fans out row-18 `r2.dash.capture.mark` to all sensors. Replaces `POST /api/capture/mark`. |
 | 31 | `r2.dash.cmd.capture.stop`  | viewer → controller | Operator action: close the capture file. Payload `{0: req_id (u32)}`. Controller fans out row-19 `r2.dash.capture.stop` to all sensors. Replaces `POST /api/capture/stop`. |
-| 32 | `r2.dash.cmd.response` | controller → viewer | Generic operator-action / query response. Payload `{0: req_id (u32), 1: status (text — "ok"\|"err"), 2: message (text, optional), 3: kind (text, e.g. "capture.start")}`. Carried on `/ws/raw`; broadcast to all viewers; correlated by `req_id`. |
+| 32 | `r2.dash.cmd.response` | controller → viewer | Generic operator-action / query response. Payload `{0: req_id (u32), 1: status (text — "ok"\|"err"), 2: message (text, optional), 3: kind (text, e.g. "capture.start")}`. Carried on `/r2`; broadcast to all viewers; correlated by `req_id`. |
 | 33 | `r2.dash.cmd.reset` | viewer → controller | Operator action: soft-reset a sensor. Payload `{0: req_id (u32), 1: addr (text — `ip:port` or bare `ip`)}`. Controller opens a TCP connection to the sensor's reset port (21044) and drives the `r2-esp::reset_tcp` protocol, then emits `r2.dash.cmd.response` with the actual outcome (success or error message). Round-trip up to 8 s. Replaces `POST /api/sensor/{addr}/reset`. |
 | 34 | `r2.dash.cmd.identify` | viewer → controller | Operator action: toggle the sensor's identify LED. Payload `{0: req_id (u32), 1: addr (text), 2: on (bool)}`. Controller queues a `r2.dash.identify_set` frame on the sensor's streaming TCP channel (fire-and-forget); response is "ok" iff the queue accepted. Replaces `POST /api/sensor/{addr}/identify`. |
 | 35 | `r2.dash.cmd.bootstrap` | viewer → controller | Operator action: start (or restart) BLE bootstrap discovery. Payload `{0: req_id (u32)}`. Controller aborts any running bootstrap task, cycles the AP, and spawns a fresh discovery cycle; progress streams via the already-migrated `r2.dash.bootstrap.progress` (row 27). cmd.response confirms the task was scheduled (does NOT await discovery completion). Replaces `POST /api/bootstrap`. |
@@ -150,7 +150,7 @@ fanning commands **down** to sensors. The split mirrors BRIDGE
 §3.2's viewer-inbound table so a future Track E (two-TG +
 bridge sentant) reuses these names verbatim — no wire break.
 
-**Transport.** Inbound viewer frames ride the **same `/ws/raw`
+**Transport.** Inbound viewer frames ride the **same `/r2`
 WebSocket** that already carries outbound sensor frames. Frames
 are R2-WIRE envelopes (see §3 frame layout); no second endpoint
 is introduced. Viewers MAY send commands at any time after the
@@ -162,7 +162,7 @@ as a u32. Viewers SHOULD use a monotonic counter (wrap at u32
 is fine; collisions only matter within in-flight requests). The
 controller's response (`r2.dash.cmd.response`, row 32) echoes
 the `req_id` so the originating viewer can match it. Other
-viewers also receive the response (`/ws/raw` is broadcast) and
+viewers also receive the response (`/r2` is broadcast) and
 SHOULD ignore responses for `req_id`s they didn't issue.
 
 **Response shape.** A single event hash

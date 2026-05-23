@@ -4,7 +4,7 @@
 //! opens a persistent WebSocket to the R2 relay and:
 //!
 //!   * authenticates as the KeyHolder (HELLO signed with `tg_priv`),
-//!   * publishes every R2-WIRE frame the sensors send to /ws/raw
+//!   * publishes every R2-WIRE frame the sensors send to /r2
 //!     out via the relay so viewer browsers connected to the same
 //!     trust-group bucket see them in real time,
 //!   * (future) listens for inbound viewer→controller frames and
@@ -152,7 +152,7 @@ async fn run_one_session(
     eprintln!("[relay] sent catchup since={catchup_since}");
 
     // Outbound: subscribe to the dashboard's raw-frame broadcast.
-    // Every R2-WIRE frame the dashboard forwards to /ws/raw also
+    // Every R2-WIRE frame the dashboard forwards to /r2 also
     // gets pushed up to the relay. Viewers in the same TG bucket
     // see it in real time.
     let mut raw_rx    = raw_frame_tx.subscribe();
@@ -203,7 +203,7 @@ async fn run_one_session(
                             continue;
                         }
                         last_forward_at.insert(rf.src.clone(), now);
-                        // Wrap the same envelope shape /ws/raw uses
+                        // Wrap the same envelope shape /r2 uses
                         // so viewers can decode it with the existing
                         // path. See encode_raw_frame_envelope in
                         // main.rs.

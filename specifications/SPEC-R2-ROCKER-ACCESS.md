@@ -467,7 +467,7 @@ audit trail is reachable.
 `last_seen` is the wall-clock timestamp of the most recent
 authenticated frame from that member. For sensors this is the
 last R2-WIRE frame on port 21042; for viewers it's the last
-`/ws/raw` or `/ws/status` keep-alive. If a member has never
+`/r2` or `/ws/status` keep-alive. If a member has never
 been seen since the dashboard process started, `last_seen` is
 `null`.
 
@@ -476,7 +476,7 @@ been seen since the dashboard process started, `last_seen` is
 KeyHolder-only. Adds `device_pk` to the revocation G-Set per
 `crates/r2-trust/src/revocation.rs`, persists, broadcasts
 `r2.dash.access.revoked {device_pk, revoked_at}` on `/ws/status`,
-and tears down any open `/ws/raw` or `/ws/status` connection
+and tears down any open `/r2` or `/ws/status` connection
 from that `device_pk` immediately (§7).
 
 The route **MUST** succeed regardless of whether the target
@@ -514,8 +514,8 @@ to submit a request.
 
 The viewer loaded the webapp from `http://<controller_lan_ip>:8080/`,
 so its WASM hive can open a WebSocket directly to the controller's
-`/ws/raw`. In v0.1, per the operator-chosen **additive auth
-model**, `/ws/raw` does not require a cert handshake — the
+`/r2`. In v0.1, per the operator-chosen **additive auth
+model**, `/r2` does not require a cert handshake — the
 WebSocket opens anonymous and the viewer streams whatever the
 controller sends. The viewer's cert is held client-side, ready
 for the v1 cert-handshake variant.
@@ -530,10 +530,10 @@ Implementations of v0.1 conforming to this spec **MUST**:
   the IndexedDB cert, and rendering the "not-enrolled" landing
   page (§7).
 
-The cert-handshake variant of `/ws/raw` is the v1 target and is
+The cert-handshake variant of `/r2` is the v1 target and is
 documented here as future work:
 
-> v1: `/ws/raw` upgrade carries a `Sec-WebSocket-Protocol` value
+> v1: `/r2` upgrade carries a `Sec-WebSocket-Protocol` value
 > `r2-access-v1` and an opening client message of
 > `{auth: {device_pk, sig_over_nonce}}`. The dashboard verifies
 > the signature against the device's cert chain, accepts or
@@ -573,7 +573,7 @@ This spec only constrains the bits r2-rocker contributes:
   controller's session, so the relay does not need to verify
   it independently — the controller does, on receipt.
 * Inbound envelopes from the relay are dispatched on the
-  controller side through the same pipeline as `/ws/raw`
+  controller side through the same pipeline as `/r2`
   inbound — i.e. the bridge policy in SPEC-R2-ROCKER-BRIDGE
   §3-§4 governs which events flow which direction. The relay
   is just a long-haul transport; it is NOT an authorisation
@@ -655,7 +655,7 @@ whether the announced `device_pk` matches its own.
 
 If a viewer is the revoked party, it **MUST**:
 
-* Close any open `/ws/raw` and `/ws/status` connections.
+* Close any open `/r2` and `/ws/status` connections.
 * Delete the IndexedDB record per §6.
 * Render the "not-enrolled" landing page (manual paste-a-link
   fallback, no resumed session).
@@ -684,8 +684,8 @@ operation — not an edge case. The dashboard's revocation flow
 For viewers that are offline at the time of revocation: on next
 connect (whether same-WiFi or via relay), the dashboard **MUST**
 check `device_pk` against the revocation set in the v1 cert-
-handshake variant of `/ws/raw` and refuse the connection. In v0.1
-where `/ws/raw` is anonymous, the dashboard MAY accept the WS
+handshake variant of `/r2` and refuse the connection. In v0.1
+where `/r2` is anonymous, the dashboard MAY accept the WS
 but **MUST NOT** route any inbound R2-WIRE frame to or from a
 revoked `device_pk` — bridge policy per SPEC-R2-ROCKER-BRIDGE
 §3-§4 still applies, and a revoked member fails that check
@@ -887,7 +887,7 @@ A dashboard build conforms to this spec when:
 3. The KeyHolder-only routes refuse non-KeyHolder callers. In
    v0.1 where there is no per-route auth check, the dashboard
    MAY rely on the localhost / private-LAN boundary; in v1 with
-   cert-handshake on `/ws/raw`, the routes **MUST** also be
+   cert-handshake on `/r2`, the routes **MUST** also be
    cert-gated.
 4. `/api/access/request` is rate-limited per source IP per §4.1.
 5. `/api/access/check/{device_pk}` returns the approved bundle

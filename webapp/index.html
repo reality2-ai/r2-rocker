@@ -1441,7 +1441,7 @@ function addBootstrapLine(text, cls) {
   el.scrollTop = el.scrollHeight;
 }
 
-// ── WASM hive bootstrap + WebSocket /ws/raw ────────────────────────────────
+// ── WASM hive bootstrap + WebSocket /r2 (R2-INTERNET §5) ──────────────────
 //
 // This viewer is the browser-side R2 hive. It receives raw R2-WIRE frames
 // (with src_addr envelope) over WSS, decodes them in WebAssembly via the
@@ -1472,7 +1472,7 @@ import init, {
 
 /// Browser-side rocker hive (Track D). Constructed lazily once
 /// `init()` resolves in `bootstrapHive`. Every R2-WIRE frame the
-/// dashboard pushes on `/ws/raw` is forwarded into the hive via
+/// dashboard pushes on `/r2` is forwarded into the hive via
 /// `hive.send_event(hash, payload)` alongside the existing JS
 /// dispatch. The hive maintains its own per-sensor state for the
 /// follow-up slice that migrates UI rendering through it.
@@ -1524,7 +1524,7 @@ async function bootstrapHive() {
   console.log('[hive] r2-wasm loaded:', wasmVersion());
 
   // Track D — instantiate the rocker viewer hive. From this point on
-  // every R2-WIRE event arriving via /ws/raw is also forwarded into
+  // every R2-WIRE event arriving via /r2 is also forwarded into
   // `rockerHive.send_event(hash, payload)` (see onRawFrame). The
   // sentant maintains a per-sensor state table; JS can inspect it
   // via `JSON.parse(rockerHive.peek_state())` from devtools. UI
@@ -1534,7 +1534,7 @@ async function bootstrapHive() {
   try {
     rockerHive = new WasmRockerHive();
     window.rockerHive = rockerHive; // devtools convenience
-    console.log('[hive] R2RockerHive constructed; forwarding /ws/raw events into the sentant');
+    console.log('[hive] R2RockerHive constructed; forwarding /r2 events into the sentant');
   } catch (err) {
     console.warn('[hive] R2RockerHive construct failed (continuing without it):', err);
     rockerHive = null;
@@ -1583,8 +1583,8 @@ async function bootstrapHive() {
   //   2. HTTPS origin + persisted relay_url in IndexedDB → off-network
   //      viewer leg (the github.io / reality2.ai/r2-rocker case after
   //      cross-origin cert hand-off). Mixed-content blocking means
-  //      direct /ws/raw can't reach the lab dashboard from here.
-  //   3. Otherwise — same-origin lab dashboard, use /ws/raw + /ws/status
+  //      direct /r2 can't reach the lab dashboard from here.
+  //   3. Otherwise — same-origin lab dashboard, use /r2 (R2-WIRE channel)
   //      directly.
   const relayUrlParam = getRelayUrlParam();
   const persistedRelay = (location.protocol === 'https:')
@@ -1597,7 +1597,7 @@ async function bootstrapHive() {
     console.log('[hive] using relay transport (persisted) →', persistedRelay);
     connectRelay(persistedRelay);
   } else {
-    console.log('[hive] connecting to /ws/raw …');
+    console.log('[hive] connecting to /r2 …');
     connectRaw();
   }
 }
@@ -1605,12 +1605,12 @@ async function bootstrapHive() {
 // /ws/status was removed in v0.2 — every status notification that
 // used to ride its JSON channel (bootstrap progress, peer_disconnected,
 // OTA progress, access events, device_alias renames) now flows as a
-// R2-WIRE event on /ws/raw. Dispatchers live in handleEvent above.
+// R2-WIRE event on /r2. Dispatchers live in handleEvent above.
 // SPEC-R2-ROCKER-DASHBOARD §5.3 has been removed.
 
 function connectRaw() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(`${proto}//${location.host}/ws/raw`);
+  ws = new WebSocket(`${proto}//${location.host}/r2`);
   ws.binaryType = 'arraybuffer';
   ws.onopen = () => {
     document.getElementById('wsDot').className = 'status-dot connected';
@@ -1623,7 +1623,7 @@ function connectRaw() {
   };
   ws.onerror = (e) => console.warn('[hive] ws error', e);
   ws.onmessage = (e) => {
-    if (typeof e.data === 'string') return; // shouldn't happen on /ws/raw
+    if (typeof e.data === 'string') return; // shouldn't happen on /r2
     onRawFrame(new Uint8Array(e.data));
   };
 }
@@ -1838,7 +1838,7 @@ async function relayHandleJoinResponse(frame) {
   }
 }
 
-// Envelope from dashboard's /ws/raw (Phase 5d step 3):
+// Envelope from dashboard's /r2 (Phase 5d step 3):
 //   [u16 BE: src_addr_len][src_addr utf-8]
 //   [u32 BE: ts_ms_low32]
 //   [u16 BE: frame_len][frame bytes]
@@ -2005,7 +2005,7 @@ function cborEncodeMap(entries) {
 }
 
 // Operator-command machinery — SPEC-R2-ROCKER-WIRE §2.1.
-// Viewer hives emit r2.dash.cmd.* events on the /ws/raw socket as
+// Viewer hives emit r2.dash.cmd.* events on the /r2 socket as
 // bare R2-WIRE compact bodies (12-byte header + CBOR payload). The
 // dashboard replies with r2.dash.cmd.response correlated by req_id.
 //
@@ -2048,7 +2048,7 @@ function buildCmdFrameBody(eventHash, payload) {
   return out;
 }
 
-/// Send a r2.dash.cmd.<kind> over the live /ws/raw socket. Resolves
+/// Send a r2.dash.cmd.<kind> over the live /r2 socket. Resolves
 /// when the matching r2.dash.cmd.response arrives, or rejects on
 /// timeout / err status. `extraEntries` are appended after the
 /// req_id key. Falls back to rejection if the WS isn't ready.
@@ -2174,7 +2174,7 @@ function handleEvent(msg) {
   totalEvents++;
 
   // Operator-plane response — correlated to an in-flight sendCmd()
-  // promise. Per SPEC-R2-ROCKER-WIRE §2.1, /ws/raw is broadcast so
+  // promise. Per SPEC-R2-ROCKER-WIRE §2.1, /r2 is broadcast so
   // every viewer receives every reply; sendCmd's req_id map ignores
   // replies for req_ids it didn't issue. Handled before any per-
   // sensor lookup since the response's src is "dash", not a sensor.
@@ -2186,7 +2186,7 @@ function handleEvent(msg) {
   // Controller-synthesised events — formerly carried on /ws/status
   // as type=bootstrap / peer_disconnected / ota / reset / capture /
   // access / device_alias JSON. Now ride r2.dash.*.progress events
-  // on /ws/raw per SPEC-R2-ROCKER-WIRE §2 rows 22-28. Each dispatcher
+  // on /r2 per SPEC-R2-ROCKER-WIRE §2 rows 22-28. Each dispatcher
   // synthesises the legacy-shaped msg object and calls the existing
   // handler so UI behaviour is unchanged.
   if (msg.event === 'r2.dash.bootstrap.progress') {
@@ -2278,7 +2278,7 @@ function handleEvent(msg) {
         }
         // Capture announce metadata for the Devices view (Phase 8a).
         // Was previously only captured from the legacy `sensor.connected`
-        // synthetic event which the new /ws/raw path doesn't emit.
+        // synthetic event which the new /r2 path doesn't emit.
         if (msg.payload.fw_ver)    sensor.fwVer    = msg.payload.fw_ver;
         if (msg.payload.device_pk) sensor.devicePk = msg.payload.device_pk;
         if (msg.payload.boot_ts_ms != null) sensor.bootTsMs = msg.payload.boot_ts_ms;
@@ -2783,7 +2783,7 @@ async function requestDeleteAllFleet() {
 //
 // Internal URL paths are still `/api/access/*` (the spec is the source
 // of truth there); only the user-visible tab + button strings are
-// "Link". A future cert-handshake variant of /ws/raw will gate this
+// "Link". A future cert-handshake variant of /r2 will gate this
 // surface on cert role; for v0.1 the dashboard enforces KeyHolder via
 // a localhost-only ConnectInfo check (see SPEC-R2-ROCKER-ACCESS §11.1).
 
@@ -3623,7 +3623,7 @@ async function requestAccess() {
       connectRelay(relayUrl);
     } else {
       // In-room path. Ephemeral keypair → r2.dash.cmd.access.request
-      // over /ws/raw (formerly POST /api/access/request before the cmd
+      // over /r2 (formerly POST /api/access/request before the cmd
       // framework). Same shape that was here before the relay leg
       // was added; only the transport changed.
       const kp = wasmGenerateDeviceKeypair();
