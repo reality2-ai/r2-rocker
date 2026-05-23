@@ -3453,8 +3453,15 @@ async fn data_list_handler(Path(addr): Path<String>) -> impl IntoResponse {
 }
 
 /// `GET /api/data/{addr}/file/{name}` — proxy a GET opcode and stream
-/// the file bytes back to the client.
-async fn data_get_handler(Path((addr, name)): Path<(String, String)>) -> impl IntoResponse {
+/// the file bytes back to the client. Splices in a CSV header AND
+/// stamps the device's display-name into both the filename and the
+/// x/y/z column titles so multi-sensor captures stay distinguishable
+/// after they leave the dashboard (e.g. when the operator opens half
+/// a dozen of them in pandas and tries to remember which was which).
+async fn data_get_handler(
+    State(state): State<Arc<AppState>>,
+    Path((addr, name)): Path<(String, String)>,
+) -> impl IntoResponse {
     let mut s = match dial_data_tcp(&addr).await {
         Ok(s) => s,
         Err(e) => return (axum::http::StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
@@ -3487,21 +3494,53 @@ async fn data_get_handler(Path((addr, name)): Path<(String, String)>) -> impl In
     if s.read_exact(&mut body).await.is_err() {
         return (axum::http::StatusCode::BAD_GATEWAY, "read body".to_string()).into_response();
     }
-    // Prepend a CSV header — the on-SD file is raw fixed-width rows
-    // (SPEC-R2-ROCKER-SENSOR §6.2) so the firmware doesn't have to do
-    // any extra work per capture, but a spreadsheet reader expects
-    // column titles. We splice the header here so the user-facing
-    // download is self-describing without changing the on-disk shape.
-    const HEADER: &[u8] = b"seq,ts_ms,x,y,z\n";
-    let mut out = Vec::with_capacity(HEADER.len() + body.len());
-    out.extend_from_slice(HEADER);
+
+    // Resolve the device's display-name the same way data_merged_handler
+    // does: operator-assigned alias keyed by device_pk first; fall back
+    // to the IP with dots-to-underscores so column names + filenames
+    // stay shell-safe.
+    let ip_only: &str = addr.split(':').next().unwrap_or(&addr);
+    let device_pk_opt = {
+        let peers = state.peers.read().await;
+        peers.iter()
+            .find(|(sa, _)| sa.ip().to_string() == ip_only)
+            .and_then(|(_, p)| p.device_pk.clone())
+    };
+    let alias_opt = if let Some(pk) = device_pk_opt.as_ref() {
+        let g = state.device_aliases.lock().await;
+        g.get(pk).cloned()
+    } else {
+        None
+    };
+    let raw_name = alias_opt.unwrap_or_else(|| ip_only.replace('.', "_"));
+    // Filesystem- and CSV-header-safe: keep alphanumeric / - / _,
+    // collapse everything else (spaces from aliases, punctuation, etc)
+    // to '_'. Same charset on both sides so columns and filename agree.
+    let device_safe: String = raw_name.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+
+    // CSV header — splice device name into the x/y/z column titles
+    // so concatenating multiple files in pandas keeps the per-sensor
+    // disambiguation that the merged-CSV already provides.
+    let header_line = format!("seq,ts_ms,{0}_x,{0}_y,{0}_z\n", device_safe);
+    let mut out = Vec::with_capacity(header_line.len() + body.len());
+    out.extend_from_slice(header_line.as_bytes());
     out.extend_from_slice(&body);
+
+    // Download filename: append __<device> before the .csv extension.
+    // Double-underscore as delimiter so the original name's prefix-name
+    // hyphens / underscores don't get confused with the new suffix.
+    let download_name = {
+        let stem = name.strip_suffix(".csv").unwrap_or(&name);
+        format!("{}__{}.csv", stem, device_safe)
+    };
 
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(axum::http::header::CONTENT_TYPE, "text/csv".parse().unwrap());
     headers.insert(
         axum::http::header::CONTENT_DISPOSITION,
-        format!("attachment; filename=\"{}\"", name).parse().unwrap(),
+        format!("attachment; filename=\"{}\"", download_name).parse().unwrap(),
     );
     (axum::http::StatusCode::OK, headers, out).into_response()
 }

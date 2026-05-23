@@ -349,7 +349,7 @@ whichever occurs first (per WIRE §4.1).
 | `/api/firmware/available` | GET | Latest release per carrier (GitHub Releases primary, local `releases/` fallback). 5-min cache. |
 | `/api/firmware/{carrier}/binary` | GET | Stream the cached firmware blob for OTA selection. |
 | `/api/data/{addr}/list` | GET | Open a TCP connection to `<addr>:21047` and issue `LIST`. Returns a JSON-mapped CBOR response of `[{name, size, mtime}]`. |
-| `/api/data/{addr}/file/{name}` | GET, DELETE | `GET` opens TCP 21047, prepends a `seq,ts_ms,x,y,z\n` header, and streams the raw fixed-width rows. `DELETE` issues `DEL`. |
+| `/api/data/{addr}/file/{name}` | GET, DELETE | `GET` opens TCP 21047 and streams the raw fixed-width rows with a synthesised CSV header `seq,ts_ms,<dev>_x,<dev>_y,<dev>_z\n` where `<dev>` is the operator-assigned alias (or IP-with-underscores fallback) — same name resolution as `/api/data/merged`. Content-Disposition filename becomes `<original-stem>__<dev>.csv` so multi-sensor downloads don't collide when collected later. `DELETE` issues `DEL`. |
 | `/api/data/{addr}/all` | DELETE | `DEL_ALL` against the named sensor. |
 | `/api/data/merged` | GET `?file=<basename>` | Wide-format merge across the fleet: header is `ts_ms` followed by three columns per sensor (`<ip>_x, <ip>_y, <ip>_z`, IP dots → underscores, sensors in sorted-IP order). One row per unique `ts_ms`, ascending; cells are blank where that sensor has no sample at that `ts_ms`. |
 | `/api/devices/aliases` | GET | Bulk-fetch the operator-assigned alias map on webapp boot. Per-sensor mutations ride `r2.dash.cmd.device.alias.set` on `/r2`. |
