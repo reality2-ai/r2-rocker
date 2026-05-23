@@ -12,7 +12,7 @@
 > key + a chosen name, and waits for the operator to Approve or Deny
 > on the Link tab. The cryptographic outcome is the same — the
 > KeyHolder runs `process_join_request` at approve time and the
-> viewer's polling `/api/access/check/{device_pk}` returns the cert +
+> viewer's polling `r2.dash.cmd.access.check` returns the cert +
 > DEK + HK + relay_url bundle — but the operator UX is simpler (one
 > button, no expiring tokens) and the protocol surface is smaller
 > (no invite-token table, no 5-minute timeout, no QR-with-token).
@@ -110,7 +110,7 @@ Out of scope:
 | **KeyHolder** | The R2-TRUST role with custody of the TG's signing key. In r2-rocker v0.1 the controller process is the KeyHolder by configuration (it reads `tg_priv.bin` from outside the working tree per `SECRETS-POLICY.md`). |
 | **Member-Sensor** | A sensor firmware instance that has been issued a `DeviceCertificate` by the KeyHolder. v0.1 sensors are enrolled during BLE bootstrap (SPEC-R2-ROCKER-SENSOR §4 — already operational). |
 | **Member-Viewer** | A browser instance that has been issued a `DeviceCertificate` by the KeyHolder via the QR/link flow defined in this spec. |
-| **Token** | A 16-byte single-use secret + 8-hex-char TG hash that authorises exactly one `/api/access/claim`. See §3. |
+| **Token** | (*Removed in v0.3.*) Was a 16-byte single-use secret + 8-hex-char TG hash that authorised exactly one `/api/access/claim` round-trip under the pre-v0.3 invite/claim flow. Replaced by the open `r2.dash.cmd.access.request` event; see §3. |
 | **Production TG** | **Target state** — the Trust Group sensors and the controller belong to. Carries telemetry. SPEC-R2-ROCKER-BRIDGE §2. *In v0.1 this is the only TG; see §2.4.1.* |
 | **Viewing TG** | **Target state** — the Trust Group viewers belong to. Receives a policy-filtered subset of production-TG traffic via the bridge. SPEC-R2-ROCKER-BRIDGE §2. The two TGs are bilaterally entangled at the KeyHolder layer. *In v0.1 viewers are members of the production TG with the `viewer` variant tag; the split lands in a follow-up slice — see §2.4.1.* |
 | **"this device"** | The browser instance currently rendering the dashboard, whatever its role. Used in the Access tab to mark the operator's own session as non-revocable (§8). |
@@ -118,9 +118,12 @@ Out of scope:
 ### 1.3 Notation
 
 CBOR maps follow the integer-key + smallest-encoding convention
-from R2-WIRE / R2-CBOR. JSON shapes shown in this document are
-the on-the-wire form of `/api/access/*` HTTP responses, not the
-internal R2-TRUST serialisation (which is binary; see
+from R2-WIRE / R2-CBOR. Where JSON shapes appear in this document
+(e.g. the approved-bundle body that rides in
+`r2.dash.cmd.access.check`'s response key 5 as a JSON-string),
+they describe content nested *inside* an R2-WIRE event payload —
+the outer carrier is always a CBOR map per WIRE §2.1. They are not
+the internal R2-TRUST serialisation (which is binary; see
 `crates/r2-trust/src/persist.rs`).
 
 ---
@@ -264,18 +267,19 @@ A request progresses through these states:
 
 | State | Triggered by | Persisted between dashboard restarts? |
 |---|---|---|
-| `Pending` | viewer POSTs `/api/access/request` | NO — in-memory only |
-| `Approved` | KeyHolder POSTs `/api/access/approve/{device_pk}` | partial — the issued cert + DEK + HK bundle is cached in the same pending record until the viewer's next `/check` poll consumes it, then the cert is also written to the persistent member set per [[r2-trust/persist.rs]]. |
-| `Denied` | KeyHolder POSTs `/api/access/deny/{device_pk}` | NO — visible to the viewer's next `/check` poll, then the pending record is dropped. |
-| `Consumed` | viewer's `/check` returns the approved bundle | n/a — record dropped |
-| `Revoked` | KeyHolder POSTs `/api/access/revoke/{device_pk}` (§4.4) | YES — G-Set CRDT in [[r2-trust/revocation.rs]] |
+| `Pending` | viewer emits `r2.dash.cmd.access.request` event on `/r2` | NO — in-memory only |
+| `Approved` | KeyHolder emits `r2.dash.cmd.access.approve` event on `/r2` | partial — the issued cert + DEK + HK bundle is cached in the same pending record until the viewer's next `r2.dash.cmd.access.check` poll consumes it, then the cert is also written to the persistent member set per [[r2-trust/persist.rs]]. |
+| `Denied` | KeyHolder emits `r2.dash.cmd.access.deny` event on `/r2` | NO — visible to the viewer's next `r2.dash.cmd.access.check` poll, then the pending record is dropped. |
+| `Consumed` | viewer's `r2.dash.cmd.access.check` returns the approved bundle | n/a — record dropped |
+| `Revoked` | KeyHolder emits `r2.dash.cmd.access.revoke` event (§4.4) | YES — G-Set CRDT in [[r2-trust/revocation.rs]] |
 
 Each state transition emits `r2.dash.access.event` on `/r2` so the
 operator's Link tab can refresh without polling.
 
 ### 3.2 Request payload
 
-The viewer's webapp POSTs `/api/access/request` with:
+The viewer's webapp emits a `r2.dash.cmd.access.request` event on
+its `/r2` WebSocket with payload (per SPEC-R2-ROCKER-WIRE row 43):
 
 ```json
 {
@@ -292,10 +296,12 @@ approving. The dashboard MAY append a transport hint (the
 requester's IP) to the row internally, but the spec does not
 require it to be displayed.
 
-The route is **open** — no auth header, no enrolment token. The
-dashboard's only gate is a per-IP rate limit (MUST be at most one
-new pending request per 5 seconds per source IP; over the limit
-returns 429).
+The event is **open** — anyone connected to `/r2` may emit it; no
+cert handshake required (pre-v1.0 — this is exactly how a
+not-yet-paired viewer announces itself). The dashboard's only gate
+is a per-IP rate limit (MUST be at most one new pending request
+per 5 seconds per source IP; over the limit the cmd.response
+returns `status: "err"`, `message: "rate limited"`).
 
 ### 3.3 Server-side state
 
@@ -310,9 +316,10 @@ For each pending request, the dashboard keeps an in-memory record:
 | `decided` | optional `(approved\|denied, decided_at_ms)` | set on operator action |
 | `approved_bundle` | optional `{cert+DEK+HK+relay_url+tg_pk}` JSON | cached at approve time; consumed on the requester's first successful `/check` poll |
 
-Records are dropped immediately on `/check` consumption (success
-or denial) and on `/api/access/revoke/{device_pk}` (the operator
-explicitly removing a pending entry). A dashboard restart drops
+Records are dropped immediately on `r2.dash.cmd.access.check`
+consumption (success or denial) and on `r2.dash.cmd.access.revoke`
+(the operator explicitly removing a pending entry). A dashboard
+restart drops
 every pending request — the viewer must re-submit. There is no
 expiry timer in v0.3; an unattended pending request stays in the
 queue until the operator decides or the dashboard restarts.
@@ -323,8 +330,8 @@ The relay URL plays no part in the enrolment handshake. After the
 operator clicks Approve, the dashboard issues the cert and
 includes its configured `--relay-url` (if any) in the
 `approved_bundle` (§3.3, §4.2). The viewer reads it from the
-`/api/access/check/{device_pk}` response and persists it
-alongside the cert per §6.
+`r2.dash.cmd.access.check` response payload (key 5, JSON-stringified)
+and persists it alongside the cert per §6.
 
 When `--relay-url` is empty, the `relay_url` field **MUST** be
 omitted from the approve response. The viewer is then LAN-only
@@ -340,146 +347,166 @@ such path exists).
 
 ---
 
-## 4. HTTP routes on the controller
+## 4. R2-WIRE operator-plane events on the controller
 
-The four routes below are added to `SPEC-R2-ROCKER-DASHBOARD §5.1`.
-They formalise (and supersede) the stubs presently at
-`dashboard/src/main.rs:642–645` (`/api/enrol-init`,
-`/api/enrol-complete`).
+The access-flow events below are part of the canonical
+operator-plane `r2.dash.cmd.*` event set (SPEC-R2-ROCKER-WIRE
+rows 37-43). Every viewer / KeyHolder action that pre-v0.2
+went through `POST /api/access/*` now rides as a binary
+R2-WIRE frame on the WebSocket at path `/r2`.
 
-| Route | Method | Body | Returns | Auth |
+| Event | Direction | Payload | Response (`r2.dash.cmd.response`) | Auth |
 |---|---|---|---|---|
-| `/api/access/request` | POST | `{device_pk: hex, name: str}` | `{ok: bool, device_pk: hex}` (202 on accept) | none — rate-limited per source IP |
-| `/api/access/check/{device_pk}` | GET | — | 202 `{status:"pending"}`, 200 `{tg_pk_hex, encrypted_b64, paired_at_ms, relay_url?}`, 410 `{status:"denied"}`, 404 `{error:"no such request"}` | none — the device_pk is the lookup key |
-| `/api/access/pending` | GET | — | `{requests: [{device_pk, name, hint, submitted_at_ms}]}` | KeyHolder-only |
-| `/api/access/approve/{device_pk}` | POST | `{}` | `{ok: bool, device_pk: hex}` | KeyHolder-only |
-| `/api/access/deny/{device_pk}` | POST | `{}` | `{ok: bool, device_pk: hex}` | KeyHolder-only |
-| `/api/access/members` | GET | — | `{members: [{device_pk, name, role, paired_at, last_seen, revoked}]}` | KeyHolder-only |
-| `/api/access/revoke/{device_pk}` | POST | `{}` | `{ok: bool, revoked_at}` | KeyHolder-only |
+| `r2.dash.cmd.access.request` | viewer → controller | `{0: req_id, 1: device_pk, 2: name, 3: hint?}` | `status: "ok"` on accept; `"err"` + `message: "rate limited"` if throttled | none — rate-limited per source IP (one new pending per 5 s) |
+| `r2.dash.cmd.access.check` | viewer → controller | `{0: req_id, 1: device_pk}` | `status: "ok"`, key 4 = decision (`"approved"`\|`"pending"`\|`"denied"`); key 5 = JSON-stringified `{tg_pk_hex, encrypted_b64, paired_at_ms, relay_url?}` body when approved | none — `device_pk` is the lookup key |
+| `r2.dash.cmd.access.pending.query` | viewer → controller | `{0: req_id}` | key 4 = JSON-stringified `[{device_pk, name, hint, submitted_at_ms}, …]` | KeyHolder-only (loopback in v0.1) |
+| `r2.dash.cmd.access.approve` | viewer → controller | `{0: req_id, 1: device_pk}` | `status: "ok"` on accept; `"err"` + `message` on already-approved / denied / not-found | KeyHolder-only |
+| `r2.dash.cmd.access.deny` | viewer → controller | `{0: req_id, 1: device_pk}` | `status: "ok"`; `"err"` on not-found | KeyHolder-only |
+| `r2.dash.cmd.access.members.query` | viewer → controller | `{0: req_id}` | key 4 = JSON-stringified `[{device_pk, name, role, paired_at, last_seen, revoked}, …]` | KeyHolder-only |
+| `r2.dash.cmd.access.revoke` | viewer → controller | `{0: req_id, 1: device_pk}` | `status: "ok"` regardless of online/offline target | KeyHolder-only |
 
-**v0.3 removes `/api/access/invite` and `/api/access/claim`.**
-Implementations conforming to v0.3 **MUST NOT** expose those
-routes (a stale 404 is the correct response; the routes do not
-return 410-Gone aliases because there is no successor URL to
-point at — the model is genuinely different, not renamed).
+The `cmd.response` shape and the bidirectional `/r2` transport
+are defined in SPEC-R2-ROCKER-WIRE §2.1.
 
-The legacy `/api/enrol-init` and `/api/enrol-complete` routes
-remain as 501 stubs from earlier phases. They MAY be deleted at
-any time; no implementation depends on them.
+**v0.3 removed `/api/access/invite` and `/api/access/claim`**
+(no successor URLs — model is genuinely different from invite/
+claim, not just renamed). The legacy 501-stub
+`/api/enrol-init` / `/api/enrol-complete` routes remain
+behind the unified port for backward compatibility with
+operator tooling that probes for them but produces no real
+traffic.
 
-The existing `/api/keyholder/tg-pub` (`dashboard/src/main.rs:2754-2783`)
-remains as-is — it returns the TG public key for any caller to
-verify cert chains.
+**v0.2 retired the operator HTTP routes** (`POST /api/access/{request,
+approve/{pk}, deny/{pk}, revoke/{pk}}`, `GET /api/access/{check/{pk},
+pending, members}`) in favour of the events table above. The
+small remaining `/api/access/*` HTTP routes are operator-helper
+endpoints (`/onboard` for the "Onboard a visitor" modal,
+`/whoami/{device_pk}` for self-heal cert checks) and stay on
+HTTP because they don't fit the R2-event request/response
+shape cleanly.
 
-### 4.1 `/api/access/request`
+The existing `/api/keyholder/tg-pub` (`dashboard/src/main.rs`)
+remains as a plain HTTP route — it returns the TG public key for
+any caller to verify cert chains, which is a fetch-an-immutable-
+resource shape, not a state-changing event.
 
-The viewer's webapp POSTs to this route from the not-enrolled
-landing page (§8). The dashboard:
+### 4.1 `r2.dash.cmd.access.request`
 
-1. Validates `device_pk` is 64 hex chars and decodes to a valid
-   Ed25519 public key. On failure, returns 400.
-2. Validates `name` (1..=64 chars, charset
-   `[A-Za-z0-9 ._-]`, no leading/trailing whitespace). On
-   failure, returns 400.
+The viewer's webapp emits this from the not-enrolled landing
+page (§8). The dashboard:
+
+1. Validates `device_pk` (CBOR key 1) is 64 hex chars and decodes
+   to a valid Ed25519 public key. On failure, emits a
+   `r2.dash.cmd.response` with `status: "err"`, `message: "invalid device_pk"`.
+2. Validates `name` (CBOR key 2; 1..=64 chars, charset
+   `[A-Za-z0-9 ._-]`, no leading/trailing whitespace). On failure,
+   emits `status: "err"`, `message: "invalid name"`.
 3. Enforces the per-IP rate limit (one new pending request per 5 s).
-   Over the limit returns 429.
+   Over the limit emits `status: "err"`, `message: "rate limited"`.
 4. Inserts a `Pending` record per §3.3.
-5. Broadcasts `{type:"access", event:"request_pending", device_pk,
-   name, hint}` (as r2.dash.access.event on /r2) so the operator's Link tab
-   refreshes immediately.
-6. Returns `200 {ok: true, device_pk}`.
+5. Broadcasts `r2.dash.access.event` subtype `request_pending` on
+   `/r2` so the operator's Link tab refreshes immediately.
+6. Emits `r2.dash.cmd.response` with `status: "ok"`,
+   `kind: "access.request"`, correlating on `req_id`.
 
-The route is **open by design**. Anyone on the LAN can POST a
-request — they just end up in the operator's pending queue,
+The event is **open by design**. Anyone connected to `/r2` can
+emit it — they just end up in the operator's pending queue,
 where the operator decides. There is no enrolment token to leak.
 
-### 4.2 `/api/access/check/{device_pk}`
+### 4.2 `r2.dash.cmd.access.check`
 
 The viewer polls this every 2 seconds while the not-enrolled
 landing page shows the "waiting for operator…" state. The
-dashboard returns:
+dashboard's `cmd.response`:
 
-| Status | Body | Meaning |
-|---|---|---|
-| 202 | `{"status": "pending"}` | not yet decided — keep polling |
-| 200 | `{tg_pk_hex, encrypted_b64, paired_at_ms, relay_url?}` | approved — viewer runs the join handshake (§6) |
-| 410 | `{"status": "denied"}` | operator denied — landing page shows the denial state |
-| 404 | `{"error": "no such request"}` | unknown device_pk (or already consumed; the dashboard treats these the same so a viewer that reloads after a successful enrol can detect "already done" and skip re-enrolment) |
+| Response shape | Meaning |
+|---|---|
+| `status: "ok"`, key 4 = `"pending"` | not yet decided — keep polling |
+| `status: "ok"`, key 4 = `"approved"`, key 5 = JSON-stringified `{tg_pk_hex, encrypted_b64, paired_at_ms, relay_url?}` | approved — viewer runs the join handshake (§6) |
+| `status: "ok"`, key 4 = `"denied"` | operator denied — landing page shows the denial state |
+| `status: "err"`, `message: "no such request"` | unknown `device_pk` (or already consumed; the dashboard treats these the same so a viewer that reloads after a successful enrol can detect "already done" and skip re-enrolment) |
 
-Successful (200) consumption **MUST** drop the pending record
-atomically so the second poll sees 404 — this is the spec's
-single-use guarantee. The viewer's local `viewerIdentity` is the
-authoritative copy from that point.
+Successful (`"approved"`) consumption **MUST** drop the pending
+record atomically so the second poll sees `"no such request"` —
+this is the spec's single-use guarantee. The viewer's local
+`viewerIdentity` is the authoritative copy from that point.
 
-The 200 body includes `relay_url` if `--relay-url` was set when
-the dashboard started, omitted otherwise (§3.4).
+The approved body includes `relay_url` if `--relay-url` was set
+when the dashboard started, omitted otherwise (§3.4).
 
-### 4.3 `/api/access/pending`
+### 4.3 `r2.dash.cmd.access.pending.query`
 
-KeyHolder-only. Lists every currently-pending request so the
-operator's Link tab can render the approve/deny row. Each entry
-includes the requester's `device_pk`, `name`, `hint` (IP), and
-`submitted_at_ms`. Items disappear from the list when the
-operator decides (§4.4, §4.5) or when the requester consumes the
-result (§4.2).
+KeyHolder-only. Returns every currently-pending request so the
+operator's Link tab can render the approve/deny row. The
+response's key 4 carries a JSON-stringified array of
+`{device_pk, name, hint, submitted_at_ms}` entries. Items
+disappear from the next query when the operator decides
+(§4.4, §4.5) or when the requester consumes the result (§4.2).
 
-### 4.4 `/api/access/approve/{device_pk}`
+### 4.4 `r2.dash.cmd.access.approve`
 
 KeyHolder-only. The dashboard:
 
 1. Looks up the pending request by `device_pk`. If absent,
-   returns 404.
+   `status: "err"`, `message: "no such pending request"`.
 2. Generates a transient `JoinCode` and runs
    `r2-trust::TrustGroup::process_join_request` with the
    requester's `device_pk` and the cached `name`. The cert is
    signed and the encrypted `(DEK, HK)` bundle is produced.
 3. Caches the `(tg_pk_hex, encrypted_b64, paired_at_ms, relay_url?)`
    bundle in the same pending record (now in `Approved` state per
-   §3.1) — the viewer's next `/check` poll consumes it.
+   §3.1) — the viewer's next `r2.dash.cmd.access.check` poll
+   consumes it.
 4. Adds the new member to the persistent `TrustGroup::members`
    via `r2-trust/src/persist.rs`.
-5. Broadcasts `{type:"access", event:"request_approved",
-   device_pk}` (as r2.dash.access.event on /r2) so the operator's Link tab pulls
-   the new row from `/api/access/members`.
-6. Returns `200 {ok: true, device_pk}`.
+5. Broadcasts `r2.dash.access.event` subtype `request_approved`
+   on `/r2` so the operator's Link tab pulls the new row from
+   `r2.dash.cmd.access.members.query`.
+6. Pushes a `JOIN_RESPONSE` binary frame onto the relay's
+   outbound channel for off-network viewers (no polling needed
+   from the relay path — they get the cert bundle directly).
+7. Emits `r2.dash.cmd.response` with `status: "ok"`,
+   `kind: "access.approve"`.
 
-If the request was already approved (re-click), returns 409.
-If it was denied, returns 409. If `device_pk` decodes invalid,
-returns 400.
+If the request was already approved (re-emit), emits
+`status: "err"`, `message: "already approved"`. If denied,
+similarly. If `device_pk` decodes invalid,
+`message: "device_pk must be 64 hex chars"`.
 
-### 4.5 `/api/access/deny/{device_pk}`
+### 4.5 `r2.dash.cmd.access.deny`
 
 KeyHolder-only. Looks up the pending request, marks it `Denied`,
-broadcasts `{type:"access", event:"request_denied", device_pk}`
-as r2.dash.access.event on /r2. The next r2.dash.cmd.access.check from the requester returns
-410. The pending record is dropped on that next poll (or
-immediately if the operator preferred to clear it via a future
-"clear denied requests" affordance — out of scope for v0.3).
+broadcasts `r2.dash.access.event` subtype `request_denied` on
+`/r2`. The next `r2.dash.cmd.access.check` from the requester
+returns `status: "ok"`, key 4 = `"denied"`. The pending record
+is dropped on that next poll (or immediately if the operator
+preferred to clear it via a future "clear denied requests"
+affordance — out of scope for v0.3).
 
-### 4.3 `/api/access/members`
+### 4.6 `r2.dash.cmd.access.members.query`
 
-KeyHolder-only. Returns the full member list, including
-revoked members (with `revoked: true` and a `revoked_at`
-timestamp). Webapp consumers MAY filter the revoked rows out
-of the operator-facing list; the spec returns them so the
-audit trail is reachable.
+KeyHolder-only. Returns the full member list (key 4 = JSON-
+stringified `[{device_pk, name, role, paired_at, last_seen,
+revoked}, …]`), including revoked members (with `revoked: true`
+and a `revoked_at` timestamp). Webapp consumers MAY filter the
+revoked rows out of the operator-facing list; the spec returns
+them so the audit trail is reachable.
 
 `last_seen` is the wall-clock timestamp of the most recent
 authenticated frame from that member. For sensors this is the
-last R2-WIRE frame on port 21042; for viewers it's the last
-`/r2` keep-alive. If a member has never
-been seen since the dashboard process started, `last_seen` is
-`null`.
+last R2-WIRE frame on port 21042 raw-TCP; for viewers it's the
+last `/r2` WebSocket message. If a member has never been seen
+since the dashboard process started, `last_seen` is `null`.
 
-### 4.4 `/api/access/revoke/{device_pk}`
+### 4.7 `r2.dash.cmd.access.revoke`
 
 KeyHolder-only. Adds `device_pk` to the revocation G-Set per
 `crates/r2-trust/src/revocation.rs`, persists, broadcasts
-`r2.dash.access.event` subtype `"revoked"` (with `device_pk`) on `/r2`,
-and tears down any open `/r2` connection
-from that `device_pk` immediately (§7).
+`r2.dash.access.event` subtype `"revoked"` on `/r2`, and tears
+down any open `/r2` WebSocket from that `device_pk` immediately
+(§7).
 
-The route **MUST** succeed regardless of whether the target
+The event **MUST** succeed regardless of whether the target
 device is currently online — a KeyHolder can remove a device
 from the Trust Group at any time, and offline targets learn of
 their revocation by cert-check failure on next connect (§7.6).
@@ -512,21 +539,21 @@ to submit a request.
 
 ### 5.1 Same-WiFi (direct)
 
-The viewer loaded the webapp from `http://<controller_lan_ip>:8080/`,
-so its WASM hive can open a WebSocket directly to the controller's
-`/r2`. In v0.1, per the operator-chosen **additive auth
-model**, `/r2` does not require a cert handshake — the
-WebSocket opens anonymous and the viewer streams whatever the
-controller sends. The viewer's cert is held client-side, ready
-for the v1 cert-handshake variant.
+The viewer loaded the webapp from `http://<controller_lan_ip>:21042/`
+(the unified R2 port per R2-WIRE §13.5, post-v0.2), so its WASM
+hive can open a WebSocket directly to the controller's `/r2`. In
+v0.1+v0.2, per the operator-chosen **additive auth model**, `/r2`
+does not require a cert handshake — the WebSocket opens anonymous
+and the viewer streams whatever the controller sends. The viewer's
+cert is held client-side, ready for the v1 cert-handshake variant.
 
-Implementations of v0.1 conforming to this spec **MUST**:
+Implementations conforming to this spec **MUST**:
 
 * persist the cert per §6 even when the WS handshake itself
   doesn't use it (the cert is needed for the relay path AND for
   the v1 upgrade);
-* respect a `r2.dash.access.revoked` event for their own
-  `device_pk` arriving on `/ws/status` by closing the WS, wiping
+* respect a `r2.dash.access.event` subtype `"revoked"` for their own
+  `device_pk` arriving on `/r2` by closing the WS, wiping
   the IndexedDB cert, and rendering the "not-enrolled" landing
   page (§7).
 
@@ -553,8 +580,9 @@ the dashboard's relay-side state forwards encrypted blobs.
 
 A viewer that never enrolled has nothing to present here — the
 relay session below requires a `DeviceCertificate` that only the
-controller can issue, and the controller only issues certs over
-the LAN-bound `/api/access/claim` route (§4.2). The static-host
+controller can issue, and the controller only issues certs in
+response to a `r2.dash.cmd.access.approve` event over the LAN-bound
+`/r2` WebSocket (§4.4). The static-host
 landing page **MUST** detect "no persisted cert in IndexedDB" and
 render the not-enrolled state, which tells the operator to come
 back on the lab WiFi to enrol — not to keep trying the relay.
@@ -616,14 +644,14 @@ key `self`. The state **MUST** survive:
 The state **MUST NOT** survive:
 
 * "Clear site data" in the browser's developer tools.
-* Cert revocation (§7) — receiving `r2.dash.access.revoked` for
-  the local `device_pk` **MUST** delete the record.
+* Cert revocation (§7) — receiving `r2.dash.access.event` subtype
+  `"revoked"` for the local `device_pk` **MUST** delete the record.
 * User-initiated "Leave" action — a UI affordance the
   implementation MAY provide for the viewer to deregister itself
-  cleanly. On Leave, the viewer SHOULD POST to a future
-  `/api/access/leave` route (not part of v0.1 scope; the operator
-  performs the equivalent action via §4.4) and wipe IndexedDB
-  locally regardless of route success.
+  cleanly. On Leave, the viewer SHOULD emit a future
+  `r2.dash.cmd.access.leave` event (not part of v0.2 scope; the
+  operator performs the equivalent action via §4.4) and wipe
+  IndexedDB locally regardless of response.
 
 IndexedDB is chosen over localStorage despite notekeeper's
 localStorage precedent because the binary blobs are awkward to
@@ -714,10 +742,11 @@ jargon — no "Trust Group", no "KeyHolder", no "Enrolment", per
 `feedback_ui_no_protocol_jargon`). It sits alongside the existing
 Live / Devices / Data tabs.
 
-The internal name used in code, URL paths, this spec's title, and
-the HTTP route table (`/api/access/*`) is still **"access"** —
-the operator-facing rename is cosmetic only. Implementations
-**MUST NOT** rename the URL routes or the spec module.
+The internal name used in code, event hashes, this spec's title,
+and the operator-plane command family (`r2.dash.cmd.access.*`) is
+still **"access"** — the operator-facing rename is cosmetic only.
+Implementations **MUST NOT** rename the event family or the spec
+module.
 
 Below the tab heading, in order:
 
@@ -730,7 +759,7 @@ Below the tab heading, in order:
      `--wifi-config` pointing at a readable creds file (or
      NetworkManager exposes them); omitted otherwise.
    * **Bottom QR: dashboard URL** — a plain
-     `http://<controller_lan_ip>:8080/` URL with **no token and
+     `http://<controller_lan_ip>:21042/` URL with **no token and
      no parameters**. Scanning it opens the not-enrolled landing
      page; the visitor enrols by typing a name and clicking
      "Ask to pair" (§4.1).
@@ -741,9 +770,10 @@ Below the tab heading, in order:
 
 2. **A "Pending requests" panel** (visible only when there is at
    least one pending request, or always — implementation choice).
-   Polls `/api/access/pending` on Link-tab open and refreshes on
-   each `request_pending` / `request_approved` / `request_denied`
-   r2.dash.access.event broadcast on /r2. Each row shows:
+   On Link-tab open the viewer emits `r2.dash.cmd.access.pending`
+   to snapshot the current pending set, and refreshes on each
+   `request_pending` / `request_approved` / `request_denied`
+   `r2.dash.access.event` broadcast on `/r2`. Each row shows:
    * Requester name (chosen at request time).
    * `device_pk` short form (first 8 hex chars).
    * Source-IP hint, so the operator can correlate with a
@@ -783,12 +813,12 @@ render a single landing page in place of the regular tabs:
 > Link tab."*
 
 with a name input and an "Ask to pair" button. On click, the
-webapp generates a device keypair (via WASM), POSTs
-`/api/access/request` (§4.1), and transitions to a "⏳ Waiting
-for the operator to approve <name>…" state. The page polls
-`/api/access/check/{device_pk}` every ~2 seconds; on success
-(200) it runs the join handshake (§6) and transitions to the
-enrolled state.
+webapp generates a device keypair (via WASM), emits
+`r2.dash.cmd.access.request` (§4.1) on `/r2`, and transitions to
+a "⏳ Waiting for the operator to approve <name>…" state. The
+page emits `r2.dash.cmd.access.check` every ~2 seconds; on a
+success response (key 5 carrying the approved bundle) it runs the
+join handshake (§6) and transitions to the enrolled state.
 
 ---
 
@@ -879,28 +909,32 @@ spec.
 
 A dashboard build conforms to this spec when:
 
-1. The seven `/api/access/*` routes in §4 (request, check,
-   pending, approve, deny, members, revoke) are implemented with
-   the payload shapes shown.
-2. The routes `/api/access/invite` and `/api/access/claim` are
-   **not** exposed.
-3. The KeyHolder-only routes refuse non-KeyHolder callers. In
-   v0.1 where there is no per-route auth check, the dashboard
-   MAY rely on the localhost / private-LAN boundary; in v1 with
-   cert-handshake on `/r2`, the routes **MUST** also be
-   cert-gated.
-4. `/api/access/request` is rate-limited per source IP per §4.1.
-5. `/api/access/check/{device_pk}` returns the approved bundle
-   exactly once: the second poll for the same `device_pk` after
-   a successful 200 MUST return 404.
-6. `/api/access/approve/{device_pk}` runs `process_join_request`
+1. The seven `r2.dash.cmd.access.*` events in §4 (request, check,
+   pending, approve, deny, members, revoke) are implemented as
+   R2-WIRE handlers on `/r2`, with the request/response payload
+   shapes shown, and each emits a correlated
+   `r2.dash.cmd.response` carrying the requester's `req_id`.
+2. The legacy HTTP routes `/api/access/*` (including the v0.2-
+   removed `invite` and `claim` predecessors) are **not** mounted.
+3. The KeyHolder-only commands refuse non-KeyHolder callers. In
+   v0.2 where there is no per-frame auth check on `/r2`, the
+   dashboard MAY rely on the localhost / private-LAN boundary; in
+   v1 with cert-handshake on `/r2`, dispatch **MUST** also be
+   cert-gated against the connection's verified `device_pk`.
+4. `r2.dash.cmd.access.request` is rate-limited per source IP per
+   §4.1.
+5. `r2.dash.cmd.access.check` returns the approved bundle (key 5,
+   JSON-string) exactly once: the second query for the same
+   `device_pk` after a successful approval response MUST report
+   "not found" (status=`"unknown"` in key 4).
+6. `r2.dash.cmd.access.approve` runs `process_join_request`
    synchronously and includes the configured `relay_url` (if any)
    in the cached approved bundle, per §3.4.
-7. `/api/access/members` returns the persisted member list
+7. `r2.dash.cmd.access.members` returns the persisted member list
    including revoked rows.
-8. `/api/access/revoke` adds to the revocation G-Set, broadcasts
-   `r2.dash.access.revoked`, and tears down the offending
-   connection synchronously.
+8. `r2.dash.cmd.access.revoke` adds to the revocation G-Set,
+   broadcasts `r2.dash.access.event` subtype `"revoked"` on `/r2`,
+   and tears down the offending connection synchronously.
 9. The KeyHolder cannot revoke itself (§4.4).
 
 ### 11.2 Webapp
@@ -909,13 +943,13 @@ A webapp build conforms when:
 
 1. On first load, if no cert exists in IndexedDB, it renders the
    not-enrolled landing page (§8) and accepts a name + an "Ask
-   to pair" click that POSTs `/api/access/request` with a
-   freshly-generated `device_pk`.
-2. After submitting the request, it polls
-   `/api/access/check/{device_pk}` every ~2 seconds until the
-   response is 200 (approved), 410 (denied), or 404 (lost).
-3. On 200, it runs the join handshake (§6), persists the cert +
-   key + DEK + HK + `relay_url` in IndexedDB under
+   to pair" click that emits `r2.dash.cmd.access.request` on `/r2`
+   with a freshly-generated `device_pk`.
+2. After submitting the request, it emits
+   `r2.dash.cmd.access.check` every ~2 seconds until the response
+   carries status `"approved"`, `"denied"`, or `"unknown"`.
+3. On `"approved"`, it runs the join handshake (§6), persists the
+   cert + key + DEK + HK + `relay_url` in IndexedDB under
    `r2-rocker-access > members > self`, and transitions to the
    enrolled view.
 4. On subsequent loads with a valid IndexedDB record, it uses
@@ -923,10 +957,10 @@ A webapp build conforms when:
 5. It renders the "Link" tab per §8, including the Onboard
    modal, the pending-requests panel, the device list, and (when
    applicable) the not-enrolled landing page.
-6. It listens for `r2.dash.access.event` subtype=revoked on `/r2` and,
-   when the revoked `device_pk` matches its own, deletes the
-   IndexedDB record and re-renders the not-enrolled landing
-   page (§7.3).
+6. It listens for `r2.dash.access.event` subtype=`"revoked"` on
+   `/r2` and, when the revoked `device_pk` matches its own,
+   deletes the IndexedDB record and re-renders the not-enrolled
+   landing page (§7.3).
 
 ### 11.3 Firmware
 
