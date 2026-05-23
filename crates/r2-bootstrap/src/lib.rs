@@ -517,9 +517,23 @@ fn get_active_sensor_ips(port: u16) -> HashSet<String> {
         let send_q: u32 = parts[2].parse().unwrap_or(0);
         if send_q > 0 { continue; }
         let remote = parts[4];
-        if let Some(ip) = remote.rsplitn(2, ':').nth(1) {
-            ips.insert(ip.to_string());
+        let ip = match remote.rsplitn(2, ':').nth(1) {
+            Some(s) => s.trim_start_matches('[').trim_end_matches(']'),
+            None => continue,
+        };
+        // Loopback connections are NEVER sensors — they're the
+        // browser-side WebSocket clients on the same host as the
+        // dashboard. Filtering them out matters since the rocker
+        // dashboard's R2-WIRE port unification (commit e2aedde,
+        // 2026-05-23) put HTTP/WS and raw sensor TCP on the same
+        // port (21042). Before that change, port 21042 was sensors-
+        // only and this filter was unnecessary; after it, every
+        // browser WS to /r2 looked like a "streaming sensor" and
+        // suppressed the BLE scan. Same applies to IPv6 ::1.
+        if ip == "127.0.0.1" || ip.starts_with("127.") || ip == "::1" {
+            continue;
         }
+        ips.insert(ip.to_string());
     }
     ips
 }
