@@ -965,7 +965,7 @@ async fn do_bootstrap(state: &Arc<AppState>) {
         let mut log = state.bootstrap_log.lock().await;
         log.clear();
     }
-    emit_bootstrap_progress(state, "Reset", None);
+    emit_bootstrap_reset(state);
 
     let config = BootstrapConfig {
         ssid: None,
@@ -1011,14 +1011,13 @@ async fn do_bootstrap(state: &Arc<AppState>) {
                 log.push(json_str.clone());
             }
 
-            // Legacy + R2-WIRE broadcasts. The structured `event` shape
-            // (serde-tagged "kind"/"data" per BootstrapEvent) stays in
-            // the JSON path; the R2-WIRE event carries the flattened
-            // (kind, data-as-text) form so the rocker hive can consume
-            // it without ad-hoc nested-decoder.
+            // Two broadcasts: the legacy /ws/status JSON path carries
+            // the serde-tagged structured form (kept while /ws/status
+            // is still alive — to be dropped at v0.2). The R2-WIRE
+            // path carries the same fields under named CBOR keys
+            // per SPEC row 27 — that's our forward channel.
             let _ = state_for_relay.ws_broadcast_tx.send(json_str);
-            let (kind, data) = bootstrap_event_to_pair(&event);
-            emit_bootstrap_progress(&state_for_relay, kind, data.as_deref());
+            emit_bootstrap_progress(&state_for_relay, &event);
         }
 
         running_flag.store(false, Ordering::SeqCst);
@@ -2160,27 +2159,48 @@ fn decode_cmd_frame(body: &[u8]) -> Option<(u32, u32, serde_json::Value)> {
     Some((event_hash, req_id, payload))
 }
 
-fn emit_bootstrap_progress(state: &Arc<AppState>, kind: &str, data: Option<&str>) {
-    // Legacy JSON path — emitted only for `Reset`, where this is the
-    // sole source. For every other variant the bootstrap relay task at
-    // do_bootstrap:998 already broadcasts the structured serde-tagged
-    // `BootstrapEvent` JSON ({kind, data: {addr, name, ...}}), and the
-    // webapp's handleBootstrapEvent expects that exact shape. Emitting
-    // a second flattened-string-data form here duplicated every line
-    // in the bootstrap-log panel and rendered "Found sensor: undefined"
-    // because `evt.data.addr` on a string is undefined. R2-WIRE is
-    // still emitted unconditionally below — that's our forward path.
-    if kind == "Reset" {
-        let legacy = serde_json::json!({ "type": "bootstrap", "event": { "Reset": null } });
-        let _ = state.ws_broadcast_tx.send(legacy.to_string());
-    }
-
-    let mut buf = vec![0u8; 64 + kind.len() + data.map(|s| s.len()).unwrap_or(0)];
+/// Broadcast a R2-WIRE `r2.dash.bootstrap.progress` event preserving
+/// the BootstrapEvent variant's full field set. Payload shape per
+/// SPEC-R2-ROCKER-WIRE §2 row 27:
+///   {0: kind (text),
+///    1: message (text, optional — Log + Error),
+///    2: addr    (text, optional — SensorFound + SensorConnected),
+///    3: name    (text, optional — SensorFound + SensorConnected),
+///    4: ip      (text, optional — SensorConnected),
+///    5: count   (uint, optional — Done)}
+fn emit_bootstrap_progress(state: &Arc<AppState>, event: &BootstrapEvent) {
+    let mut buf = vec![0u8; 256];
     let mut enc = r2_cbor::Encoder::new(&mut buf);
-    let n_keys = 1 + data.is_some() as usize;
-    let _ = enc.map(n_keys);
-    let _ = enc.kv(0, &r2_cbor::Value::Text(kind));
-    if let Some(d) = data { let _ = enc.kv(1, &r2_cbor::Value::Text(d)); }
+    match event {
+        BootstrapEvent::Log(s) => {
+            let _ = enc.map(2);
+            let _ = enc.kv(0, &r2_cbor::Value::Text("Log"));
+            let _ = enc.kv(1, &r2_cbor::Value::Text(s));
+        }
+        BootstrapEvent::SensorFound { addr, name } => {
+            let _ = enc.map(3);
+            let _ = enc.kv(0, &r2_cbor::Value::Text("SensorFound"));
+            let _ = enc.kv(2, &r2_cbor::Value::Text(addr));
+            let _ = enc.kv(3, &r2_cbor::Value::Text(name));
+        }
+        BootstrapEvent::SensorConnected { addr, name, ip } => {
+            let _ = enc.map(4);
+            let _ = enc.kv(0, &r2_cbor::Value::Text("SensorConnected"));
+            let _ = enc.kv(2, &r2_cbor::Value::Text(addr));
+            let _ = enc.kv(3, &r2_cbor::Value::Text(name));
+            let _ = enc.kv(4, &r2_cbor::Value::Text(ip));
+        }
+        BootstrapEvent::Done { count } => {
+            let _ = enc.map(2);
+            let _ = enc.kv(0, &r2_cbor::Value::Text("Done"));
+            let _ = enc.kv(5, &r2_cbor::Value::UInt(*count as u64));
+        }
+        BootstrapEvent::Error(s) => {
+            let _ = enc.map(2);
+            let _ = enc.kv(0, &r2_cbor::Value::Text("Error"));
+            let _ = enc.kv(1, &r2_cbor::Value::Text(s));
+        }
+    }
     let used = enc.len();
     buf.truncate(used);
 
@@ -2196,26 +2216,35 @@ fn emit_bootstrap_progress(state: &Arc<AppState>, kind: &str, data: Option<&str>
     });
 }
 
-/// Map a BootstrapEvent enum variant to a flat (kind, data) pair for
-/// the R2-WIRE `r2.dash.bootstrap.progress` event. The data string is
-/// a human-readable summary; structured consumers should rely on the
-/// legacy /ws/status JSON path (which keeps the serde-tagged
-/// "kind"/"data" object) until Tracks B+C lands the second-pass
-/// migration that gives each variant its own R2 event.
-fn bootstrap_event_to_pair(ev: &BootstrapEvent) -> (&'static str, Option<String>) {
-    match ev {
-        BootstrapEvent::Log(s) => ("Log", Some(s.clone())),
-        BootstrapEvent::SensorFound { addr, name } => (
-            "SensorFound",
-            Some(format!("{} {}", addr, name)),
-        ),
-        BootstrapEvent::SensorConnected { addr, name, ip } => (
-            "SensorConnected",
-            Some(format!("{} {} {}", addr, name, ip)),
-        ),
-        BootstrapEvent::Done { count } => ("Done", Some(count.to_string())),
-        BootstrapEvent::Error(s) => ("Error", Some(s.clone())),
-    }
+/// Synthetic Reset event — emitted by the dashboard when the operator
+/// (re)triggers bootstrap. Not a BootstrapEvent variant because it's
+/// dashboard-side, not from r2_bootstrap. Payload `{0: "Reset"}`; the
+/// webapp matches on kind and clears its log panel + sensor cards.
+fn emit_bootstrap_reset(state: &Arc<AppState>) {
+    // Legacy JSON for /ws/status — webapp's handleBootstrapEvent
+    // matches `'Reset' in msg.event` for this case. Kept here as long
+    // as /ws/status is alive; the R2-WIRE path is the canonical one
+    // going forward (handleEvent on r2.dash.bootstrap.progress).
+    let legacy = serde_json::json!({ "type": "bootstrap", "event": { "Reset": null } });
+    let _ = state.ws_broadcast_tx.send(legacy.to_string());
+
+    let mut buf = [0u8; 16];
+    let used = {
+        let mut enc = r2_cbor::Encoder::new(&mut buf);
+        let _ = enc.map(1);
+        let _ = enc.kv(0, &r2_cbor::Value::Text("Reset"));
+        enc.len()
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let frame = build_dash_frame_body(DASH_BOOTSTRAP_PROGRESS, 0, &buf[..used]);
+    let _ = state.raw_frame_tx.send(RawFrame {
+        src: "dash".to_string(),
+        ts_ms: now_ms,
+        frame,
+    });
 }
 
 /// Encode the `r2.peer.disconnected` payload per BRIDGE §3.1:

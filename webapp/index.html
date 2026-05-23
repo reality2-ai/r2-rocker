@@ -1599,74 +1599,14 @@ async function bootstrapHive() {
   } else {
     console.log('[hive] connecting to /ws/raw …');
     connectRaw();
-    console.log('[hive] connecting to /ws/status …');
-    connectStatus();
   }
 }
 
-let statusWs;
-function connectStatus() {
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  statusWs = new WebSocket(`${proto}//${location.host}/ws/status`);
-  statusWs.onopen = () => console.log('[hive] /ws/status open');
-  statusWs.onclose = () => {
-    console.log('[hive] /ws/status closed; retry in 2 s');
-    setTimeout(connectStatus, 2000);
-  };
-  statusWs.onerror = (e) => console.warn('[hive] /ws/status error', e);
-  statusWs.onmessage = (e) => {
-    if (typeof e.data !== 'string') return;
-    let msg;
-    try { msg = JSON.parse(e.data); }
-    catch (err) { console.warn('[hive] bad status JSON:', e.data); return; }
-    if (msg.type === 'bootstrap') {
-      handleBootstrapEvent(msg);
-    } else if (msg.type === 'peer_disconnected') {
-      // Server detected the sensor's TCP socket close. Flip the virtual
-      // LED to inert grey now rather than waiting for the OFFLINE_MS
-      // timeout to fire on lastSeen ageing.
-      //
-      // Also clear fsmState / dataSource so when the sensor reconnects
-      // after a reboot (OTA, manual reset, etc.) the dot stays inert
-      // grey until the FIRST fresh status frame arrives. Otherwise the
-      // dot would briefly render whatever state the sensor was last in
-      // before disconnect (commonly `OTA` = white strobe, or stale
-      // `Streaming`), which the operator reads as a stuck indicator.
-      const s = sensors.get(msg.addr);
-      if (s) {
-        s.online = false;
-        s.lastSeen = 0;            // forces classifyOnline → 'offline'
-        s.fsmState = null;         // unknown until next r2.sensor.status
-        s.dataSource = null;       // re-resolves on next status frame
-        // Clear the capture-state machine for this peer too —
-        // otherwise a sensor that dropped while in Calibrating /
-        // Recording leaves the Run Control bar with Start disabled,
-        // because `updateCaptureUiFromFleet`'s aggregate computation
-        // still sees that peer in a non-idle state. We don't know
-        // what state the sensor will come back in; assume idle and
-        // let the first fresh capture.state frame correct us.
-        s.captureState = 'idle';
-        s.captureFile  = null;
-        updateSensorList();
-        updateCaptureUiFromFleet();
-        renderDevicesIfVisible();
-      }
-    } else if (msg.type === 'ota') {
-      handleOtaEvent(msg);
-    } else if (msg.type === 'access') {
-      // SPEC-R2-ROCKER-ACCESS §4.2 / §7.2 — member_added / revoked.
-      handleAccessWsEvent(msg);
-    } else if (msg.type === 'device_alias') {
-      // Operator on another browser session renamed a sensor; sync.
-      if (msg.device_pk) {
-        if (msg.name) _deviceAliases[msg.device_pk] = msg.name;
-        else delete _deviceAliases[msg.device_pk];
-        applyAliasesToAllSensors();
-      }
-    }
-    // Future: hotspot, server_error, etc. (SPEC-R2-ROCKER-DASHBOARD §5.3)
-  };
-}
+// /ws/status was removed in v0.2 — every status notification that
+// used to ride its JSON channel (bootstrap progress, peer_disconnected,
+// OTA progress, access events, device_alias renames) now flows as a
+// R2-WIRE event on /ws/raw. Dispatchers live in handleEvent above.
+// SPEC-R2-ROCKER-DASHBOARD §5.3 has been removed.
 
 function connectRaw() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -2195,9 +2135,25 @@ function remapPayload(eventName, raw) {
   }
   const SCHEMA = {
     'r2.sensor.battery':     [['0','voltage_mv'],['1','percent'],['2','charging'],['3','ts_ms'],['10','temp_c']],
-    'r2.sensor.announce':    [['0','device_pk'],['1','hostname'],['2','fw_ver'],['3','last_seq'],['4','boot_ts_ms'],['5','nonce'],['6','sig'],['10','mounting_role']],
+    'r2.sensor.announce':    [['0','device_pk'],['1','hostname'],['2','fw_ver'],['3','last_seq'],['4','boot_ts_ms'],['5','nonce'],['6','sig'],['8','device_cert'],['10','mounting_role']],
     'r2.sensor.status':      [['0','state'],['1','uptime_ms'],['2','samples_total'],['3','samples_acked'],['4','sd_pct_used'],['5','rate_hz_active'],['6','range_active'],['7','data_source'],['10','error_code']],
     'r2.sensor.capture.state': [['0','state'],['1','file']],
+    // Controller-synthesised events — payload shapes per
+    // SPEC-R2-ROCKER-WIRE §2 rows 22-28. Adding here lets handleEvent
+    // dispatch via named fields instead of int-keyed lookups.
+    // Cmd-response events (row 32) deliberately omitted — handleCmdResponse
+    // reads int keys directly because future cmd.* additions may extend the
+    // schema and we want forwards-compat.
+    'r2.peer.disconnected':            [['0','addr'],['1','ts_ms'],['2','reason'],['3','device_pk_hex']],
+    'r2.dash.ota.progress':            [['0','target'],['1','phase'],['2','size'],['3','message']],
+    'r2.dash.reset.progress':          [['0','target'],['1','phase'],['3','message']],
+    'r2.dash.capture.progress':        [['0','phase'],['1','peers'],['2','name'],['3','prefix'],['4','ts_ms']],
+    // key 0 mapped to `event` (not `subtype`) so the existing
+    // handleAccessWsEvent (which reads msg.event as the access-flow
+    // discriminator) works against this remapped payload unchanged.
+    'r2.dash.access.event':            [['0','event'],['1','device_pk'],['2','name'],['3','hint']],
+    'r2.dash.bootstrap.progress':      [['0','kind'],['1','message'],['2','addr'],['3','name'],['4','ip'],['5','count']],
+    'r2.dash.device.alias.changed':    [['0','device_pk'],['1','name']],
   };
   const map = SCHEMA[eventName];
   if (!map) return raw;
@@ -2224,6 +2180,66 @@ function handleEvent(msg) {
   // sensor lookup since the response's src is "dash", not a sensor.
   if (msg.event === 'r2.dash.cmd.response' && msg.payload) {
     handleCmdResponse(msg.payload);
+    return;
+  }
+
+  // Controller-synthesised events — formerly carried on /ws/status
+  // as type=bootstrap / peer_disconnected / ota / reset / capture /
+  // access / device_alias JSON. Now ride r2.dash.*.progress events
+  // on /ws/raw per SPEC-R2-ROCKER-WIRE §2 rows 22-28. Each dispatcher
+  // synthesises the legacy-shaped msg object and calls the existing
+  // handler so UI behaviour is unchanged.
+  if (msg.event === 'r2.dash.bootstrap.progress') {
+    const p = msg.payload || {};
+    let event = null;
+    if (p.kind === 'Reset') {
+      event = { Reset: null };
+    } else if (p.kind === 'Log' || p.kind === 'Error') {
+      event = { kind: p.kind, data: p.message || '' };
+    } else if (p.kind === 'SensorFound') {
+      event = { kind: 'SensorFound', data: { addr: p.addr, name: p.name } };
+    } else if (p.kind === 'SensorConnected') {
+      event = { kind: 'SensorConnected', data: { addr: p.addr, name: p.name, ip: p.ip } };
+    } else if (p.kind === 'Done') {
+      event = { kind: 'Done', data: { count: p.count } };
+    }
+    if (event) handleBootstrapEvent({ event });
+    return;
+  }
+  if (msg.event === 'r2.peer.disconnected') {
+    const p = msg.payload || {};
+    const s = sensors.get(p.addr);
+    if (s) {
+      s.online = false;
+      s.lastSeen = 0;
+      s.fsmState = null;
+      s.dataSource = null;
+      s.captureState = 'idle';
+      s.captureFile = null;
+      updateSensorList();
+      updateCaptureUiFromFleet();
+      renderDevicesIfVisible();
+    }
+    return;
+  }
+  if (msg.event === 'r2.dash.ota.progress') {
+    // handleOtaEvent expects {target, phase, size?, message?} — same
+    // field names as the SCHEMA mapping above, so we can pass payload
+    // through directly.
+    handleOtaEvent(msg.payload || {});
+    return;
+  }
+  if (msg.event === 'r2.dash.access.event') {
+    handleAccessWsEvent(msg.payload || {});
+    return;
+  }
+  if (msg.event === 'r2.dash.device.alias.changed') {
+    const p = msg.payload || {};
+    if (p.device_pk) {
+      if (p.name) _deviceAliases[p.device_pk] = p.name;
+      else delete _deviceAliases[p.device_pk];
+      applyAliasesToAllSensors();
+    }
     return;
   }
 
