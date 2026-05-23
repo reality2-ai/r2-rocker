@@ -1541,7 +1541,7 @@ async function bootstrapHive() {
   }
 
   // Cross-origin cert import. The lab-origin webapp (loaded from
-  // http://<lan_ip>:8080) issues a "Save for off-network use" link
+  // http://<lan_ip>:21042) issues a "Save for off-network use" link
   // that opens the static-host build with a #bundle=… fragment
   // carrying the cert + relay_url. The fragment never traverses the
   // network, so the cert stays client-side. After import we wipe
@@ -3352,7 +3352,7 @@ async function forgetViewerIdentity() {
 
 // ── Cross-origin cert hand-off ─────────────────────────────────────────
 //
-// The lab-origin webapp (http://<lan_ip>:8080) has the cert in its own
+// The lab-origin webapp (http://<lan_ip>:21042) has the cert in its own
 // IndexedDB after enrolment. A copy of the same webapp loaded from a
 // public HTTPS host (https://reality2.ai/r2-rocker/ — a custom-domain
 // front-end on the gh-pages deploy) lives in a different origin and

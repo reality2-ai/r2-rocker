@@ -7,7 +7,14 @@ description = "R2 sensor dashboard — receives R2-WIRE events and serves a live
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
+tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors", "fs"] }
+# Explicit hyper deps for the protocol-detect single-port listener
+# (R2-WIRE §13.5 — port 21042 carries R2-WIRE events in BOTH raw-TCP
+# and WebSocket form; we accept-then-peek to dispatch each connection
+# to either axum or the sensor TCP handler).
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["service", "tokio"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 r2-fnv = { path = "../crates/r2-fnv" }

@@ -20,7 +20,7 @@ the single controlling-device application that:
 * Maintains per-device calibration matrices and joint-group definitions.
 * Computes pairwise differential lateral motion across joints (the
   diagnostic per PLAN D-08).
-* Serves a browser UI on port 8080.
+* Serves the browser UI on the unified R2 port 21042 (HTTP + WebSocket).
 * Manages OTA updates and reset commands.
 
 There is **exactly one** dashboard per deployment. The dashboard is the
@@ -84,7 +84,7 @@ The dashboard is **one Rust process** with multiple Tokio tasks:
 |---|---|
 | `tcp_listener` | Accept inbound sensor connections on :21042 |
 | `peer_handler` (per peer) | Decode R2-WIRE frames, dispatch to state |
-| `http_server` | Serve the browser UI on :8080 |
+| `http_server` | Serve the browser UI on the unified R2 port (:21042) via hyper-driven axum |
 | `websocket_handler` (per browser) | Push live updates |
 | `bootstrap_engine` | BLE scan + L2CAP per sensor, on demand |
 | `analytics` | Periodic stress indicator computation, trend update |
@@ -100,7 +100,7 @@ The dashboard is **one Rust process** with multiple Tokio tasks:
    with the private key.
 4. Load on-disk state (§3) into memory: peers, calibration, joints,
    high_water.
-5. Bind TCP listener on :21042 and HTTP listener on :8080. If either
+5. Bind the unified R2 port listener on :21042. If
    fails, exit with non-zero status — *do not* fall back to alternate
    ports.
 6. Initialise the BLE adapter (do not yet scan).
@@ -235,13 +235,38 @@ dirty state is flushed unconditionally.
 
 ---
 
-## 4. TCP listener (port 21042)
+## 4. R2 port listener (port 21042)
+
+The dashboard binds a **single TCP listener on the canonical R2-WIRE
+port 21042** (per R2-WIRE §13.5 — port 21042 carries R2-WIRE events in
+both raw-TCP and WebSocket form; R2-TRANSPORT §3.5 — WebSocket is just
+an alternative encoding of the same Internet transport). The accept
+loop peek-dispatches each connection:
+
+* First byte in `[A-Z]` (0x41-0x5A) → HTTP request line. The
+  connection is driven by hyper with the axum router as its service;
+  WebSocket upgrade requests (`/ws/raw`, `/ws/logs/{addr}`) are
+  handled inline via `serve_connection.with_upgrades()`. The bulk of
+  this section's §4.x subsections describe that path (HTTP routes,
+  WebSocket message shape, etc.).
+* Otherwise → raw R2-WIRE TCP from a sensor. Sensor frames are
+  length-prefixed per WIRE §13.4 — the first byte is the high byte
+  of a u16 BE length, always `0x00` for our compact frames (< 256
+  bytes total). The connection is handed to `handle_sensor_connection`
+  with TCP keepalive enabled (15 s probe / 5 s interval); see §4.2.
+
+This unification replaces the pre-v0.2 split (TCP/21042 for sensors,
+HTTP/8080 for browsers). The two never collide because HTTP requests
+always start with an ASCII method name and R2-WIRE frames always
+start with the length-prefix high byte.
 
 ### 4.1 Accept loop
 
-The `tcp_listener` task shall accept TCP connections on `0.0.0.0:21042`
-and spawn a `peer_handler` task per connection. The connection is
-unauthenticated until the announce signature verifies (§4.3).
+`run_unified_listener` accepts on `0.0.0.0:21042`, peeks the first
+byte (5 s timeout — generous; both sensors and browsers send their
+first byte well under that), and forks per the rule above. Each
+connection is spawned into its own task so a slow peek doesn't
+block accept.
 
 ### 4.2 Frame decoding
 
@@ -305,7 +330,7 @@ whichever occurs first (per WIRE §4.1).
 
 ---
 
-## 5. HTTP + WebSocket (port 8080)
+## 5. HTTP + WebSocket (unified R2 port 21042)
 
 ### 5.1 HTTP routes
 
@@ -944,7 +969,7 @@ implementing `SPEC-R2-ROCKER-WIRE`):
 
 ### 15.2 UI acceptance
 
-1. Browser at `http://localhost:8080/` loads the SPA in < 1 s on a
+1. Browser at `http://localhost:21042/` loads the SPA in < 1 s on a
    modern laptop.
 2. Per-peer cards update at ≥ 10 Hz; with 30 simulated peers
    transmitting at 100 Hz, the browser's main thread frame rate stays

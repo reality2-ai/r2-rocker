@@ -1555,6 +1555,8 @@ dependencies = [
  "ed25519-dalek",
  "futures-util",
  "hex",
+ "hyper",
+ "hyper-util",
  "image",
  "qrcode",
  "r2-bootstrap",
@@ -1569,6 +1571,7 @@ dependencies = [
  "socket2",
  "tokio",
  "tokio-tungstenite 0.24.0",
+ "tower",
  "tower-http",
 ]
 

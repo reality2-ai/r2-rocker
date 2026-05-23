@@ -203,13 +203,14 @@ fn remap_payload(event_hash: u32, raw: serde_json::Value) -> serde_json::Value {
 #[derive(Parser)]
 #[command(name = "r2-dashboard", about = "R2 sensor dashboard gateway")]
 struct Args {
-    /// HTTP port for the web dashboard
-    #[arg(long, default_value = "8080")]
-    http_port: u16,
-
-    /// TCP port to listen for R2-WIRE events from sensors
+    /// Unified R2 port — carries R2-WIRE events from sensors (raw TCP,
+    /// length-prefixed per R2-WIRE §13.4) AND the browser-facing HTTP +
+    /// WebSocket server (R2-WIRE-over-WS per R2-TRANSPORT §3.5). Per
+    /// R2-WIRE §13.5, both encodings live on the canonical port 21042.
+    /// Each accepted connection is peek-dispatched: HTTP-looking → axum;
+    /// otherwise → raw R2-WIRE sensor handler.
     #[arg(long, default_value = "21042")]
-    event_port: u16,
+    port: u16,
 
     /// Bind address
     #[arg(long, default_value = "0.0.0.0")]
@@ -752,7 +753,7 @@ async fn main() {
     // local_origin is what we'll embed in `url_local` per
     // SPEC-R2-ROCKER-ACCESS §4.1 step 4 — same host:port the webapp is
     // served on.
-    let local_origin = format!("http://{}:{}", args.bind, args.http_port);
+    let local_origin = format!("http://{}:{}", args.bind, args.port);
     let wifi_config_path = if args.wifi_config.is_empty() {
         None
     } else {
@@ -800,12 +801,10 @@ async fn main() {
         eprintln!("[relay] session spawned → {url}");
     }
 
-    // Spawn TCP listener for R2-WIRE events
-    let event_state = state.clone();
-    let event_bind = format!("{}:{}", args.bind, args.event_port);
-    tokio::spawn(async move {
-        run_event_listener(&event_bind, event_state).await;
-    });
+    // R2-WIRE §13.5: port 21042 carries R2-WIRE events in both raw-TCP
+    // (sensor side, length-prefixed) and WebSocket (browser side) form.
+    // Single listener with peek-based protocol detection unifies both —
+    // see the accept loop below.
 
     // HTTP server with WASM viewer + WebSocket + bootstrap API.
     // The legacy `/` HTML dashboard and `/ws` bidirectional channel were
@@ -910,7 +909,7 @@ async fn main() {
 
     let app = app.with_state(state.clone());
 
-    let http_addr: SocketAddr = format!("{}:{}", args.bind, args.http_port)
+    let bind_addr: SocketAddr = format!("{}:{}", args.bind, args.port)
         .parse()
         .expect("valid bind address");
 
@@ -919,26 +918,121 @@ async fn main() {
     eprintln!("╠══════════════════════════════════════════════════════════════╣");
     eprintln!("║  version:    {:<48}║", DASHBOARD_VERSION);
     eprintln!("║  built:      {:<48}║", env!("R2_BUILD_TIMESTAMP"));
-    eprintln!("║  dashboard:  http://{:<41}║", http_addr.to_string());
-    eprintln!("║  events:     tcp/{:<44}║", args.event_port);
+    eprintln!("║  R2 port:    {:<48}║", format!("{} (raw R2-WIRE TCP + HTTP/WS)", bind_addr));
+    eprintln!("║  dashboard:  http://{:<41}║", bind_addr.to_string());
     eprintln!("╚══════════════════════════════════════════════════════════════╝");
 
-    let listener = tokio::net::TcpListener::bind(http_addr).await
+    let listener = tokio::net::TcpListener::bind(bind_addr).await
         .unwrap_or_else(|e| {
-            eprintln!("ERROR: Cannot bind HTTP port {} — {}", http_addr, e);
+            eprintln!("ERROR: Cannot bind R2 port {} — {}", bind_addr, e);
             eprintln!("Is another r2-dashboard already running? Kill it first: pkill r2-dashboard");
             std::process::exit(1);
         });
-    // ConnectInfo<SocketAddr> is required by the /api/access/* handlers
-    // (KeyHolder gating is a localhost-only check in v0.1 per
-    // SPEC-R2-ROCKER-ACCESS §11.1). Without `with_connect_info`, axum
-    // panics when those handlers try to extract.
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await
-    .unwrap();
+    eprintln!("[r2-port] listening on {}", bind_addr);
+
+    run_unified_listener(listener, app, state).await;
+}
+
+/// Single accept loop on the unified R2 port (R2-WIRE §13.5 — port
+/// 21042 carries R2-WIRE events in both raw-TCP and WebSocket form).
+/// Each accepted connection is peeked: HTTP-looking → driven via hyper
+/// with the axum router; otherwise → handed to the existing sensor
+/// TCP handler. Sensor frames are length-prefixed (R2-WIRE §13.4), so
+/// the first byte is always the high byte of a u16 BE length — for
+/// our compact frames (< 256 bytes) that's `0x00`. HTTP request lines
+/// start with ASCII `[A-Z]`. The two never collide.
+async fn run_unified_listener(
+    listener: tokio::net::TcpListener,
+    app: axum::Router<()>,
+    state: Arc<AppState>,
+) {
+    use hyper::body::Incoming;
+    use hyper_util::rt::TokioIo;
+    use hyper_util::service::TowerToHyperService;
+    use tower::ServiceExt;
+
+    loop {
+        let (stream, addr) = match listener.accept().await {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("[r2-port] accept error: {}", e);
+                continue;
+            }
+        };
+        let app_for_conn = app.clone();
+        let state_for_conn = state.clone();
+        tokio::spawn(async move {
+            // Peek the first byte. 5 s is generous — even slow sensors
+            // emit their announce within hundreds of ms of TCP connect.
+            // Browsers send HTTP request lines well under that too.
+            let mut first = [0u8; 1];
+            let peek = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                stream.peek(&mut first),
+            ).await;
+            let n = match peek {
+                Ok(Ok(n)) => n,
+                _ => return, // timeout or read error
+            };
+            if n == 0 { return; }
+
+            if first[0].is_ascii_uppercase() {
+                // HTTP path — drive axum via hyper. Attach ConnectInfo
+                // to every Request so /api/access/* handlers (which
+                // extract `ConnectInfo<SocketAddr>` for the loopback
+                // KeyHolder gate) work as they did under axum::serve.
+                let svc = ServiceExt::<hyper::Request<Incoming>>::map_request(
+                    app_for_conn,
+                    move |mut req: hyper::Request<Incoming>| {
+                        req.extensions_mut().insert(axum::extract::ConnectInfo(addr));
+                        req
+                    },
+                );
+                let hyper_svc = TowerToHyperService::new(svc);
+                let io = TokioIo::new(stream);
+                if let Err(e) = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(io, hyper_svc)
+                    .with_upgrades()
+                    .await
+                {
+                    // Don't log normal client-side closes (broken pipe
+                    // / connection reset) as errors. The hyper error
+                    // type doesn't expose `kind`; match on text.
+                    let msg = format!("{}", e);
+                    if !msg.contains("user code") && !msg.contains("closed") {
+                        eprintln!("[r2-port http] {}: {}", addr, msg);
+                    }
+                }
+            } else {
+                // Raw R2-WIRE TCP — sensor connection. TCP keepalive
+                // catches zombie connections within ~60 s rather than
+                // waiting for the 2-hour OS default. Same shape as the
+                // old run_event_listener applied.
+                eprintln!("[events] sensor connected: {}", addr);
+                let stream = match apply_tcp_keepalive(stream) {
+                    Some(s) => s,
+                    None => return,
+                };
+                handle_sensor_connection(stream, addr, state_for_conn).await;
+            }
+        });
+    }
+}
+
+/// Apply 15 s/5 s TCP keepalive to a freshly-accepted sensor socket.
+/// Lifted out of the former run_event_listener so the unified accept
+/// loop can call it after protocol-detect.
+fn apply_tcp_keepalive(stream: tokio::net::TcpStream) -> Option<tokio::net::TcpStream> {
+    let std_stream = stream.into_std().ok()?;
+    let sock = socket2::Socket::from(std_stream);
+    sock.set_keepalive(true).ok();
+    let ka = socket2::TcpKeepalive::new()
+        .with_time(std::time::Duration::from_secs(15))
+        .with_interval(std::time::Duration::from_secs(5));
+    sock.set_tcp_keepalive(&ka).ok();
+    let std_stream: std::net::TcpStream = sock.into();
+    std_stream.set_nonblocking(true).ok();
+    tokio::net::TcpStream::from_std(std_stream).ok()
 }
 
 /// Shared bootstrap core. Aborts any running discovery task, clears
@@ -1345,48 +1439,10 @@ async fn bootstrap_status_handler(State(state): State<Arc<AppState>>) -> impl In
     }))
 }
 
-/// Listen for TCP connections from sensor nodes
-async fn run_event_listener(bind: &str, state: Arc<AppState>) {
-    let listener = TcpListener::bind(bind).await.unwrap_or_else(|e| {
-        eprintln!("ERROR: Cannot bind event port {} — {}", bind, e);
-        eprintln!("Is another r2-dashboard already running? Kill it first: pkill r2-dashboard");
-        std::process::exit(1);
-    });
-    eprintln!("[events] listening on {}", bind);
-
-    loop {
-        match listener.accept().await {
-            Ok((stream, addr)) => {
-                eprintln!("[events] sensor connected: {}", addr);
-                // Enable TCP keepalive so zombie connections (sensor dropped without
-                // FIN) are detected within ~60s rather than the 2-hour OS default.
-                let stream = {
-                    let std_stream = match stream.into_std() {
-                        Ok(s) => s,
-                        Err(_) => { continue; }
-                    };
-                    let sock = socket2::Socket::from(std_stream);
-                    sock.set_keepalive(true).ok();
-                    let ka = socket2::TcpKeepalive::new()
-                        .with_time(std::time::Duration::from_secs(15))
-                        .with_interval(std::time::Duration::from_secs(5));
-                    sock.set_tcp_keepalive(&ka).ok();
-                    let std_stream: std::net::TcpStream = sock.into();
-                    std_stream.set_nonblocking(true).ok();
-                    match tokio::net::TcpStream::from_std(std_stream) {
-                        Ok(s) => s,
-                        Err(_) => { continue; }
-                    }
-                };
-                let peer_state = state.clone();
-                tokio::spawn(async move {
-                    handle_sensor_connection(stream, addr, peer_state).await;
-                });
-            }
-            Err(e) => eprintln!("[events] accept error: {}", e),
-        }
-    }
-}
+// run_event_listener was a separate TCP listener on port 21042 for
+// sensors, paired with axum::serve on port 8080 for browsers. Replaced
+// by run_unified_listener (above) which serves both on the canonical
+// R2 port 21042 with peek-based protocol detection — R2-WIRE §13.5.
 
 /// Handle a single sensor TCP connection
 async fn handle_sensor_connection(stream: TcpStream, addr: SocketAddr, state: Arc<AppState>) {

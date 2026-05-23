@@ -90,7 +90,7 @@ pub struct InviteEnvelope {
     /// — the modal's mode toggle swaps the displayed QR to this when
     /// the operator picks the "Anywhere" option.
     pub qr_relay_png_data_url: Option<String>,
-    /// `http://<controller_lan_ip>:8080/?join=<tg_hash>.<entropy_hex>` —
+    /// `http://<controller_lan_ip>:21042/?join=<tg_hash>.<entropy_hex>` —
     /// always present.
     pub url_local: String,
     /// Static-host URL — only present if `--relay-url` was configured.
@@ -418,7 +418,7 @@ impl Access {
         // hotspot) can actually reach:
         //   1. Request Host header if it's NOT a loopback name.
         //      Common when the operator opens the dashboard via the
-        //      hotspot IP (10.42.0.1:8080 etc.).
+        //      hotspot IP (10.42.0.1:21042 etc.).
         //   2. Else first non-loopback IPv4 interface address on this
         //      host. Phones on the hotspot reach it on this address.
         //   3. Else the startup-time local_origin as last resort.
@@ -1093,7 +1093,8 @@ fn urlencode(s: &str) -> String {
 /// preference order:
 ///   1. Request Host header, if not loopback.
 ///   2. First non-loopback IPv4 address on any interface on this host,
-///      paired with the dashboard's HTTP port (8080 by default).
+///      paired with the unified R2 port (21042 by default — see
+///      R2-WIRE §13.5).
 ///   3. None — caller falls back to startup-time local_origin.
 fn resolve_public_origin(host_override: Option<&str>) -> Option<String> {
     if let Some(h) = host_override {
@@ -1105,11 +1106,11 @@ fn resolve_public_origin(host_override: Option<&str>) -> Option<String> {
         if let Some(ip) = detect_public_ipv4() {
             let port = h.rsplit(':').next()
                 .and_then(|p| p.parse::<u16>().ok())
-                .unwrap_or(8080);
+                .unwrap_or(21042);
             return Some(format!("http://{}:{}", ip, port));
         }
     }
-    detect_public_ipv4().map(|ip| format!("http://{}:8080", ip))
+    detect_public_ipv4().map(|ip| format!("http://{}:21042", ip))
 }
 
 fn is_loopback_host(host_port: &str) -> bool {
