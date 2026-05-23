@@ -2568,6 +2568,8 @@ async fn dispatch_cmd_frame(state: &Arc<AppState>, peer_addr: SocketAddr, body: 
             return;
         }
     };
+    eprintln!("[ws/raw inbound] event_hash=0x{:08x} req_id={} from {}",
+              event_hash, req_id, peer_addr);
     match event_hash {
         DASH_CMD_CAPTURE_START => {
             let _peers = do_capture_start(state).await;
@@ -2625,8 +2627,11 @@ async fn dispatch_cmd_frame(state: &Arc<AppState>, peer_addr: SocketAddr, body: 
             }
         }
         DASH_CMD_BOOTSTRAP => {
+            eprintln!("[ws/raw cmd] bootstrap: calling do_bootstrap req_id={}", req_id);
             do_bootstrap(state).await;
+            eprintln!("[ws/raw cmd] bootstrap: do_bootstrap returned, emitting response req_id={}", req_id);
             emit_cmd_response(state, req_id, "ok", Some("started"), "bootstrap");
+            eprintln!("[ws/raw cmd] bootstrap: response emitted req_id={}", req_id);
         }
         DASH_CMD_DEVICE_ALIAS_SET => {
             let device_pk = payload.get("1").and_then(|v| v.as_str()).unwrap_or("");
@@ -2904,15 +2909,29 @@ async fn handle_ws_raw(mut socket: WebSocket, state: Arc<AppState>, peer_addr: S
             frame_msg = rx.recv() => {
                 match frame_msg {
                     Ok(rf) => {
+                        // Surface cmd.response and unknown low-volume events
+                        // for the Track C migration triage. Acceleration (~10
+                        // Hz × N peers) is too noisy; suppress it explicitly.
+                        if rf.frame.len() >= 8 {
+                            let h = u32::from_be_bytes([rf.frame[4], rf.frame[5], rf.frame[6], rf.frame[7]]);
+                            if h != ACCELERATION {
+                                eprintln!("[ws/raw outbound] event_hash=0x{:08x} src={} to {}",
+                                          h, rf.src, peer_addr);
+                            }
+                        }
                         let envelope = encode_raw_frame_envelope(&rf);
                         if socket.send(Message::Binary(envelope.into())).await.is_err() {
+                            eprintln!("[ws/raw outbound] socket.send FAILED for {} — viewer gone", peer_addr);
                             break;
                         }
                     }
                     // Lagged — viewer fell behind. Skip the gap; live data
                     // is preferred over backfill on the live wire (the
                     // SD ring is the durability layer).
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        eprintln!("[ws/raw outbound] viewer {} LAGGED by {} frames", peer_addr, n);
+                        continue;
+                    }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
