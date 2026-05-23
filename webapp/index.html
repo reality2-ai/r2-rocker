@@ -1356,20 +1356,10 @@ function startBootstrap() {
   panel.classList.add('visible');
   document.getElementById('bootstrap-log').innerHTML = '';
 
-  fetch('/api/bootstrap', { method: 'POST' })
-    .then(r => {
-      if (r.status === 409) {
-        addBootstrapLine('Already connecting…', 'amber');
-        resetConnectButton();
-      } else if (!r.ok) {
-        r.text().then(t => addBootstrapLine('Error: ' + t, 'red'));
-        resetConnectButton();
-      }
-    })
-    .catch(e => {
-      addBootstrapLine('Fetch error: ' + e.message, 'red');
-      resetConnectButton();
-    });
+  sendCmd('bootstrap').catch(e => {
+    addBootstrapLine('Error: ' + (e.message || e), 'red');
+    resetConnectButton();
+  });
 }
 
 
@@ -2084,11 +2074,13 @@ function cborEncodeMap(entries) {
 // received that would populate the map (the map is built from
 // inbound traffic).
 const CMD_HASHES = {
-  'capture.start': 0x6d1a1639,
-  'capture.mark':  0xcde3e84e,
-  'capture.stop':  0x3a7d7a93,
-  'reset':         0x2034348e,
-  'identify':      0xe6b434ff,
+  'capture.start':    0x6d1a1639,
+  'capture.mark':     0xcde3e84e,
+  'capture.stop':     0x3a7d7a93,
+  'reset':            0x2034348e,
+  'identify':         0xe6b434ff,
+  'bootstrap':        0x32cb97d3,
+  'device.alias.set': 0x39cbe30d,
 };
 const CMD_RESPONSE_HASH = 0x4bf7986c;
 let _nextCmdReqId = 1;
@@ -2813,16 +2805,7 @@ async function renameSensor(addr) {
   );
   if (next === null) return; // cancelled
   try {
-    const res = await fetch('/api/devices/alias', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ device_pk: s.devicePk, name: next.trim() }),
-    });
-    if (!res.ok) {
-      const t = await res.text();
-      alert(`Couldn’t set alias: ${t}`);
-      return;
-    }
+    await sendCmd('device.alias.set', [[1, s.devicePk], [2, next.trim()]]);
     // Optimistic local update — the WS broadcast will re-confirm.
     if (next.trim()) {
       _deviceAliases[s.devicePk] = next.trim();
@@ -2831,7 +2814,7 @@ async function renameSensor(addr) {
     }
     applyAliasesToAllSensors();
   } catch (err) {
-    alert(`Network error: ${err}`);
+    alert(`Couldn’t set alias: ${err.message || err}`);
   }
 }
 

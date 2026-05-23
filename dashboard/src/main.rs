@@ -88,6 +88,8 @@ const DASH_CMD_CAPTURE_MARK:  u32 = r2_fnv::fnv1a_32(b"r2.dash.cmd.capture.mark"
 const DASH_CMD_CAPTURE_STOP:  u32 = r2_fnv::fnv1a_32(b"r2.dash.cmd.capture.stop");
 const DASH_CMD_RESET:         u32 = r2_fnv::fnv1a_32(b"r2.dash.cmd.reset");
 const DASH_CMD_IDENTIFY:      u32 = r2_fnv::fnv1a_32(b"r2.dash.cmd.identify");
+const DASH_CMD_BOOTSTRAP:     u32 = r2_fnv::fnv1a_32(b"r2.dash.cmd.bootstrap");
+const DASH_CMD_DEVICE_ALIAS_SET: u32 = r2_fnv::fnv1a_32(b"r2.dash.cmd.device.alias.set");
 const DASH_CMD_RESPONSE:      u32 = r2_fnv::fnv1a_32(b"r2.dash.cmd.response");
 
 /// Map hash → human-readable name shipped to the browser.
@@ -932,8 +934,13 @@ async fn main() {
     .unwrap();
 }
 
-/// POST /api/bootstrap — trigger sensor bootstrap (re-pressing cancels and restarts)
-async fn bootstrap_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+/// Shared bootstrap core. Aborts any running discovery task, clears
+/// the log, cycles the AP, and spawns a fresh discovery cycle.
+/// Returns immediately after scheduling — discovery progress streams
+/// via `r2.dash.bootstrap.progress`. Fire-and-forget by design; the
+/// only synchronous failure mode is task-spawn refusal which doesn't
+/// happen in practice on tokio.
+async fn do_bootstrap(state: &Arc<AppState>) {
     // Abort any existing bootstrap task and wait for it to clean up
     {
         let mut task = state.bootstrap_task.lock().await;
@@ -951,7 +958,7 @@ async fn bootstrap_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
         let mut log = state.bootstrap_log.lock().await;
         log.clear();
     }
-    emit_bootstrap_progress(&state, "Reset", None);
+    emit_bootstrap_progress(state, "Reset", None);
 
     let config = BootstrapConfig {
         ssid: None,
@@ -1018,7 +1025,11 @@ async fn bootstrap_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
         // Drop tx to signal the relay task to finish
     });
     *state.bootstrap_task.lock().await = Some(bootstrap_handle);
+}
 
+/// `POST /api/bootstrap` — legacy HTTP entry.
+async fn bootstrap_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    do_bootstrap(&state).await;
     (
         axum::http::StatusCode::OK,
         Json(serde_json::json!({ "status": "started" })),
@@ -2584,6 +2595,18 @@ async fn dispatch_cmd_frame(state: &Arc<AppState>, body: &[u8]) {
                 Err(msg) => emit_cmd_response(state, req_id, "err", Some(&msg), "identify"),
             }
         }
+        DASH_CMD_BOOTSTRAP => {
+            do_bootstrap(state).await;
+            emit_cmd_response(state, req_id, "ok", Some("started"), "bootstrap");
+        }
+        DASH_CMD_DEVICE_ALIAS_SET => {
+            let device_pk = payload.get("1").and_then(|v| v.as_str()).unwrap_or("");
+            let name = payload.get("2").and_then(|v| v.as_str()).unwrap_or("");
+            match do_device_alias_set(state, device_pk, name).await {
+                Ok(_) => emit_cmd_response(state, req_id, "ok", None, "device.alias.set"),
+                Err(msg) => emit_cmd_response(state, req_id, "err", Some(&msg), "device.alias.set"),
+            }
+        }
         _ => {
             // Unknown hash — log and drop per WIRE §2 "non-actionable".
             // No response emitted, per §2.1's failure-modes table.
@@ -3714,44 +3737,55 @@ async fn device_aliases_get_handler(State(state): State<Arc<AppState>>) -> impl 
 /// `POST /api/devices/alias` `{device_pk, name}` — set / clear an
 /// alias. Empty / null name clears. Broadcasts on /ws/status so
 /// every connected dashboard browser picks up the change.
-async fn device_alias_set_handler(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    let device_pk = body.get("device_pk").and_then(|v| v.as_str())
-        .map(|s| s.to_string()).unwrap_or_default();
-    let name = body.get("name").and_then(|v| v.as_str())
-        .map(|s| s.trim().to_string()).unwrap_or_default();
+/// Shared device-alias set/clear core. Returns `Ok(final_name)` —
+/// empty string means the alias was cleared. `Err(msg)` on validation
+/// failure. Persists to disk and emits `r2.dash.device.alias.changed`
+/// on success.
+async fn do_device_alias_set(
+    state: &Arc<AppState>,
+    device_pk: &str,
+    name: &str,
+) -> Result<String, String> {
     if device_pk.is_empty() {
-        return (axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "device_pk required"})));
+        return Err("device_pk required".to_string());
     }
-    // Light validation — device_pk should be 32-byte Ed25519 pk in hex.
     if device_pk.len() != 64 || !device_pk.chars().all(|c| c.is_ascii_hexdigit()) {
-        return (axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "device_pk must be 64 hex chars"})));
+        return Err("device_pk must be 64 hex chars".to_string());
     }
+    let trimmed = name.trim().to_string();
     let map_snapshot;
     {
         let mut g = state.device_aliases.lock().await;
-        if name.is_empty() {
-            g.remove(&device_pk);
+        if trimmed.is_empty() {
+            g.remove(device_pk);
         } else {
-            // Cap at a sensible length — surfaces in CSV filenames so
-            // we don't want path-busting characters either.
-            let clean: String = name.chars()
+            // Cap + sanitise — surfaces in CSV filenames so no
+            // path-busting characters.
+            let clean: String = trimmed.chars()
                 .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == ' ')
                 .take(64).collect();
-            g.insert(device_pk.clone(), clean);
+            g.insert(device_pk.to_string(), clean);
         }
         map_snapshot = g.clone();
     }
     save_device_aliases(&map_snapshot);
-    // Broadcast so every dashboard browser updates in place — no
-    // full reload needed.
-    let name = map_snapshot.get(&device_pk).cloned().unwrap_or_default();
-    emit_device_alias_changed(&state, &device_pk, &name);
-    (axum::http::StatusCode::OK, Json(serde_json::json!({"ok": true})))
+    let final_name = map_snapshot.get(device_pk).cloned().unwrap_or_default();
+    emit_device_alias_changed(state, device_pk, &final_name);
+    Ok(final_name)
+}
+
+/// `POST /api/devices/alias` — legacy HTTP entry.
+async fn device_alias_set_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let device_pk = body.get("device_pk").and_then(|v| v.as_str()).unwrap_or("");
+    let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    match do_device_alias_set(&state, device_pk, name).await {
+        Ok(_) => (axum::http::StatusCode::OK, Json(serde_json::json!({"ok": true}))),
+        Err(msg) => (axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": msg}))),
+    }
 }
 
 fn parse_row_ts_ms(row: &[u8]) -> Option<i64> {
