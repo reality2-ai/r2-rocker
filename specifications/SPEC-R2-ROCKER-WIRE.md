@@ -124,6 +124,8 @@ multi-sensor receive path on dashboard port 21042.
 | 30 | `r2.dash.cmd.capture.mark`  | viewer → controller | Operator action: name a calibration point. Payload `{0: req_id (u32), 1: name (text)}`. Controller fans out row-18 `r2.dash.capture.mark` to all sensors. Replaces `POST /api/capture/mark`. |
 | 31 | `r2.dash.cmd.capture.stop`  | viewer → controller | Operator action: close the capture file. Payload `{0: req_id (u32)}`. Controller fans out row-19 `r2.dash.capture.stop` to all sensors. Replaces `POST /api/capture/stop`. |
 | 32 | `r2.dash.cmd.response` | controller → viewer | Generic operator-action / query response. Payload `{0: req_id (u32), 1: status (text — "ok"\|"err"), 2: message (text, optional), 3: kind (text, e.g. "capture.start")}`. Carried on `/ws/raw`; broadcast to all viewers; correlated by `req_id`. |
+| 33 | `r2.dash.cmd.reset` | viewer → controller | Operator action: soft-reset a sensor. Payload `{0: req_id (u32), 1: addr (text — `ip:port` or bare `ip`)}`. Controller opens a TCP connection to the sensor's reset port (21044) and drives the `r2-esp::reset_tcp` protocol, then emits `r2.dash.cmd.response` with the actual outcome (success or error message). Round-trip up to 8 s. Replaces `POST /api/sensor/{addr}/reset`. |
+| 34 | `r2.dash.cmd.identify` | viewer → controller | Operator action: toggle the sensor's identify LED. Payload `{0: req_id (u32), 1: addr (text), 2: on (bool)}`. Controller queues a `r2.dash.identify_set` frame on the sensor's streaming TCP channel (fire-and-forget); response is "ok" iff the queue accepted. Replaces `POST /api/sensor/{addr}/identify`. |
 
 Implementations MUST treat unknown event hashes as receivable but
 non-actionable — log them and move on; never close the connection over

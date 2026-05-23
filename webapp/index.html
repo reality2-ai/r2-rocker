@@ -2048,8 +2048,13 @@ function cborEncodeText(s) {
   out.set(header, 0); out.set(bytes, header.length);
   return out;
 }
+function cborEncodeBool(b) {
+  // Major type 7 simple values: 0xf4 = false, 0xf5 = true (RFC 8949 §3.3).
+  return new Uint8Array([b ? 0xf5 : 0xf4]);
+}
 function cborEncodeMap(entries) {
-  // entries: [[intKey, value], ...]; value: number → uint, string → text.
+  // entries: [[intKey, value], ...]; value: number → uint, string → text,
+  // bool → simple. Add more major types when a cmd payload needs them.
   const n = entries.length;
   let header;
   if (n <= 23)        header = new Uint8Array([0xa0 + n]);
@@ -2058,8 +2063,9 @@ function cborEncodeMap(entries) {
   const parts = [header];
   for (const [k, v] of entries) {
     parts.push(cborEncodeUint(k));
-    if (typeof v === 'number')      parts.push(cborEncodeUint(v));
-    else if (typeof v === 'string') parts.push(cborEncodeText(v));
+    if (typeof v === 'number')        parts.push(cborEncodeUint(v));
+    else if (typeof v === 'string')   parts.push(cborEncodeText(v));
+    else if (typeof v === 'boolean')  parts.push(cborEncodeBool(v));
     else throw new Error('cbor value type unsupported: ' + typeof v);
   }
   let total = 0; for (const p of parts) total += p.length;
@@ -2081,6 +2087,8 @@ const CMD_HASHES = {
   'capture.start': 0x6d1a1639,
   'capture.mark':  0xcde3e84e,
   'capture.stop':  0x3a7d7a93,
+  'reset':         0x2034348e,
+  'identify':      0xe6b434ff,
 };
 const CMD_RESPONSE_HASH = 0x4bf7986c;
 let _nextCmdReqId = 1;
@@ -4130,15 +4138,13 @@ class R2DeviceCard extends HTMLElement {
 
     let ok = false; let message = '';
     try {
-      const res = await fetch(`/api/sensor/${encodeURIComponent(s.key)}/reset`, { method: 'POST' });
-      const out = await res.json().catch(() => ({}));
-      ok = res.ok && !!out.ok;
-      message = out.message || `HTTP ${res.status}`;
-      r.btnReset.textContent = ok ? '✓ Reset' : '✗ Failed';
-      if (!ok) console.warn('[reset]', s.key, out);
+      const out = await sendCmd('reset', [[1, s.key]]);
+      ok = true;
+      message = out.message || 'reset accepted';
+      r.btnReset.textContent = '✓ Reset';
     } catch (err) {
-      r.btnReset.textContent = '✗ Network error';
-      message = String(err);
+      r.btnReset.textContent = '✗ Failed';
+      message = String(err.message || err);
       console.warn('[reset]', s.key, err);
     }
     setTimeout(() => {
@@ -4168,13 +4174,7 @@ class R2DeviceCard extends HTMLElement {
       }, 60_000);
     }
     try {
-      const res = await fetch(`/api/sensor/${encodeURIComponent(s.key)}/identify`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ on: next }),
-      });
-      const out = await res.json().catch(() => ({}));
-      if (!res.ok || !out.ok) console.warn('[identify]', s.key, out);
+      await sendCmd('identify', [[1, s.key], [2, next]]);
     } catch (err) {
       console.warn('[identify]', s.key, err);
     }

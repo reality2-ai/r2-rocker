@@ -86,6 +86,8 @@ const SENSOR_CAPTURE_STATE:   u32 = r2_fnv::fnv1a_32(b"r2.sensor.capture.state")
 const DASH_CMD_CAPTURE_START: u32 = r2_fnv::fnv1a_32(b"r2.dash.cmd.capture.start");
 const DASH_CMD_CAPTURE_MARK:  u32 = r2_fnv::fnv1a_32(b"r2.dash.cmd.capture.mark");
 const DASH_CMD_CAPTURE_STOP:  u32 = r2_fnv::fnv1a_32(b"r2.dash.cmd.capture.stop");
+const DASH_CMD_RESET:         u32 = r2_fnv::fnv1a_32(b"r2.dash.cmd.reset");
+const DASH_CMD_IDENTIFY:      u32 = r2_fnv::fnv1a_32(b"r2.dash.cmd.identify");
 const DASH_CMD_RESPONSE:      u32 = r2_fnv::fnv1a_32(b"r2.dash.cmd.response");
 
 /// Map hash → human-readable name shipped to the browser.
@@ -1158,24 +1160,34 @@ async fn push_firmware(
 ///
 /// `addr` may be `ip` or `ip:port`; the streaming port is stripped and
 /// 21044 is always used.
-async fn reset_push_handler(
-    State(state): State<Arc<AppState>>,
-    Path(addr): Path<String>,
-) -> impl IntoResponse {
+/// Shared reset core. Returns `Ok((status_byte, message))` on a clean
+/// TCP round-trip (where `status_byte == 0x00` means the sensor
+/// accepted the reset), or `Err(message)` for connect / timeout /
+/// network errors. Either way, `r2.dash.reset.progress` is fired at
+/// each phase boundary.
+async fn do_reset(state: &Arc<AppState>, addr: &str) -> Result<(u8, String), String> {
     use std::net::ToSocketAddrs;
 
-    let ip_only: &str = addr.split(':').next().unwrap_or(&addr);
+    let ip_only: &str = addr.split(':').next().unwrap_or(addr);
     let reset_target = format!("{}:21044", ip_only);
 
     eprintln!("[reset] push to {}", reset_target);
-    emit_reset_progress(&state, "requested", &reset_target, None);
+    emit_reset_progress(state, "requested", &reset_target, None);
 
     let socket = match reset_target.to_socket_addrs() {
         Ok(mut it) => match it.next() {
             Some(a) => a,
-            None    => return reset_err(&state, &reset_target, "no addr resolved"),
+            None    => {
+                let msg = "no addr resolved".to_string();
+                emit_reset_progress(state, "error", &reset_target, Some(&msg));
+                return Err(msg);
+            }
         },
-        Err(e) => return reset_err(&state, &reset_target, &format!("resolve: {e}")),
+        Err(e) => {
+            let msg = format!("resolve: {e}");
+            emit_reset_progress(state, "error", &reset_target, Some(&msg));
+            return Err(msg);
+        }
     };
 
     // 8 s is generous — a healthy sensor responds in <100 ms.
@@ -1189,7 +1201,30 @@ async fn reset_push_handler(
         Ok(Ok((status_byte, msg))) => {
             let ok = status_byte == 0x00; // STATUS_OK in r2-esp::reset_tcp
             let phase = if ok { "applied" } else { "error" };
-            emit_reset_progress(&state, phase, &reset_target, Some(&msg));
+            emit_reset_progress(state, phase, &reset_target, Some(&msg));
+            Ok((status_byte, msg))
+        }
+        Ok(Err(e)) => {
+            let msg = format!("push: {e}");
+            emit_reset_progress(state, "error", &reset_target, Some(&msg));
+            Err(msg)
+        }
+        Err(_) => {
+            let msg = "timed out after 8 s".to_string();
+            emit_reset_progress(state, "error", &reset_target, Some(&msg));
+            Err(msg)
+        }
+    }
+}
+
+/// `POST /api/sensor/{addr}/reset` — legacy HTTP entry.
+async fn reset_push_handler(
+    State(state): State<Arc<AppState>>,
+    Path(addr): Path<String>,
+) -> impl IntoResponse {
+    match do_reset(&state, &addr).await {
+        Ok((status_byte, msg)) => {
+            let ok = status_byte == 0x00;
             (
                 axum::http::StatusCode::OK,
                 Json(serde_json::json!({
@@ -1199,18 +1234,11 @@ async fn reset_push_handler(
                 })),
             )
         }
-        Ok(Err(e)) => reset_err(&state, &reset_target, &format!("push: {e}")),
-        Err(_)     => reset_err(&state, &reset_target, "timed out after 8 s"),
+        Err(msg) => (
+            axum::http::StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"ok": false, "error": msg})),
+        ),
     }
-}
-
-fn reset_err(state: &Arc<AppState>, target: &str, msg: &str) -> (axum::http::StatusCode, Json<serde_json::Value>) {
-    eprintln!("[reset] {} — {}", target, msg);
-    emit_reset_progress(state, "error", target, Some(msg));
-    (
-        axum::http::StatusCode::BAD_GATEWAY,
-        Json(serde_json::json!({"ok": false, "error": msg})),
-    )
 }
 
 /// POST /api/sensor/{addr}/identify  body `{on: bool}` — toggle the
@@ -1218,17 +1246,15 @@ fn reset_err(state: &Arc<AppState>, target: &str, msg: &str) -> (axum::http::Sta
 /// Used to pick a specific board out of a busy rack for a battery
 /// swap or similar. Frame goes out via the streaming-TCP peer
 /// command channel (same path as set_clock_offset / sync_pulse).
-async fn identify_handler(
-    State(state): State<Arc<AppState>>,
-    Path(addr): Path<String>,
-    Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    let on = body.get("on").and_then(|v| v.as_bool()).unwrap_or(false);
-    let ip_only: &str = addr.split(':').next().unwrap_or(&addr);
+/// Shared identify core. Queues a `r2.dash.identify_set` frame on
+/// the named peer's streaming TCP channel. Fire-and-forget — returns
+/// `Ok(())` iff the queue accepted; sensor's own ACK (LED actually
+/// toggled) is not awaited.
+async fn do_identify(state: &Arc<AppState>, addr: &str, on: bool) -> Result<(), String> {
+    let ip_only: &str = addr.split(':').next().unwrap_or(addr);
 
-    // Look up the peer by IP — addr from the URL is what the dashboard
-    // tracks, but state.peers is keyed by SocketAddr (ip:port). Match
-    // on the IP portion.
+    // peers is keyed by SocketAddr (ip:port); the path/event addr is
+    // typically just the IP (or ip:port). Match on the IP portion.
     let tx = {
         let peers = state.peers.read().await;
         peers.iter()
@@ -1236,21 +1262,35 @@ async fn identify_handler(
             .map(|(_, p)| p.tx.clone())
     };
     let Some(tx) = tx else {
-        return (
-            axum::http::StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"ok": false, "error": "no such connected peer"})),
-        );
+        return Err("no such connected peer".to_string());
     };
 
     let frame = build_dash_frame(DASH_IDENTIFY_SET, 0, &encode_identify_set(on));
     if tx.send(frame).await.is_err() {
-        return (
-            axum::http::StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"ok": false, "error": "peer queue closed"})),
-        );
+        return Err("peer queue closed".to_string());
     }
     eprintln!("[identify] {} on={}", ip_only, on);
-    (axum::http::StatusCode::OK, Json(serde_json::json!({"ok": true, "on": on})))
+    Ok(())
+}
+
+/// `POST /api/sensor/{addr}/identify` — legacy HTTP entry.
+async fn identify_handler(
+    State(state): State<Arc<AppState>>,
+    Path(addr): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let on = body.get("on").and_then(|v| v.as_bool()).unwrap_or(false);
+    match do_identify(&state, &addr, on).await {
+        Ok(()) => (axum::http::StatusCode::OK, Json(serde_json::json!({"ok": true, "on": on}))),
+        Err(msg) => {
+            let status = if msg == "no such connected peer" {
+                axum::http::StatusCode::NOT_FOUND
+            } else {
+                axum::http::StatusCode::BAD_GATEWAY
+            };
+            (status, Json(serde_json::json!({"ok": false, "error": msg})))
+        }
+    }
 }
 
 /// Drives the reset protocol from `r2-esp::reset_tcp`:
@@ -2511,6 +2551,38 @@ async fn dispatch_cmd_frame(state: &Arc<AppState>, body: &[u8]) {
         DASH_CMD_CAPTURE_STOP => {
             let _peers = do_capture_stop(state).await;
             emit_cmd_response(state, req_id, "ok", None, "capture.stop");
+        }
+        DASH_CMD_RESET => {
+            let addr = match payload.get("1").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => {
+                    emit_cmd_response(state, req_id, "err", Some("missing addr (key 1)"), "reset");
+                    return;
+                }
+            };
+            match do_reset(state, &addr).await {
+                Ok((status_byte, msg)) if status_byte == 0x00 => {
+                    emit_cmd_response(state, req_id, "ok", Some(&msg), "reset");
+                }
+                Ok((_status_byte, msg)) => {
+                    emit_cmd_response(state, req_id, "err", Some(&msg), "reset");
+                }
+                Err(msg) => emit_cmd_response(state, req_id, "err", Some(&msg), "reset"),
+            }
+        }
+        DASH_CMD_IDENTIFY => {
+            let addr = match payload.get("1").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => {
+                    emit_cmd_response(state, req_id, "err", Some("missing addr (key 1)"), "identify");
+                    return;
+                }
+            };
+            let on = payload.get("2").and_then(|v| v.as_bool()).unwrap_or(false);
+            match do_identify(state, &addr, on).await {
+                Ok(()) => emit_cmd_response(state, req_id, "ok", None, "identify"),
+                Err(msg) => emit_cmd_response(state, req_id, "err", Some(&msg), "identify"),
+            }
         }
         _ => {
             // Unknown hash — log and drop per WIRE §2 "non-actionable".
