@@ -34,24 +34,39 @@ ESP32-S3-DevKitC-1                      r2-rocker dashboard
 + ADXL355-PMDZ        (SPI2)              ├ creates WiFi hotspot
 + microSD breakout    (shared SPI2)       ├ BLE-bootstraps sensors
 + LiPo cell + charger                     ├ TCP receiver :21042
-+ battery sense       (ADC1_CH3)          └ HTTP webapp :8080
-+ on-board RGB LED    (status)
++ battery sense       (ADC1_CH3)          └ Unified R2 port :21042
++ on-board RGB LED    (status)              (HTTP + WS /r2 + raw R2-WIRE
+                                             multiplexed via peek-detect,
+                                             WIRE §13.5)
 
    BLE beacon (R2-BEACON)        →     dashboard scan
    L2CAP listen                  ←     L2CAP connect, #wifi_offer (signed by TG)
-   WiFi join → TCP :21042        →     SENSOR_ANNOUNCE
+   WiFi join → TCP :21042        →     SENSOR_ANNOUNCE (TG-cert-signed)
    sample → SD ring (durable)
         └── network task ────────►     ┌─ multi-peer HashMap
    battery event every 30s ─────►      ├─ per-device cal matrix
                                   ←──  ├─ ACK every 200 ms / 100 samples
-                                  ←──  └─ cal/stream/sync commands
-                                       └→ browser at :8080
+                                  ←──  └─ cmd events (r2.dash.cmd.*)
+                                       └→ browser at :21042
+                                          (R2RockerHive + ViewerSentant
                                           (grid · canvas · joint groups
                                            · pairwise differential
                                            · stress indicator · trend)
 ```
 
 ## 3. Phasing
+
+> **v0.2.0 status note (2026-05-24):** The architectural-gaps roadmap
+> (`audits/2026-05-23-architectural-gaps.md`, Tracks A/B/C/D) has
+> landed in v0.2.0. Sensors are now formal TG members with KeyHolder-
+> signed `DeviceCertificate`s; the webapp runs an `R2RockerHive`
+> with a `DashboardViewerSentant`; the operator plane that used to
+> ride as ~17 `POST /api/*` routes + a `/ws/status` JSON channel
+> now rides as `r2.dash.cmd.*` and `r2.dash.*.progress` R2-WIRE
+> events on the unified `/r2` WebSocket; the dashboard listener
+> unified on TCP `:21042` with peek-based protocol detect (WIRE
+> §13.5). The row-level statuses below predate that arc — many ⏳
+> items are now ✅ but await a deliberate plan refresh.
 
 Status: ✅ done · 🔄 in progress · ⏳ pending · ⏸ blocked
 
