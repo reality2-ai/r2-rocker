@@ -2151,15 +2151,19 @@ fn decode_cmd_frame(body: &[u8]) -> Option<(u32, u32, serde_json::Value)> {
 }
 
 fn emit_bootstrap_progress(state: &Arc<AppState>, kind: &str, data: Option<&str>) {
-    // Legacy JSON (matches existing webapp handler shape).
-    let legacy = if kind == "Reset" {
-        serde_json::json!({ "type": "bootstrap", "event": { "Reset": null } })
-    } else if let Some(d) = data {
-        serde_json::json!({ "type": "bootstrap", "event": { "kind": kind, "data": d } })
-    } else {
-        serde_json::json!({ "type": "bootstrap", "event": { "kind": kind } })
-    };
-    let _ = state.ws_broadcast_tx.send(legacy.to_string());
+    // Legacy JSON path — emitted only for `Reset`, where this is the
+    // sole source. For every other variant the bootstrap relay task at
+    // do_bootstrap:998 already broadcasts the structured serde-tagged
+    // `BootstrapEvent` JSON ({kind, data: {addr, name, ...}}), and the
+    // webapp's handleBootstrapEvent expects that exact shape. Emitting
+    // a second flattened-string-data form here duplicated every line
+    // in the bootstrap-log panel and rendered "Found sensor: undefined"
+    // because `evt.data.addr` on a string is undefined. R2-WIRE is
+    // still emitted unconditionally below — that's our forward path.
+    if kind == "Reset" {
+        let legacy = serde_json::json!({ "type": "bootstrap", "event": { "Reset": null } });
+        let _ = state.ws_broadcast_tx.send(legacy.to_string());
+    }
 
     let mut buf = vec![0u8; 64 + kind.len() + data.map(|s| s.len()).unwrap_or(0)];
     let mut enc = r2_cbor::Encoder::new(&mut buf);
