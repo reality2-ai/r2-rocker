@@ -145,6 +145,22 @@ pub async fn run_bootstrap(
     // One-time WiFi setup
     let (ssid, psk, our_ip) = setup_wifi_credentials(&config, &progress_tx).await?;
 
+    // Settle window after cycle_hotspot — without this, the main loop's
+    // first `get_active_sensor_ips()` check below catches the *zombie*
+    // TCP connections to sensors that just lost WiFi: the kernel still
+    // shows them ESTABLISHED until the dashboard's 5 s read-timeout in
+    // handle_sensor_connection notices the silence and drops them.
+    // Bootstrap then counts those zombies as "currently streaming",
+    // goes into `scan_quiet_for_300s` mode, and the sensor sits in
+    // ADVERTISING forever with nobody scanning. 8 s is enough margin
+    // over the 5 s read-timeout — verified bench-test 2026-05-23.
+    if config.cycle_hotspot {
+        let _ = progress_tx.send(BootstrapEvent::Log(
+            "Settling — waiting for cycled-out sensors to clear TCP state...".into()
+        )).await;
+        tokio::time::sleep(Duration::from_secs(8)).await;
+    }
+
     // Shared UDP presence dispatcher: bind socket once, broadcast all packets.
     // Per-sensor tasks subscribe and filter by their own RBID.
     // Use AbortOnDrop so the task is cancelled when run_bootstrap is aborted —
